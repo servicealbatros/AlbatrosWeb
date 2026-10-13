@@ -98,8 +98,22 @@ def probe_browser():
         if page.title() != 'Albatros Linux probe':
             raise RuntimeError('Browser commands failed')
         page.close()
+        # Public landing pages only: no provider login, VIN lookup or writes.
+        reachability = {}
+        for name, url in [('dsm', 'https://apps.dsmpro.ro/'),
+                          ('autototal', 'https://www3.eoriginal.ro/'),
+                          ('intercars', 'https://ro.e-cat.intercars.eu/')]:
+            page = context.new_page()
+            try:
+                response = page.goto(url, wait_until='domcontentloaded', timeout=20000)
+                reachability[name] = {'http_status': response.status if response else None,
+                                      'authenticated': False}
+            except Exception as error:
+                reachability[name] = {'error': type(error).__name__, 'authenticated': False}
+            finally:
+                page.close()
         REPORT.update(phase='browser_ready', chromium=True, cdp=True, intercars_extension=True,
-                      provider_sessions='not_authenticated')
+                      provider_sessions='not_authenticated', public_provider_pages=reachability)
         print(json.dumps(REPORT), flush=True)
 
 

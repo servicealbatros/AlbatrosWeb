@@ -11,6 +11,7 @@ COPY *.py ./
 COPY static ./static
 COPY edge_robot_extension_V6_TALON_MATCH ./edge_robot_extension_V6_TALON_MATCH
 COPY scripts/render_robot_runtime.py ./scripts/render_robot_runtime.py
+RUN python -m unittest test_render_runtime.py test_reception_bridge.py test_cloud_access.py
 RUN useradd --create-home --uid 10001 albatros \
     && mkdir -p /var/data/albatros && chown -R albatros:albatros /var/data/albatros /app
 USER albatros

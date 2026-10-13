@@ -148,12 +148,14 @@ async def snapshot():
          &&/autent|sign in|log in|login|conect|password|parol/i.test(body.innerText))roots.push({f:body,index:-1});
       return roots.map(({f,index})=>{
       const login=/autent|login|log in|sign in|conect|password|parol|utilizator|username|verification|verify|otp|cod.*confirm/i.test(f.innerText)
-         ||!!f.querySelector('input[type=password]');
+         ||!!f.querySelector('input[type=password]')
+         ||(/autent|login|log in|sign in|conect/i.test(body.innerText)
+            &&[...f.querySelectorAll('input')].some(identity));
       if(!login||!shown(f))return null;
       const fields=[...f.querySelectorAll('input')].map((e,i)=>({index:i,type:e.type,
         label:e.labels?.[0]?.innerText||e.placeholder||e.name||e.type,visible:shown(e)}))
         .filter(e=>e.visible&&['text','email','password','tel','number'].includes(e.type));
-      const newDevice=/dispozitiv nou|dispozitiv[/]browser nou|new device/i.test(f.innerText)
+      const newDevice=/dispozitiv nou|dispozitiv[/]browser nou|new device/i.test(body.innerText)
         &&fields.length===1&&/denumire|device.*name/i.test(fields[0].label);
       const buttons=[...f.querySelectorAll('button,input[type=submit]')].map((e,i)=>({index:i,
         text:e.innerText||e.value||'Autentificare',visible:shown(e)})).filter(e=>e.visible&&

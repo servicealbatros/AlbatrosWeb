@@ -5,7 +5,9 @@ Render website and authenticated reception are deployed. The current operational
 ## Public website
 
 Render Static Site serves `website/dist` at `servicealbatros.ro` and `www.servicealbatros.ro`.
-It contains workshop presentation only, with approved photos and contact details. Until DNS is delegated, the login link uses the live Render backend URL.
+It contains workshop presentation only, with approved photos and contact details.
+DNS and HTTPS are verified for servicealbatros.ro, www.servicealbatros.ro and
+app.servicealbatros.ro. The public login link points to the application domain.
 
 ## Backend
 
@@ -39,6 +41,8 @@ Scheduled processing uses the Romania timezone; preserve existing client-notific
 
 Render must be connected to the GitHub provider, not just a public repository URL.
 Both services track `main` with `autoDeployTrigger: commit`.
+The website builds only for website/** changes; the backend ignores website/**.
+These filters are configured on the live services and in render.yaml.
 Audit and add only source files; exclude .env, browser profiles, database dumps, recordings and exports.
 Confirm the selected paid backend/disk costs before provisioning them.
 Apply `render.yaml`, supply secrets through Render, verify deploys, then configure DNS using

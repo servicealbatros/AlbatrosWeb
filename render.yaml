@@ -6,6 +6,10 @@ services:
     branch: main
     autoDeployTrigger: commit
     buildCommand: "true"
+    buildFilter:
+      paths:
+        - website/**
+      ignoredPaths: []
     staticPublishPath: website/dist
     domains:
       - servicealbatros.ro
@@ -25,6 +29,10 @@ services:
     plan: starter
     region: frankfurt
     autoDeployTrigger: commit
+    buildFilter:
+      paths: []
+      ignoredPaths:
+        - website/**
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn cloud_app:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips='*'
     healthCheckPath: /health

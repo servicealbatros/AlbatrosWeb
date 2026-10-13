@@ -156,7 +156,9 @@ async def security_rate_limit(request: Request, call_next):
             return JSONResponse({'detail': 'Invalid bridge request'}, status_code=403)
     forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
     client = forwarded or (request.client.host if request.client else "unknown")
-    local_client = (not env_bool("ALBATROS_CLOUD_MODE", False)
+    private_worker_listener = (env_bool('ALBATROS_INTERNAL_WORKER_API', False)
+                               and (request.scope.get('server') or (None, None))[1] == 8010)
+    local_client = ((not env_bool("ALBATROS_CLOUD_MODE", False) or private_worker_listener)
                     and not forwarded and client in {"127.0.0.1", "::1", "testclient"})
     request.state.dashboard_user = bridge_user or ("local_dashboard" if local_client else None)
     remote_dashboard_path = request.url.path.startswith("/receptie/")
@@ -408,7 +410,8 @@ def cloud_runtime_status(authorization: str | None = Header(default=None)):
     if not path.is_file():
         return {'phase': 'not_configured', 'independent_cloud_runtime': False}
     report = json.loads(path.read_text(encoding='utf-8'))
-    report['independent_cloud_runtime'] = env_bool('ALBATROS_GATEWAY_ONLY', False)
+    report['independent_cloud_runtime'] = (env_bool('ALBATROS_GATEWAY_ONLY', False)
+                                          or env_bool('ALBATROS_INTERNAL_WORKER_API', False))
     report['robot_enabled'] = POLICY.robot_enabled
     return report
 

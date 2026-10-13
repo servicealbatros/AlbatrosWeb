@@ -150,8 +150,7 @@ def main():
         os.environ.setdefault('ALBATROS_DATA_DIR', '/var/data/albatros')
         if not os.getenv('RECEPTION_BRIDGE_SECRET'):
             os.environ['RECEPTION_BRIDGE_SECRET'] = secrets.token_urlsafe(48)
-        core = spawn([sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1',
-                      '--port', '8010', '--workers', '1', '--no-proxy-headers'], core_environment())
+        core = spawn([sys.executable, str(BASE / 'scripts/render_single_app.py')], core_environment())
         wait_url('http://127.0.0.1:8010/health')
     else:
         server = ThreadingHTTPServer(('0.0.0.0', int(os.getenv('PORT', '10000'))), ProbeHandler)
@@ -164,14 +163,6 @@ def main():
         print(json.dumps(REPORT), flush=True)
         if production:
             stop()
-    if production:
-        env = os.environ.copy()
-        env.update(ALBATROS_CLOUD_MODE='true', ALBATROS_GATEWAY_ONLY='true',
-                   ALBATROS_INTERNAL_BRIDGE='true', RECEPTION_BRIDGE_URL='http://127.0.0.1:8010',
-                   ROBOT_ENABLED='false')
-        spawn([sys.executable, '-m', 'uvicorn', 'cloud_app:app', '--host', '0.0.0.0',
-               '--port', os.getenv('PORT', '10000'), '--workers', '1', '--proxy-headers',
-               '--forwarded-allow-ips=*'], env)
     while True:
         if any(process.poll() is not None for process in CHILDREN):
             print('An owned component exited; stopping the service', flush=True)

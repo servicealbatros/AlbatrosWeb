@@ -30,6 +30,18 @@ from security import POLICY
 
 
 class CloudAccessTests(unittest.TestCase):
+    def test_private_worker_listener_never_opens_public_gateway(self):
+        from unittest.mock import patch
+        from cloud_app import backend
+        with patch.dict(os.environ, {'ALBATROS_INTERNAL_WORKER_API': 'true'}):
+            private = TestClient(backend, base_url='http://127.0.0.1:8010')
+            public = TestClient(backend, base_url='http://127.0.0.1:10000')
+            gateway = TestClient(app, base_url='https://app.servicealbatros.ro:8010')
+            self.assertEqual(private.get('/api/robot/health').status_code, 200)
+            self.assertEqual(public.get('/api/robot/health').status_code, 403)
+            self.assertEqual(private.get('/api/robot/health', headers={'X-Forwarded-For': '203.0.113.9'}).status_code, 403)
+            self.assertEqual(gateway.get('/api/robot/health').status_code, 401)
+
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app, base_url="https://app.servicealbatros.ro")

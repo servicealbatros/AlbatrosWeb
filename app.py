@@ -399,6 +399,18 @@ def health():
     return {"ok": True, "robot_enabled": POLICY.robot_enabled, "beta_mode": POLICY.beta_mode}
 
 
+@app.get('/api/admin/cloud-runtime')
+def cloud_runtime_status(authorization: str | None = Header(default=None)):
+    _admin_user(authorization)
+    path = DATA_DIR / 'render_runtime_health.json'
+    if not path.is_file():
+        return {'phase': 'not_configured', 'independent_cloud_runtime': False}
+    report = json.loads(path.read_text(encoding='utf-8'))
+    report['independent_cloud_runtime'] = env_bool('ALBATROS_GATEWAY_ONLY', False)
+    report['robot_enabled'] = POLICY.robot_enabled
+    return report
+
+
 @app.get("/api/admin/metrics")
 def admin_metrics(authorization: str | None = Header(None)):
     _admin_user(authorization)

@@ -78,7 +78,7 @@ def browser_command(executable, profile):
             'about:blank']
 
 
-def probe_browser():
+def probe_browser(keep_provider_tabs=False):
     from playwright.sync_api import sync_playwright
     os.environ['DISPLAY'] = ':99'
     spawn(['Xvfb', ':99', '-screen', '0', '1440x900x24', '-nolisten', 'tcp'])
@@ -118,10 +118,14 @@ def probe_browser():
             except Exception as error:
                 reachability[name] = {'error': type(error).__name__, 'authenticated': False}
             finally:
-                page.close()
+                if not keep_provider_tabs:
+                    page.close()
         REPORT.update(phase='browser_ready', chromium=True, cdp=True, intercars_extension=True,
                       provider_sessions='not_authenticated', public_provider_pages=reachability)
         print(json.dumps(REPORT), flush=True)
+        if keep_provider_tabs:
+            path = Path(os.environ['ALBATROS_DATA_DIR']) / 'render_runtime_health.json'
+            path.write_text(json.dumps(REPORT), encoding='utf-8')
 
 
 def core_environment():
@@ -143,6 +147,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
     production = os.getenv('ALBATROS_RENDER_MODE', 'probe') == 'production'
     if production:
+        os.environ.setdefault('ALBATROS_DATA_DIR', '/var/data/albatros')
         if not os.getenv('RECEPTION_BRIDGE_SECRET'):
             os.environ['RECEPTION_BRIDGE_SECRET'] = secrets.token_urlsafe(48)
         core = spawn([sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1',
@@ -153,7 +158,7 @@ def main():
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print('Compatibility probe HTTP endpoint is ready', flush=True)
     try:
-        probe_browser()
+        probe_browser(keep_provider_tabs=production)
     except Exception as error:
         REPORT.update(phase='failed', error=type(error).__name__ + ': ' + str(error)[:250])
         print(json.dumps(REPORT), flush=True)

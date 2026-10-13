@@ -1,0 +1,73 @@
+services:
+  - type: web
+    name: albatros-web
+    runtime: static
+    repo: https://github.com/servicealbatros/AlbatrosWeb
+    branch: main
+    autoDeployTrigger: commit
+    buildCommand: "true"
+    staticPublishPath: website/dist
+    domains:
+      - servicealbatros.ro
+      - www.servicealbatros.ro
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+  - type: web
+    name: albatros-backend
+    runtime: python
+    repo: https://github.com/servicealbatros/AlbatrosWeb
+    branch: main
+    plan: starter
+    region: frankfurt
+    autoDeployTrigger: commit
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn cloud_app:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips='*'
+    healthCheckPath: /health
+    domains:
+      - app.servicealbatros.ro
+    disk:
+      name: albatros-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: TZ
+        value: Europe/Bucharest
+      - key: ALBATROS_DATA_DIR
+        value: /var/data/albatros
+      - key: ALBATROS_OFFERING_DIR
+        value: /var/data/albatros/offering
+      - key: ROBOT_ENABLED
+        value: "false"
+      - key: BETA_MODE
+        value: "true"
+      - key: ALLOW_REMOTE_DASHBOARD
+        value: "true"
+      - key: ALLOWED_RECEPTION_IPS
+        value: ""
+      - key: DASHBOARD_COOKIE_SECURE
+        value: "true"
+      - key: DASHBOARD_SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_API_TOKEN
+        generateValue: true
+      - key: RECEPTION_DASHBOARD_USER
+        value: consilier
+      - key: RECEPTION_DASHBOARD_PASSWORD
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false

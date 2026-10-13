@@ -1,0 +1,10 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+openai-agents==0.22.2
+openai==3.13.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+pydantic==2.13.5
+httpx==0.28.1
+websockets==16.1.1
+playwright==1.62.0

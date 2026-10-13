@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+data
+*.db
+*.sqlite*
+*.jsonl
+__pycache__
+intercars_output
+technician_output
+tecrmi_output
+output
+vision_debug
+browser_profiles
+**/*profile*
+*.zip
+*.tar.gz

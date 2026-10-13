@@ -186,9 +186,14 @@ async def submit(body: Submit, request: Request):
         if not set(body.fields).issubset(valid_fields) or any(len(value) > 512 for value in body.fields.values()):
             raise HTTPException(422, 'Invalid login fields')
         locator = _page.locator('body') if body.form == -1 else _page.locator('form').nth(body.form)
-        for index, value in body.fields.items():
-            await locator.locator('input').nth(int(index)).fill(value)
-        await locator.locator('button,input[type=submit]').nth(body.button).click(timeout=15000)
+        try:
+            for index, value in body.fields.items():
+                await locator.locator('input').nth(int(index)).fill(value, timeout=15000)
+            await locator.locator('button,input[type=submit]').nth(body.button).click(timeout=15000)
+        except Exception:
+            # Don't let a browser exception include entered credentials in
+            # an application traceback or return them to the console.
+            raise HTTPException(502, 'Formularul nu a răspuns. Actualizează ecranul și verifică autentificarea.') from None
         await asyncio.sleep(2)
         return await snapshot()
 

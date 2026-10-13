@@ -7,7 +7,7 @@ Render website and authenticated reception are deployed. The current operational
 ### Supplier authentication test in progress
 
 The owner approved entering supplier credentials personally in the protected
-test console. `ALBATROS_PROVIDER_TEST_CONSOLE=true` is set on the FREE test
+test console. `ALBATROS_PROVIDER_TEST_CONSOLE=true` is set on the isolated test
 service only. `/api/admin/provider-test-grant` requires the test administrator
 token; a single-use two-minute grant unlocks a secure, HttpOnly, same-site cookie
 for 30 minutes. The cookie only unlocks login/verification forms and known
@@ -20,15 +20,20 @@ private loopback worker API on 8010 and the authenticated public gateway on PORT
 Application startup/background tasks run only once. Tests explicitly verify that
 the private-listener trust cannot open the public gateway or forwarded requests.
 The private X display now verifies an active socket instead of a stale filename.
-25 tests passed. The browser/CDP/extension are ready and the DSM login form at
-appm.dsmpro.ro is visibly loaded in the console. Supplier authentication and a
-complete offer have NOT yet passed; the user must finish DSM authentication.
+30 tests passed, including real Chromium fixtures for email-first login and
+new-device confirmation. Human-operated reCAPTCHA clicks are restricted to the
+currently visible trusted CAPTCHA frame; automatic challenge solving is absent.
+AutoTotal login and its new-device confirmation reached the authenticated
+eOriginal homepage. DSM login reached QService and a read-only lookup in Render
+identified B103TST / WBA00000000000001 / BMW 5 (F10). These sessions need renewal
+after deployment because the test browser profile is ephemeral. Inter Cars and
+Haynes authentication, and complete parts/labour offering, remain unverified.
 
 The isolated case is based on request 37 (B103TST, BMW 5 F10): engine oil,
 oil/air/fuel/cabin filters, mandatory drain plug and labour times. Its original
-request is unchanged. No real messaging keys or paid plan were enabled.
+request is unchanged. No real messaging keys were enabled.
 
-The isolated free service `albatros-robot-linux-test` tracks the private
+The isolated service `albatros-robot-linux-test` tracks the private
 `codex/render-robot-linux` branch with manual deploys and no real messaging keys.
 `Dockerfile.render-robot` installs Chromium and a private X display. Browser CDP
 and the worker API bind to loopback only; the authenticated gateway is public.
@@ -44,10 +49,11 @@ paid service's recovery folder. Local test restoration verified 20 requests,
 rows across 122 files. SQLite integrity passed and attachment paths were mapped
 without unresolved references. This snapshot is NOT the active cloud database.
 
-The owner chose to retain the free test only and did NOT approve the proposed
-25 USD/month compute upgrade plus 2.50 USD/month disk. Do not upgrade plans,
-change production DNS/Meta callback, or activate the snapshot under that scope.
-The free service has ephemeral test data and ROBOT_ENABLED=false.
+After confirmed 512 MiB OOM failures, the owner approved the 25 USD/month 2 GB
+compute plan for this test and activated it in Render. Plan `1c-2g` is verified.
+No disk or further paid upgrade was activated. Do not change production
+DNS/Meta callback or activate the operational snapshot under the testing scope.
+The service still has ephemeral test data and ROBOT_ENABLED=false.
 The free integration test closes provider tabs after the browser probe to reduce
 memory use (`ALBATROS_KEEP_PROVIDER_TABS=false`). A production worker keeps those
 tabs open; the free test does not establish capacity for concurrent supplier work.

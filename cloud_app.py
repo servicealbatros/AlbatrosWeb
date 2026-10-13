@@ -43,6 +43,10 @@ class CloudGateway:
         request = Request(scope, receive=receive)
         path, method = request.url.path, request.method
         response = None
+        if path == '/provider-auth' or path.startswith('/api/provider-auth/'):
+            # A one-use administrator grant unlocks login-only supplier controls.
+            # The scoped cookie grants no dashboard or robot permissions.
+            return await self.application(scope, receive, send)
         if path == "/health" and method in {"GET", "HEAD"}:
             response = JSONResponse({"ok": True})
         elif path == "/robots.txt" and method == "GET":

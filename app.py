@@ -81,6 +81,8 @@ DATA_DIR = Path(os.getenv("ALBATROS_DATA_DIR", BASE)).expanduser().resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ACCURACY_EVALUATIONS_FILE = DATA_DIR / "accuracy_evaluations.json"
 app = FastAPI(title="Albatros AI v1.0.9 - Oferta editabilă")
+from provider_test_console import router as provider_test_router
+app.include_router(provider_test_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^chrome-extension://[a-p]{32}$",

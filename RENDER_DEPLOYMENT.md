@@ -4,6 +4,30 @@ Render website and authenticated reception are deployed. The current operational
 
 ## Linux migration test (13 October 2026)
 
+### Supplier authentication test in progress
+
+The owner approved entering supplier credentials personally in the protected
+test console. `ALBATROS_PROVIDER_TEST_CONSOLE=true` is set on the FREE test
+service only. `/api/admin/provider-test-grant` requires the test administrator
+token; a single-use two-minute grant unlocks a secure, HttpOnly, same-site cookie
+for 30 minutes. The cookie only unlocks login/verification forms and known
+supplier destinations, not dashboard access or robot administration. Passwords
+and cookies are not exported and browser submission errors are suppressed.
+
+The dual-process deployment was killed by Render for exceeding its 512 MiB
+limit. The current candidate uses one application process with two listeners:
+private loopback worker API on 8010 and the authenticated public gateway on PORT.
+Application startup/background tasks run only once. Tests explicitly verify that
+the private-listener trust cannot open the public gateway or forwarded requests.
+The private X display now verifies an active socket instead of a stale filename.
+25 tests passed. The browser/CDP/extension are ready and the DSM login form at
+appm.dsmpro.ro is visibly loaded in the console. Supplier authentication and a
+complete offer have NOT yet passed; the user must finish DSM authentication.
+
+The isolated case is based on request 37 (B103TST, BMW 5 F10): engine oil,
+oil/air/fuel/cabin filters, mandatory drain plug and labour times. Its original
+request is unchanged. No real messaging keys or paid plan were enabled.
+
 The isolated free service `albatros-robot-linux-test` tracks the private
 `codex/render-robot-linux` branch with manual deploys and no real messaging keys.
 `Dockerfile.render-robot` installs Chromium and a private X display. Browser CDP

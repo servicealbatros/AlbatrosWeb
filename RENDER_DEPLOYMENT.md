@@ -2,6 +2,36 @@
 
 Render website and authenticated reception are deployed. The current operational connection uses one authoritative database on the owned Windows worker; this is not a completed independent cloud migration.
 
+## Linux migration test (13 October 2026)
+
+The isolated free service `albatros-robot-linux-test` tracks the private
+`codex/render-robot-linux` branch with manual deploys and no real messaging keys.
+`Dockerfile.render-robot` installs Chromium and a private X display. Browser CDP
+and the worker API bind to loopback only; the authenticated gateway is public.
+The gateway does not run a second copy of background automations.
+
+Verified in Render: Chromium/CDP, the existing Inter Cars extension, and HTTP 200
+from public DSM, AutoTotal and Inter Cars pages. This does NOT establish supplier
+authentication, VIN matching, prices, OE equivalences or labour times.
+
+A private operational snapshot with SHA256 verification is stored in the current
+paid service's recovery folder. Local test restoration verified 20 requests,
+213 scheduler rows, 17,403 DSM transactions, 4,584 VIN vehicles and 116,494 part
+rows across 122 files. SQLite integrity passed and attachment paths were mapped
+without unresolved references. This snapshot is NOT the active cloud database.
+
+The owner chose to retain the free test only and did NOT approve the proposed
+25 USD/month compute upgrade plus 2.50 USD/month disk. Do not upgrade plans,
+change production DNS/Meta callback, or activate the snapshot under that scope.
+The free service has ephemeral test data and ROBOT_ENABLED=false.
+
+Before any later cutover: obtain approval for persistent compute, authenticate
+the supplier accounts in the Linux browser, verify complete parts/labour and DSM
+imports, take a fresh quiescent snapshot, restore to a new directory, retain the
+cloud device approval database, and validate the single-receiver WhatsApp route.
+The supervisor production mode is a compatibility candidate, not a completed
+production migration. Keep the previous service available for rollback.
+
 ## Public website
 
 Render Static Site serves `website/dist` at `servicealbatros.ro` and `www.servicealbatros.ro`.

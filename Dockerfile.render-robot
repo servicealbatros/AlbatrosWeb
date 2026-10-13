@@ -16,4 +16,4 @@ RUN python -m unittest test_render_runtime.py test_reception_bridge.py test_clou
 RUN useradd --create-home --uid 10001 albatros \
     && mkdir -p /var/data/albatros && chown -R albatros:albatros /var/data/albatros /app
 USER albatros
-CMD ["xvfb-run", "-a", "python", "scripts/render_robot_runtime.py"]
+CMD ["python", "scripts/render_robot_runtime.py"]

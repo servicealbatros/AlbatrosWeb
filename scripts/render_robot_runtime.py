@@ -80,6 +80,13 @@ def browser_command(executable, profile):
 
 def probe_browser():
     from playwright.sync_api import sync_playwright
+    os.environ['DISPLAY'] = ':99'
+    spawn(['Xvfb', ':99', '-screen', '0', '1440x900x24', '-nolisten', 'tcp'])
+    deadline = time.monotonic() + 15
+    while not Path('/tmp/.X11-unix/X99').exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError('Private browser display did not start')
+        time.sleep(0.2)
     with sync_playwright() as playwright:
         profile = Path(os.getenv('ALBATROS_DATA_DIR', '/tmp/albatros-probe')) / 'linux_browser'
         profile.mkdir(parents=True, exist_ok=True)

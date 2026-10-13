@@ -65,6 +65,8 @@ def bridge_url():
     if not value:
         return ''
     parsed = urlparse(value)
+    if os.getenv('ALBATROS_INTERNAL_BRIDGE') == 'true' and value == 'http://127.0.0.1:8010':
+        return value
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/'):
         raise ValueError('Bridge must be an HTTPS origin')
     return value

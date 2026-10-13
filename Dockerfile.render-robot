@@ -1,0 +1,17 @@
+FROM python:3.13-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TZ=Europe/Bucharest \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright ROBOT_ENABLED=false BETA_MODE=true
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -m playwright install --with-deps chromium \
+    && apt-get update && apt-get install -y --no-install-recommends xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
+COPY *.py ./
+COPY static ./static
+COPY edge_robot_extension_V6_TALON_MATCH ./edge_robot_extension_V6_TALON_MATCH
+COPY scripts/render_robot_runtime.py ./scripts/render_robot_runtime.py
+RUN useradd --create-home --uid 10001 albatros \
+    && mkdir -p /var/data/albatros && chown -R albatros:albatros /var/data/albatros /app
+USER albatros
+CMD ["xvfb-run", "-a", "python", "scripts/render_robot_runtime.py"]

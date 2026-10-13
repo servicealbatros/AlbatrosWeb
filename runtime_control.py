@@ -112,7 +112,7 @@ def _existing_rows(rows: list[dict]) -> list[dict]:
 
 
 def _spawn(name: str, command: list[str], creationflags: int | None = None, **kwargs) -> dict:
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if creationflags is None else creationflags
+    flags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) if creationflags is None else creationflags
     process = subprocess.Popen(command, cwd=BASE, creationflags=flags, **kwargs)
     return {"name": name, "pid": process.pid, "parent_pid": os.getpid(), "executable": command[0],
             "command": command, "started_at": time.time()}

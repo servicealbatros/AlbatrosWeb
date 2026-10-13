@@ -2642,6 +2642,8 @@ async def startup():
     init_db()
     init_scheduler_db(DB_PATH)
     ensure_automation_tables(DB_PATH)
+    if env_bool('ALBATROS_GATEWAY_ONLY', False):
+        return
     app.state.robot_reaper_task = asyncio.create_task(_robot_reaper_loop())
     app.state.delay_notification_task = asyncio.create_task(_delay_notification_loop())
     app.state.dsm_schedule_automation_task = asyncio.create_task(_dsm_schedule_automation_loop())

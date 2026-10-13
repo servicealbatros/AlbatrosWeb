@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Albatros AI - Robot Inter Cars V6 TALON MATCH",
+  "version": "6.0.19",
+  "description": "Foloseste automat datele talonului primit pe WhatsApp pentru a alege varianta TecDoc; nu ghiceste cand rezultatul ramane ambiguu.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8010/*",
+    "https://ro.e-cat.intercars.eu/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Albatros Robot",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ro.e-cat.intercars.eu/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

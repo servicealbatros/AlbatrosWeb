@@ -1,12 +1,11 @@
 # Albatros on Render
 
-Prepared configuration, not a completed migration.
+Render website and authenticated reception are deployed. The current operational connection uses one authoritative database on the owned Windows worker; this is not a completed independent cloud migration.
 
 ## Public website
 
 Render Static Site serves `website/dist` at `servicealbatros.ro` and `www.servicealbatros.ro`.
-It contains workshop presentation only. The login link leads to `app.servicealbatros.ro/receptie/login`.
-Add the approved public address, telephone, hours and logo before launch.
+It contains workshop presentation only, with approved photos and contact details. Until DNS is delegated, the login link uses the live Render backend URL.
 
 ## Backend
 
@@ -45,3 +44,24 @@ Confirm the selected paid backend/disk costs before provisioning them.
 Apply `render.yaml`, supply secrets through Render, verify deploys, then configure DNS using
 the exact A/CNAME values shown in Render. RoTLD registration alone is not necessarily DNS hosting.
 Verify the public site, HTTPS, unauthenticated route denial and a signed webhook before cutover.
+
+## Current worker connection
+
+RECEPTION_BRIDGE_URL is the owned worker HTTPS origin. RECEPTION_BRIDGE_SECRET is
+a separate random secret, stored only in environment settings on both machines.
+The cloud authenticates and checks device revocation before forwarding dashboard
+routes. Signed requests bind identity, method, path, query and body and reject
+replay/expiry. Browser cookies and administrator tokens are never forwarded.
+Cloud device management and robot administrator endpoints are never delegated.
+Mutations require same-origin requests and are never automatically retried.
+
+All operational records remain in the worker's existing database to avoid diverging
+requests or schedules. If the laptop or tunnel is offline, operations return 503;
+there is no writable stale fallback. ROBOT_ENABLED stays false on Render, so its
+background automations cannot duplicate those on the worker. The Meta webhook can
+be relayed after its signature is verified, preserving the original signature.
+
+POST /api/admin/worker-backup requires the cloud administrator bearer token and a
+SHA256 checksum. It stores a private validated recovery archive on the persistent
+disk, without extracting it or replacing live databases. SQLite files are copied
+using the SQLite backup API; snapshots are not a second active robot.

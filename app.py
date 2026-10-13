@@ -138,17 +138,31 @@ def _same_origin_request(request: Request) -> bool:
 @app.middleware("http")
 async def security_rate_limit(request: Request, call_next):
     started = asyncio.get_running_loop().time()
+    bridge_user = None
+    if request.headers.get('x-albatros-signature'):
+        from reception_bridge import dashboard_route, verify_request, MAX_BODY
+        try:
+            body = await request.body()
+            if len(body) > MAX_BODY:
+                return JSONResponse({'detail': 'Payload too large'}, status_code=413)
+            target = request.url.path + ('?' + request.url.query if request.url.query else '')
+            bridge_user = verify_request(request.headers, request.method, target, body)
+            if not (dashboard_route(request.url.path) or
+                    (request.url.path == '/webhook/whatsapp' and bridge_user == 'meta-webhook')):
+                raise ValueError('route_not_allowed')
+        except (ValueError, TypeError):
+            return JSONResponse({'detail': 'Invalid bridge request'}, status_code=403)
     forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
     client = forwarded or (request.client.host if request.client else "unknown")
     local_client = (not env_bool("ALBATROS_CLOUD_MODE", False)
                     and not forwarded and client in {"127.0.0.1", "::1", "testclient"})
-    request.state.dashboard_user = "local_dashboard" if local_client else None
+    request.state.dashboard_user = bridge_user or ("local_dashboard" if local_client else None)
     remote_dashboard_path = request.url.path.startswith("/receptie/")
     sensitive = (
         request.url.path.startswith(("/api/robot/", "/api/requests", "/api/v1/requests", "/api/debug/", "/api/labour-times", "/api/scheduler/", "/api/dashboard/", "/api/dsm/"))
         or request.url.path.startswith(("/cereri", "/conversatie/", "/oferta/", "/ofertare/", "/tehnician/", "/programator", "/acuratete", "/arhiva", "/baza-dsm"))
     )
-    if not local_client and (sensitive or remote_dashboard_path):
+    if not local_client and not bridge_user and (sensitive or remote_dashboard_path):
         allowed_clients = {
             value.strip() for value in os.getenv("ALLOWED_RECEPTION_IPS", "").split(",") if value.strip()
         }
@@ -157,7 +171,7 @@ async def security_rate_limit(request: Request, call_next):
             POLICY.logger.write(action="reception_ip_filter", result="blocked", success=False,
                                 client_id=client, error="client_ip_not_allowlisted")
             return JSONResponse({"detail": "Calculatorul nu este autorizat pentru dashboard"}, status_code=403)
-    if sensitive and not local_client:
+    if sensitive and not local_client and not bridge_user:
         if not env_bool("ALLOW_REMOTE_DASHBOARD", False):
             POLICY.metrics.inc("blocked_actions")
             POLICY.logger.write(action="sensitive_route", result="blocked", success=False,

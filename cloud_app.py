@@ -16,6 +16,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from app import app as backend
 from security import POLICY, SecurityViolation
+from reception_bridge import bridge_url, dashboard_route, forward
 
 BASE = Path(__file__).resolve().parent
 
@@ -52,13 +53,41 @@ class CloudGateway:
             response = FileResponse(BASE / "static" / "cloud_login.html")
         elif path == "/receptie/login" and method == "POST":
             pass
+        elif path == '/api/admin/worker-backup' and method == 'POST':
+            try:
+                POLICY.require_admin(request.headers.get('authorization'))
+            except SecurityViolation:
+                response = JSONResponse({'detail': 'Administrator access required'}, status_code=403)
+            else:
+                from cloud_backup import receive_backup
+                response = await receive_backup(request)
         elif path == "/webhook/whatsapp" and method in {"GET", "POST"}:
             # GET verifies the Meta token; POST verifies X-Hub-Signature-256.
-            pass
+            if method == 'POST' and bridge_url():
+                import hashlib
+                import hmac
+                secret = os.getenv('WHATSAPP_APP_SECRET', '')
+                body = await request.body()
+                expected = 'sha256=' + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+                if not secret or not hmac.compare_digest(expected, request.headers.get('x-hub-signature-256', '')):
+                    response = JSONResponse({'detail': 'Invalid webhook signature'}, status_code=401)
+                else:
+                    response = await forward(request, 'meta-webhook')
         elif not is_authenticated(request):
             response = (RedirectResponse("/receptie/login", status_code=303)
                         if method == "GET" and "text/html" in request.headers.get("accept", "")
                         else JSONResponse({"detail": "Autentificare necesară."}, status_code=401))
+        elif bridge_url() and dashboard_route(path):
+            user = POLICY.verify_dashboard_session(request.cookies.get('albatros_reception'))
+            if not user:
+                POLICY.require_admin(request.headers.get('authorization'))
+                user = 'cloud-administrator'
+            if method not in {'GET', 'HEAD', 'OPTIONS'} and user != 'cloud-administrator':
+                from app import _same_origin_request
+                if not _same_origin_request(request):
+                    response = JSONResponse({'detail': 'Cerere respinsă: origine invalidă'}, status_code=403)
+            if response is None:
+                response = await forward(request, user)
         elif path.endswith(("/offer-start", "/technician-start", "/labour-only-start",
                             "/vehicle-data", "/dsm/import-week", "/dsm-history/start")):
             # These routes currently start laptop/browser processes. Do not

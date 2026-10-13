@@ -13,6 +13,16 @@ spec.loader.exec_module(restore_module)
 
 
 class MigrationTests(unittest.TestCase):
+    def test_windows_attachment_path_is_translated_only_for_included_files(self):
+        manifest = {'source_data': 'C:/owned/data', 'source_base': 'C:/owned',
+                    'files': {'vision_debug/photo.jpg': 'checksum'}}
+        unresolved = set()
+        result = restore_module.translate_paths({'path': r'C:\owned\data\vision_debug\photo.jpg',
+            'other': r'C:\owned\data\missing.jpg', 'text': 'revizie'}, manifest, Path('/cloud'), unresolved)
+        self.assertEqual(result['path'], str(Path('/cloud/vision_debug/photo.jpg')))
+        self.assertEqual(result['text'], 'revizie')
+        self.assertEqual(unresolved, {'missing.jpg'})
+
     def test_credentials_paths_links_and_traversal_are_not_allowed(self):
         for name in ('../service_requests.db', '/tmp/service_requests.db', '.env',
                      'chrome_robot_profile_v4/Cookies', 'vision_debug/../../.env',

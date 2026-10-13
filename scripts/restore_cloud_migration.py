@@ -16,6 +16,28 @@ FOLDERS = {'technician_output', 'tecrmi_output', 'vision_debug', 'voice_messages
 SUFFIXES = {'.json', '.jpg', '.jpeg', '.png', '.webp', '.ogg', '.mp3', '.mp4', '.wav'}
 
 
+def translate_paths(value, manifest, target, unresolved):
+    if isinstance(value, dict):
+        return {key: translate_paths(item, manifest, target, unresolved) for key, item in value.items()}
+    if isinstance(value, list):
+        return [translate_paths(item, manifest, target, unresolved) for item in value]
+    if isinstance(value, str):
+        normalized = value.replace('\\', '/')
+        for field in ('source_data', 'source_base'):
+            prefix = str(manifest.get(field, '')).replace('\\', '/').rstrip('/')
+            if prefix and normalized.lower().startswith(prefix.lower() + '/'):
+                relative = normalized[len(prefix) + 1:]
+                if field == 'source_base' and relative.startswith('intercars_output/'):
+                    relative = 'offering/' + relative.replace('intercars_output/intercars_output/', 'intercars_output/', 1)
+                if relative in manifest['files']:
+                    return str(target / relative)
+                # This may be an old diagnostic/log path, but needs review
+                # before activation; don't invent a replacement file.
+                unresolved.add(relative)
+                break
+    return value
+
+
 def allowed(name):
     path = PurePosixPath(name)
     if path.is_absolute() or '..' in path.parts or '\\' in name or ':' in name:
@@ -75,9 +97,18 @@ def restore(source, digest, target):
                     counts['parts'] = connection.execute("SELECT COUNT(*) FROM lines WHERE kind='part'").fetchone()[0]
     if counts != manifest['counts']:
         raise ValueError('Counts differ from source; do not activate')
+    unresolved = set()
+    for relative in manifest['files']:
+        path = target / relative
+        if path.suffix == '.json':
+            value = json.loads(path.read_text(encoding='utf-8-sig'))
+            translated = translate_paths(value, manifest, target, unresolved)
+            path.write_text(json.dumps(translated, ensure_ascii=False), encoding='utf-8')
     (target / 'robot_enabled.state.json').write_text(json.dumps({'enabled': False, 'changed_by': 'cloud-migration'}))
+    (target / 'migration_validation.json').write_text(json.dumps({'source_sha256': digest,
+        'counts': counts, 'unresolved_paths': sorted(unresolved), 'activated': False}), encoding='utf-8')
     return {'ok': True, 'counts': counts, 'files': len(manifest['files']), 'activated': False,
-            'requires_attachment_path_translation': True, 'requires_cloud_device_database': True}
+            'unresolved_path_count': len(unresolved), 'requires_cloud_device_database': True}
 
 
 def main():

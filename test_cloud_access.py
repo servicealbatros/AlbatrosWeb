@@ -80,6 +80,15 @@ class CloudAccessTests(unittest.TestCase):
         self.assertEqual(pending.status_code,403)
         self.assertEqual(self.client.get("/cereri").status_code,401)
 
+    def test_backups_require_admin_and_reject_corrupt_archives(self):
+        import hashlib
+        body = b'not-an-archive'
+        self.assertEqual(self.client.post('/api/admin/worker-backup', content=body).status_code,403)
+        response = self.client.post('/api/admin/worker-backup', content=body, headers={
+            'Authorization': 'Bearer test-administrator-secret',
+            'X-Backup-SHA256': hashlib.sha256(body).hexdigest()})
+        self.assertEqual(response.status_code,400)
+
     def test_approved_login_works_and_revocation_blocks_existing_session(self):
         device,_ = POLICY.devices.register(None,"Test authorized device","testclient")
         POLICY.devices.change(device,True)

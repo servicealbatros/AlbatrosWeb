@@ -71,3 +71,7 @@ services:
         sync: false
       - key: WHATSAPP_APP_SECRET
         sync: false
+      - key: RECEPTION_BRIDGE_URL
+        sync: false
+      - key: RECEPTION_BRIDGE_SECRET
+        sync: false

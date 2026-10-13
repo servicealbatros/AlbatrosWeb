@@ -153,9 +153,12 @@ async def snapshot():
       const fields=[...f.querySelectorAll('input')].map((e,i)=>({index:i,type:e.type,
         label:e.labels?.[0]?.innerText||e.placeholder||e.name||e.type,visible:shown(e)}))
         .filter(e=>e.visible&&['text','email','password','tel','number'].includes(e.type));
+      const newDevice=/dispozitiv nou|dispozitiv\/browser nou|new device/i.test(f.innerText)
+        &&fields.length===1&&/denumire|device.*name/i.test(fields[0].label);
       const buttons=[...f.querySelectorAll('button,input[type=submit]')].map((e,i)=>({index:i,
         text:e.innerText||e.value||'Autentificare',visible:shown(e)})).filter(e=>e.visible&&
-        /autent|login|log in|sign in|conect|intr|continu|next|verify|verific|confirm|submit|trimite/i.test(e.text)&&
+        (/autent|login|log in|sign in|conect|intr|continu|next|verify|verific|confirm|submit|trimite/i.test(e.text)
+         ||(newDevice&&/^(salvare|save)$/i.test(e.text.trim())))&&
         !/comand|co[sș]|cart|checkout|cump|pl[aă]t|order|buy|register|cre.*cont/i.test(e.text));
       return {index,fields,buttons}; }).filter(Boolean)}""")
     shot = await _page.screenshot(type='jpeg', quality=45, timeout=20000)

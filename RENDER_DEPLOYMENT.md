@@ -24,6 +24,9 @@ The owner chose to retain the free test only and did NOT approve the proposed
 25 USD/month compute upgrade plus 2.50 USD/month disk. Do not upgrade plans,
 change production DNS/Meta callback, or activate the snapshot under that scope.
 The free service has ephemeral test data and ROBOT_ENABLED=false.
+The free integration test closes provider tabs after the browser probe to reduce
+memory use (`ALBATROS_KEEP_PROVIDER_TABS=false`). A production worker keeps those
+tabs open; the free test does not establish capacity for concurrent supplier work.
 
 Before any later cutover: obtain approval for persistent compute, authenticate
 the supplier accounts in the Linux browser, verify complete parts/labour and DSM

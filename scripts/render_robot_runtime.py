@@ -123,7 +123,7 @@ def probe_browser(keep_provider_tabs=False):
         REPORT.update(phase='browser_ready', chromium=True, cdp=True, intercars_extension=True,
                       provider_sessions='not_authenticated', public_provider_pages=reachability)
         print(json.dumps(REPORT), flush=True)
-        if keep_provider_tabs:
+        if os.getenv('ALBATROS_RENDER_MODE') == 'production':
             path = Path(os.environ['ALBATROS_DATA_DIR']) / 'render_runtime_health.json'
             path.write_text(json.dumps(REPORT), encoding='utf-8')
 
@@ -158,7 +158,7 @@ def main():
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print('Compatibility probe HTTP endpoint is ready', flush=True)
     try:
-        probe_browser(keep_provider_tabs=production)
+        probe_browser(keep_provider_tabs=production and os.getenv('ALBATROS_KEEP_PROVIDER_TABS', 'true') == 'true')
     except Exception as error:
         REPORT.update(phase='failed', error=type(error).__name__ + ': ' + str(error)[:250])
         print(json.dumps(REPORT), flush=True)

@@ -111,8 +111,12 @@ async def snapshot():
                 'forms': [], 'image': ''}
     # Values and cookies are deliberately omitted. Buttons are limited to
     # login/verification forms, never shopping/cart operations.
-    forms = await _page.locator('form').evaluate_all("""forms=>forms.map((f,index)=>{
+    forms = await _page.locator('body').evaluate("""body=>{
+      let roots=[...body.querySelectorAll('form')].map((f,index)=>({f,index}));
       const shown=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+      if(!roots.some(({f})=>shown(f)&&[...f.querySelectorAll('input[type=password]')].some(shown))
+         &&[...body.querySelectorAll('input[type=password]')].some(shown))roots.push({f:body,index:-1});
+      return roots.map(({f,index})=>{
       const login=/autent|login|log in|sign in|conect|password|parol|utilizator|username|verification|verify|otp|cod.*confirm/i.test(f.innerText)
          ||!!f.querySelector('input[type=password]');
       if(!login||!shown(f))return null;
@@ -121,8 +125,9 @@ async def snapshot():
         .filter(e=>e.visible&&['text','email','password','tel','number'].includes(e.type));
       const buttons=[...f.querySelectorAll('button,input[type=submit]')].map((e,i)=>({index:i,
         text:e.innerText||e.value||'Autentificare',visible:shown(e)})).filter(e=>e.visible&&
-        /autent|login|log in|sign in|conect|intr|continu|next|verify|verific|confirm|submit|trimite/i.test(e.text));
-      return {index,fields,buttons}; }).filter(Boolean)""")
+        /autent|login|log in|sign in|conect|intr|continu|next|verify|verific|confirm|submit|trimite/i.test(e.text)&&
+        !/comand|co[sș]|cart|checkout|cump|pl[aă]t|order|buy|register|cre.*cont/i.test(e.text));
+      return {index,fields,buttons}; }).filter(Boolean)}""")
     shot = await _page.screenshot(type='jpeg', quality=45, timeout=20000)
     return {'page_open': True, 'host': urlparse(_page.url).hostname,
             'forms': forms, 'image': 'data:image/jpeg;base64,' + base64.b64encode(shot).decode(),
@@ -160,7 +165,7 @@ async def state(request: Request):
 
 
 class Submit(BaseModel):
-    form: int = Field(ge=0)
+    form: int = Field(ge=-1)
     button: int = Field(ge=0)
     fields: dict[str, str]
 
@@ -177,7 +182,7 @@ async def submit(body: Submit, request: Request):
         valid_fields = {str(field['index']) for field in form['fields']}
         if not set(body.fields).issubset(valid_fields) or any(len(value) > 512 for value in body.fields.values()):
             raise HTTPException(422, 'Invalid login fields')
-        locator = _page.locator('form').nth(body.form)
+        locator = _page.locator('body') if body.form == -1 else _page.locator('form').nth(body.form)
         for index, value in body.fields.items():
             await locator.locator('input').nth(int(index)).fill(value)
         await locator.locator('button,input[type=submit]').nth(body.button).click(timeout=15000)

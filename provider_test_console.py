@@ -59,6 +59,33 @@ def allowed_url(url):
         host == domain or host.endswith('.' + domain) for domain in DOMAINS)
 
 
+def captcha_url(url):
+    parsed = urlparse(url)
+    host = parsed.hostname or ''
+    return (parsed.scheme == 'https' and not parsed.username and not parsed.password
+            and any(host == domain or host.endswith('.' + domain)
+                    for domain in ('google.com', 'recaptcha.net'))
+            and parsed.path.startswith('/recaptcha/'))
+
+
+async def captcha_regions():
+    if _page is None or _page.is_closed() or not allowed_url(_page.url):
+        return []
+    regions = []
+    for frame in await _page.locator('iframe').all():
+        src = await frame.get_attribute('src') or ''
+        if captcha_url(src):
+            box = await frame.bounding_box()
+            if box and box['width'] > 0 and box['height'] > 0:
+                regions.append(box)
+    return regions
+
+
+def inside_region(x, y, regions):
+    return any(r['x'] <= x < r['x'] + r['width']
+               and r['y'] <= y < r['y'] + r['height'] for r in regions)
+
+
 @router.post('/api/admin/provider-test-grant')
 async def grant(request: Request):
     admin(request)
@@ -114,8 +141,11 @@ async def snapshot():
     forms = await _page.locator('body').evaluate("""body=>{
       let roots=[...body.querySelectorAll('form')].map((f,index)=>({f,index}));
       const shown=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
-      if(!roots.some(({f})=>shown(f)&&[...f.querySelectorAll('input[type=password]')].some(shown))
-         &&[...body.querySelectorAll('input[type=password]')].some(shown))roots.push({f:body,index:-1});
+      const identity=e=>shown(e)&&(e.type==='password'||e.type==='email'||
+         /email|username|utilizator|login/i.test(e.name+' '+e.placeholder+' '+(e.labels?.[0]?.innerText||'')));
+      if(!roots.some(({f})=>shown(f)&&[...f.querySelectorAll('input')].some(identity))
+         &&[...body.querySelectorAll('input')].some(identity)
+         &&/autent|sign in|log in|login|conect|password|parol/i.test(body.innerText))roots.push({f:body,index:-1});
       return roots.map(({f,index})=>{
       const login=/autent|login|log in|sign in|conect|password|parol|utilizator|username|verification|verify|otp|cod.*confirm/i.test(f.innerText)
          ||!!f.querySelector('input[type=password]');
@@ -134,7 +164,31 @@ async def snapshot():
       .filter(e=>e.visible&&/^(autentificare|conectare|login|log in|sign in|contul meu|my account)$/i.test(e.text))""")
     return {'page_open': True, 'host': urlparse(_page.url).hostname,
             'forms': forms, 'image': 'data:image/jpeg;base64,' + base64.b64encode(shot).decode(),
-            'login_form_present': bool(forms), 'auth_navigation': navigation}
+            'login_form_present': bool(forms), 'auth_navigation': navigation,
+            'captcha_regions': await captcha_regions()}
+
+
+class CaptchaClick(BaseModel):
+    x: float = Field(ge=0, le=10000, allow_inf_nan=False)
+    y: float = Field(ge=0, le=10000, allow_inf_nan=False)
+
+
+@router.post('/api/provider-auth/captcha-click')
+async def captcha_click(body: CaptchaClick, request: Request):
+    # This is a human-operated surface, not automatic CAPTCHA solving. Only
+    # current visible reCAPTCHA iframe coordinates can receive a click.
+    session(request)
+    same_origin(request)
+    async with LOCK:
+        regions = await captcha_regions()
+        if not inside_region(body.x, body.y, regions):
+            raise HTTPException(403, 'Apasă numai în verificarea CAPTCHA din imagine.')
+        try:
+            await _page.mouse.click(body.x, body.y)
+            await asyncio.sleep(1)
+            return await snapshot()
+        except Exception:
+            raise HTTPException(502, 'Verificarea nu a răspuns. Actualizează ecranul.') from None
 
 
 class Provider(BaseModel):

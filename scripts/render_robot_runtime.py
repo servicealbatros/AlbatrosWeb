@@ -131,6 +131,7 @@ def core_environment():
 
 
 def main():
+    print('Starting isolated Render runtime', flush=True)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     production = os.getenv('ALBATROS_RENDER_MODE', 'probe') == 'production'
@@ -143,6 +144,7 @@ def main():
     else:
         server = ThreadingHTTPServer(('0.0.0.0', int(os.getenv('PORT', '10000'))), ProbeHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        print('Compatibility probe HTTP endpoint is ready', flush=True)
     try:
         probe_browser()
     except Exception as error:

@@ -26,8 +26,12 @@ currently visible trusted CAPTCHA frame; automatic challenge solving is absent.
 AutoTotal login and its new-device confirmation reached the authenticated
 eOriginal homepage. DSM login reached QService and a read-only lookup in Render
 identified B103TST / WBA00000000000001 / BMW 5 (F10). These sessions need renewal
-after deployment because the test browser profile is ephemeral. Inter Cars and
-Haynes authentication, and complete parts/labour offering, remain unverified.
+after the earlier deployments because the browser profile was ephemeral. Inter
+Cars subsequently reached the authenticated catalogue and Haynes reached its
+vehicle-make selection after intermittent provider HTTP 503 responses. Complete
+parts/labour offering remains unverified. Initial disk attachment requires one
+fresh login to populate the persistent profile; old temporary sessions were not
+exported or migrated.
 
 The isolated case is based on request 37 (B103TST, BMW 5 F10): engine oil,
 oil/air/fuel/cabin filters, mandatory drain plug and labour times. Its original
@@ -51,9 +55,15 @@ without unresolved references. This snapshot is NOT the active cloud database.
 
 After confirmed 512 MiB OOM failures, the owner approved the 25 USD/month 2 GB
 compute plan for this test and activated it in Render. Plan `1c-2g` is verified.
-No disk or further paid upgrade was activated. Do not change production
+The owner subsequently approved the 10 GB persistent disk (2.50 USD/month),
+`dsk-db74fvmi0phs738htmeg`, mounted at `/var/data/albatros`. Both DATA_DIR and
+OFFERING_DIR now use the mount. Browser profile identity survived a controlled
+Render restart; the post-restart runtime report confirms the actual mount.
+Validation is saved privately in data/render_browser_persistence_validation.json.
+Base test compute plus disk: 27.50 USD/month; the old backend is still separate.
+Do not change production
 DNS/Meta callback or activate the operational snapshot under the testing scope.
-The service still has ephemeral test data and ROBOT_ENABLED=false.
+The service now persists test data and the browser profile; ROBOT_ENABLED=false.
 The free integration test closes provider tabs after the browser probe to reduce
 memory use (`ALBATROS_KEEP_PROVIDER_TABS=false`). A production worker keeps those
 tabs open; the free test does not establish capacity for concurrent supplier work.

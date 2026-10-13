@@ -28,6 +28,15 @@ The free integration test closes provider tabs after the browser probe to reduce
 memory use (`ALBATROS_KEEP_PROVIDER_TABS=false`). A production worker keeps those
 tabs open; the free test does not establish capacity for concurrent supplier work.
 
+The free full-runtime integration test passed: authenticated requests and
+scheduler reads are relayed to the loopback core in Render, anonymous reads
+return 401, an unsigned webhook returns 401, and a signed empty webhook returns
+200 when the isolated test robot is temporarily enabled. It was disabled again
+immediately afterward. No real messages, customers, Meta account or AI key were
+used. The private runtime diagnostic reports the browser and extension ready.
+19 tests passed in the Linux build. The larger open-tab test timed out and
+restarted near the free memory limit; production capacity remains unverified.
+
 Before any later cutover: obtain approval for persistent compute, authenticate
 the supplier accounts in the Linux browser, verify complete parts/labour and DSM
 imports, take a fresh quiescent snapshot, restore to a new directory, retain the

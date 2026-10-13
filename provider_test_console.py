@@ -129,9 +129,12 @@ async def snapshot():
         !/comand|co[sș]|cart|checkout|cump|pl[aă]t|order|buy|register|cre.*cont/i.test(e.text));
       return {index,fields,buttons}; }).filter(Boolean)}""")
     shot = await _page.screenshot(type='jpeg', quality=45, timeout=20000)
+    navigation = await _page.locator('a,button').evaluate_all("""nodes=>nodes.map((e,index)=>({index,
+      text:(e.innerText||'').trim(),visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)}))
+      .filter(e=>e.visible&&/^(autentificare|conectare|login|log in|sign in|contul meu|my account)$/i.test(e.text))""")
     return {'page_open': True, 'host': urlparse(_page.url).hostname,
             'forms': forms, 'image': 'data:image/jpeg;base64,' + base64.b64encode(shot).decode(),
-            'login_form_present': bool(forms)}
+            'login_form_present': bool(forms), 'auth_navigation': navigation}
 
 
 class Provider(BaseModel):
@@ -188,3 +191,42 @@ async def submit(body: Submit, request: Request):
         await locator.locator('button,input[type=submit]').nth(body.button).click(timeout=15000)
         await asyncio.sleep(2)
         return await snapshot()
+
+
+class LoginLink(BaseModel):
+    index: int = Field(ge=0)
+
+
+@router.post('/api/provider-auth/login-link')
+async def login_link(body: LoginLink, request: Request):
+    session(request)
+    same_origin(request)
+    async with LOCK:
+        current = await snapshot()
+        if body.index not in {item['index'] for item in current.get('auth_navigation', [])}:
+            raise HTTPException(403, 'Only displayed authentication links are allowed')
+        locator = _page.locator('a,button').nth(body.index)
+        href = await locator.get_attribute('href')
+        if href and href.startswith(('http:', 'https:')) and not allowed_url(href):
+            raise HTTPException(403, 'Unverified authentication destination')
+        await locator.click(timeout=15000)
+        await asyncio.sleep(2)
+        return await snapshot()
+
+
+@router.post('/api/provider-auth/prepare-offer')
+async def prepare_offer(request: Request):
+    session(request)
+    same_origin(request)
+    async with LOCK:
+        ctx = await context()
+        for name in ('DSM', 'Inter Cars', 'AutoTotal'):
+            url = PROVIDERS[name]
+            if any(urlparse(page.url).hostname == urlparse(url).hostname for page in ctx.pages):
+                continue
+            page = await ctx.new_page()
+            try:
+                await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            except Exception:
+                pass
+        return {'ok': True, 'message': 'Filele pentru test sunt deschise. Autentificarea trebuie verificată prin accesul efectiv la catalog.'}

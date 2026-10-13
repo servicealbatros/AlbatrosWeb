@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+from tempfile import TemporaryDirectory
 
 spec = importlib.util.spec_from_file_location('render_runtime', Path(__file__).parent / 'scripts/render_robot_runtime.py')
 runtime = importlib.util.module_from_spec(spec)
@@ -11,6 +12,17 @@ spec.loader.exec_module(runtime)
 
 
 class RenderRuntimeTests(unittest.TestCase):
+    def test_browser_profile_identity_survives_runtime_reinitialization(self):
+        with TemporaryDirectory() as root:
+            profile = Path(root) / 'linux_browser'
+            with patch.object(runtime.os.path, 'ismount', return_value=True):
+                before = runtime.profile_storage(profile)
+                (profile / 'session-fixture').write_text('existing browser data', encoding='utf-8')
+                after = runtime.profile_storage(profile)
+            self.assertEqual(before['browser_profile_id'], after['browser_profile_id'])
+            self.assertTrue(after['browser_profile_on_persistent_mount'])
+            self.assertEqual((profile / 'session-fixture').read_text(), 'existing browser data')
+
     def test_core_overrides_windows_settings_and_removes_external_bridge(self):
         with patch.dict(os.environ, {'ALBATROS_CLOUD_MODE': 'true',
                 'RECEPTION_BRIDGE_URL': 'https://old-worker.example',

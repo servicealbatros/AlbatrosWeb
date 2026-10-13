@@ -79,6 +79,16 @@ def browser_command(executable, profile):
             'about:blank']
 
 
+def profile_storage(profile):
+    profile.mkdir(parents=True, exist_ok=True)
+    marker = profile / '.albatros-profile-id'
+    if not marker.exists():
+        marker.write_text(secrets.token_hex(16), encoding='ascii')
+    return {'browser_profile_path': str(profile),
+            'browser_profile_id': marker.read_text(encoding='ascii').strip(),
+            'browser_profile_on_persistent_mount': os.path.ismount(profile.parent)}
+
+
 def probe_browser(keep_provider_tabs=False):
     from playwright.sync_api import sync_playwright
     display = ':' + str(100 + secrets.randbelow(10000))
@@ -97,7 +107,7 @@ def probe_browser(keep_provider_tabs=False):
         time.sleep(0.2)
     with sync_playwright() as playwright:
         profile = Path(os.getenv('ALBATROS_DATA_DIR', '/tmp/albatros-probe')) / 'linux_browser'
-        profile.mkdir(parents=True, exist_ok=True)
+        REPORT.update(profile_storage(profile))
         spawn(browser_command(playwright.chromium.executable_path, profile))
         wait_url('http://127.0.0.1:9222/json/version')
         browser = playwright.chromium.connect_over_cdp('http://127.0.0.1:9222', timeout=30000)

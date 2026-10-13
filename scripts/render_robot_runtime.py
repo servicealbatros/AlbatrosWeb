@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -80,12 +81,19 @@ def browser_command(executable, profile):
 
 def probe_browser(keep_provider_tabs=False):
     from playwright.sync_api import sync_playwright
-    os.environ['DISPLAY'] = ':99'
-    spawn(['Xvfb', ':99', '-screen', '0', '1440x900x24', '-nolisten', 'tcp'])
+    display = ':' + str(100 + secrets.randbelow(10000))
+    os.environ['DISPLAY'] = display
+    display_process = spawn(['Xvfb', display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'])
     deadline = time.monotonic() + 15
-    while not Path('/tmp/.X11-unix/X99').exists():
-        if time.monotonic() > deadline:
+    while True:
+        if display_process.poll() is not None or time.monotonic() > deadline:
             raise RuntimeError('Private browser display did not start')
+        try:
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.connect('/tmp/.X11-unix/X' + display[1:])
+            break
+        except OSError:
+            pass
         time.sleep(0.2)
     with sync_playwright() as playwright:
         profile = Path(os.getenv('ALBATROS_DATA_DIR', '/tmp/albatros-probe')) / 'linux_browser'
@@ -107,9 +115,11 @@ def probe_browser(keep_provider_tabs=False):
         page.close()
         # Public landing pages only: no provider login, VIN lookup or writes.
         reachability = {}
-        for name, url in [('dsm', 'https://apps.dsmpro.ro/'),
+        public_pages = [] if os.getenv('ALBATROS_PROVIDER_TEST_CONSOLE') == 'true' else [
+                         ('dsm', 'https://apps.dsmpro.ro/'),
                           ('autototal', 'https://www3.eoriginal.ro/'),
-                          ('intercars', 'https://ro.e-cat.intercars.eu/')]:
+                          ('intercars', 'https://ro.e-cat.intercars.eu/')]
+        for name, url in public_pages:
             page = context.new_page()
             try:
                 response = page.goto(url, wait_until='domcontentloaded', timeout=20000)

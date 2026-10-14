@@ -2375,6 +2375,8 @@ def _catalog_vin_candidate(vin: str, vehicle_hints: dict) -> tuple[str, str | No
 
 
 def _start_offer_worker(request_id: int, request_row: dict, search_query: str | None = None) -> dict:
+    if _crawler_task and not _crawler_task.done():
+        return {'ok':False,'message':'Așteaptă terminarea crawlerului înainte de repornirea workerului.'}
     """
     OFERTARE REALA:
     Dashboard/Receptioner -> coada interna -> extensia Edge -> Inter Cars.
@@ -2404,6 +2406,11 @@ def _start_offer_worker(request_id: int, request_row: dict, search_query: str | 
     # A complete restart must not reuse an older basket or old labour totals.
     # The new catalogue result is reviewed and selected again by the advisor.
     _clear_offer_work_state(request_id)
+    benchmark_dir = DATA_DIR / 'search_benchmarks'
+    benchmark_dir.mkdir(exist_ok=True)
+    (benchmark_dir / f'worker_{request_id}.json').write_text(json.dumps({
+        'request_id':request_id,'vin':vin,'query':symptom,'started_epoch':time.time(),
+        'timing_method':'latest_supplier_result_snapshot'}),encoding='utf-8')
 
     base_hints = _vehicle_hints_for_request(request_row)
     catalog_vin, catalog_vin_note = _catalog_vin_candidate(vin, base_hints)
@@ -5433,6 +5440,88 @@ def request_offer_start(request_id: int, data: OfferSearchInput | None = None, l
     return parts_result
 
 
+_crawler_task = None
+
+
+@app.post('/api/requests/{request_id}/crawler-start')
+async def request_crawler_start(request_id: int, request: Request):
+    global _crawler_task
+    _require_local_vehicle_action(request, request.headers.get('X-Human-Action'), 'start-crawler')
+    POLICY.require_robot(Action.SEARCH_PARTS)
+    row = _request_by_id(request_id)
+    if not row:
+        raise HTTPException(404, 'Cererea nu există.')
+    if _crawler_task and not _crawler_task.done():
+        raise HTTPException(409, 'Crawlerul rulează deja. Așteaptă rezultatul curent.')
+    if any(j.get('status') in {'QUEUED','RUNNING'} for j in _load_robot_jobs()):
+        raise HTTPException(409, 'Așteaptă terminarea workerului înainte de comparație.')
+    vin = str(row.get('vin') or '')
+    if len(vin) != 17:
+        raise HTTPException(409, 'Identifică VIN-ul înainte de căutarea crawler.')
+    folder = DATA_DIR / 'crawler_results'
+    folder.mkdir(exist_ok=True)
+    output = folder / f'request_{request_id}.json'
+    auto = {}
+    try:
+        auto = json.loads(_autototal_result_file(request_id).read_text(encoding='utf-8'))
+    except (ValueError, OSError):
+        pass
+    seeds = auto.get('oe_candidates') or [] if str(auto.get('vin') or '').upper() == vin.upper() else []
+    previous = _load_raw_request_offer_result(request_id)
+    if not seeds and str(previous.get('vin') or '').upper() == vin.upper():
+        seeds = [{'requested_item':p.get('requested_item'),'oe_code':p.get('manufacturer_ref'),
+                  'description':p.get('description')} for p in previous.get('products') or []
+                 if str(p.get('brand') or '').upper().startswith('OE') and p.get('manufacturer_ref')]
+    query = str(previous.get('query') or row.get('symptom') or '')
+    from catalogue_crawler import run_crawler
+    output.write_text(json.dumps({'request_id':request_id,'vin':vin,'query':query,
+                                 'status':'running','products':[],'sources':{}}),encoding='utf-8')
+    _crawler_task = asyncio.create_task(run_crawler(request_id,vin,query,seeds,output))
+    return {'ok':True, 'mode':'crawler', 'request_id':request_id}
+
+
+@app.get('/api/requests/{request_id}/search-comparison')
+def request_search_comparison(request_id: int):
+    row = _request_by_id(request_id)
+    if not row:
+        raise HTTPException(404)
+    from catalogue_crawler import metrics, _required_product_kinds
+    worker = _load_request_offer_result(request_id)
+    duration = None
+    try:
+        benchmark = json.loads((DATA_DIR / 'search_benchmarks' / f'worker_{request_id}.json').read_text())
+        if benchmark.get('vin') == row.get('vin'):
+            finish = max(path.stat().st_mtime for path in (_offer_result_file(request_id), _autototal_result_file(request_id)) if path.exists())
+            if finish >= benchmark['started_epoch']:
+                duration = round(finish-benchmark['started_epoch'],2)
+    except (OSError,ValueError,KeyError):
+        pass
+    crawler = {}
+    try:
+        crawler = json.loads((DATA_DIR / 'crawler_results' / f'request_{request_id}.json').read_text(encoding='utf-8'))
+        if crawler.get('vin') != row.get('vin'):
+            crawler = {}
+        elif crawler.get('status') == 'running' and (not _crawler_task or _crawler_task.done()):
+            crawler['status'] = 'interrupted'
+            crawler['message'] = 'Procesul nu mai rulează; relansează testul crawler.'
+    except (OSError,ValueError):
+        pass
+    price_differences = []
+    baseline_codes = {_offer_product_code(p).replace(' ','').upper():p for p in worker.get('products') or []}
+    for product in crawler.get('products') or []:
+        other = baseline_codes.get(str(product.get('manufacturer_ref') or '').replace(' ','').upper())
+        if other and product.get('price_ron') and not product.get('needs_price_review'):
+            price_differences.append({'code':product['manufacturer_ref'],'crawler_price':product['price_ron'],
+                                      'worker_price':_offer_price_number(other)})
+    return {'request_id':request_id,'vin':row.get('vin'),'price_comparison':price_differences,
+            'worker':{'status':worker.get('status'),'message':worker.get('message'),'elapsed_seconds':duration,
+                      'timing_method':'latest_supplier_result_snapshot',
+                      **metrics(worker.get('products') or [], _required_product_kinds(row.get('symptom') or ''))},
+            'crawler':crawler or {'status':'not_started'},
+            'labour_comparison':'Timpii rămân în fluxul Haynes/TecRMI; acest test compară căutarea pieselor.',
+            'review_required':True}
+
+
 @app.post("/api/requests/{request_id}/labour-only-start")
 def request_labour_only_start(request_id: int):
     """Start HaynesPro and TecRMI without creating or starting a parts job."""
@@ -6361,7 +6450,8 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
     <div class="actions">
       <button id="all_search_btn" class="{search_button_class}" onclick="startAllSearches()"{' disabled' if search_active else ''}>{search_button_text}</button>
       <button id="labour_only_btn" class="purple" onclick="startLabourOnly()">Ofertare timpi Haynes + TecRMI</button>
-      <button class="purple" onclick="startAllSearches(true)"{' disabled' if search_active else ''}>Test live AutoTotal + Inter Cars + Haynes + TecRMI</button>
+      <button class="green" id="crawler_search_btn" onclick="startCrawler()">Căutare crawler — piese (test)</button>
+      <button class="gray" onclick="loadSearchComparison()">Compară worker / crawler</button>
       <a href="/api/requests/{request_id}/catalogue-sources" target="_blank" rel="noopener">Rezultate separate pe surse</a>
       <button class="gray" onclick="location.reload()">Reîncarcă rezultate</button>
     </div>
@@ -6370,6 +6460,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
       Nu pornește AutoTotal/Inter Cars pentru piese și nu adaugă piese în ofertă.
     </div>
     <div id="all_search_status" class="muted" style="display:{search_status_display};margin-top:12px" aria-live="polite">{search_status_initial if search_active or search_finished else ''}</div>
+    <div id="search_comparison" class="muted" style="margin-top:12px;display:none" aria-live="polite"></div>
   </div>
 
   <div class="card">
@@ -6537,6 +6628,18 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
 </div>
 
 <script>
+async function startCrawler(){{
+ const b=document.getElementById('crawler_search_btn'); b.disabled=true;
+ try{{const r=await fetch('/api/requests/{request_id}/crawler-start',{{method:'POST',headers:{{'X-Human-Action':'start-crawler'}}}});const d=await r.json();if(!r.ok)throw Error(d.detail||'Crawlerul nu a pornit.');await loadSearchComparison();}}catch(e){{alert(e.message);}}finally{{b.disabled=false;}}
+}}
+async function loadSearchComparison(){{
+ const box=document.getElementById('search_comparison');box.style.display='block';box.replaceChildren();
+ const r=await fetch('/api/requests/{request_id}/search-comparison',{{cache:'no-store'}});if(!r.ok){{box.textContent='Nu pot citi comparația.';return;}}const d=await r.json();
+ const title=document.createElement('h3');title.textContent='Worker / crawler — rezultate separate';box.append(title);
+ for(const [name,x] of [['Worker',d.worker],['Crawler',d.crawler]]){{const p=document.createElement('p');p.textContent=name+': '+(x.status||'necunoscut')+' · '+(x.found_kinds?.length||0)+' tipuri de piese · '+(x.priced_products||0)+' prețuri confirmate'+(x.elapsed_seconds!=null?' · '+x.elapsed_seconds+' secunde':' · durata rulării nu a fost înregistrată pentru acest rezultat');box.append(p);if(x.missing_kinds?.length){{const missing=document.createElement('div');missing.textContent='Lipsesc: '+x.missing_kinds.join(', ');box.append(missing);}}for(const [source,result]of Object.entries(x.sources||{{}})){{if(result.error){{const err=document.createElement('p');err.style.color='#b91c1c';err.textContent=source+': '+result.error;box.append(err);}}}}}}
+ const note=document.createElement('p');note.textContent=d.labour_comparison+' Acuratețea trebuie verificată; rezultatele crawlerului nu modifică oferta.';box.append(note);
+ if(d.crawler?.status==='running')setTimeout(loadSearchComparison,5000);
+}}
 function n(id){{
   const x=parseFloat(document.getElementById(id).value);
   return Number.isFinite(x)?x:0;

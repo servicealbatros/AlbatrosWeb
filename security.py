@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, IntEnum
-from hashlib import sha256
+from hashlib import sha256, pbkdf2_hmac
 from hmac import compare_digest, new as hmac_new
 import base64
 import json
@@ -243,18 +243,46 @@ class SecurityPolicy:
             raise SecurityViolation("Administrator authentication required")
         return os.getenv("ADMIN_USER", "administrator")
 
+    def dashboard_password_spec(self, master):
+        path = self.data_dir / 'dashboard_passwords.json'
+        saved = json.loads(path.read_text()) if path.exists() else {}
+        return saved.get('master' if master else 'reception') or os.getenv('MASTER_DASHBOARD_PASSWORD' if master else 'RECEPTION_DASHBOARD_PASSWORD', '')
+
+    def dashboard_credentials_valid(self, username, password):
+        master = username.strip() == os.getenv('MASTER_DASHBOARD_USER', 'master').strip()
+        wanted = os.getenv('MASTER_DASHBOARD_USER', 'master') if master else os.getenv('RECEPTION_DASHBOARD_USER', 'consilier')
+        spec = self.dashboard_password_spec(master)
+        if not spec or not password or not compare_digest(username.strip(), wanted.strip()):
+            return False
+        if spec.startswith('pbkdf2$'):
+            _, salt, digest = spec.split('$')
+            return compare_digest(pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), 300000).hex(), digest)
+        return compare_digest(password, spec)
+
+    def change_dashboard_password(self, master, password):
+        if not 10 <= len(password) <= 128:
+            raise SecurityViolation('Parola trebuie să aibă între 10 și 128 caractere.')
+        path = self.data_dir / 'dashboard_passwords.json'
+        saved = json.loads(path.read_text()) if path.exists() else {}
+        salt = secrets.token_bytes(16)
+        saved['master' if master else 'reception'] = 'pbkdf2$' + salt.hex() + '$' + pbkdf2_hmac('sha256', password.encode(), salt, 300000).hex()
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(saved), encoding='utf-8')
+        temporary.replace(path)
+
     def create_dashboard_session(self, username: str, password: str, ttl_seconds: int | None = None, device_id: str | None = None) -> str:
         """Create a signed session for a reception workstation.
 
         Reception credentials are deliberately separate from ADMIN_API_TOKEN,
         so the workstation never receives robot or administrator credentials.
         """
-        expected_user = os.getenv("RECEPTION_DASHBOARD_USER", "consilier").strip()
-        expected_password = os.getenv("RECEPTION_DASHBOARD_PASSWORD", "")
+        master = username.strip() == os.getenv('MASTER_DASHBOARD_USER', 'master').strip()
+        expected_user = os.getenv('MASTER_DASHBOARD_USER', 'master').strip() if master else os.getenv("RECEPTION_DASHBOARD_USER", "consilier").strip()
+        expected_password = self.dashboard_password_spec(master)
         secret = os.getenv("DASHBOARD_SESSION_SECRET", "")
         if (not expected_password or not secret or not username or not password
                 or not compare_digest(username.strip(), expected_user)
-                or not compare_digest(password, expected_password)):
+                or not self.dashboard_credentials_valid(username, password)):
             self.metrics.inc("blocked_actions")
             self.logger.write(action="dashboard_login", result="blocked", success=False,
                               client_id=username or None, error="invalid_credentials_or_configuration")
@@ -262,10 +290,11 @@ class SecurityPolicy:
         now = int(time.time())
         ttl = int(ttl_seconds or os.getenv("DASHBOARD_SESSION_TTL_SECONDS", "28800"))
         try:
-            sid = self.devices.issue(device_id, now + max(300, min(ttl, 86400)))
+            sid = self.devices.issue(device_id, now + max(300, min(ttl, 86400))) if env_bool('DASHBOARD_DEVICE_APPROVAL', True) and not master else None
         except PermissionError as exc:
             raise SecurityViolation(str(exc)) from exc
-        payload = json.dumps({"sub": expected_user, "role": "reception", "iat": now,
+        payload = json.dumps({"sub": expected_user, "role": "master" if master else "reception", "iat": now,
+                              "credential_version": hmac_new(secret.encode(), expected_password.encode(), sha256).hexdigest(),
                               "sid": sid,
                               "exp": now + max(300, min(ttl, 86400))},
                              separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -286,14 +315,29 @@ class SecurityPolicy:
         try:
             padded = encoded + "=" * (-len(encoded) % 4)
             payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
-            if payload.get("role") != "reception" or int(payload.get("exp") or 0) < int(time.time()):
+            if payload.get("role") not in {'reception', 'master'} or int(payload.get("exp") or 0) < int(time.time()):
                 return None
-            if not self.devices.valid(payload.get('sid')):
+            master = payload.get('role') == 'master'
+            password = self.dashboard_password_spec(master)
+            version = payload.get('credential_version')
+            if not version and password.startswith('pbkdf2$'):
+                return None
+            if version and not compare_digest(version, hmac_new(secret.encode(), password.encode(), sha256).hexdigest()):
+                return None
+            if master and (not version or payload.get('sub') != os.getenv('MASTER_DASHBOARD_USER', 'master')):
+                return None
+            if env_bool('DASHBOARD_DEVICE_APPROVAL', True) and not master and not self.devices.valid(payload.get('sid')):
                 return None
             username = str(payload.get("sub") or "").strip()
             return username or None
         except (ValueError, TypeError, json.JSONDecodeError):
             return None
+
+    def is_master_session(self, token: str | None) -> bool:
+        if not self.verify_dashboard_session(token):
+            return False
+        encoded = token.rsplit('.', 1)[0]
+        return json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4))).get('role') == 'master'
 
     def create_confirmation(self, action: Action, resource_id: str, user: str, ttl_seconds: int = 600) -> str:
         if ACTION_LEVEL[action] != AccessLevel.CONFIRMATION_REQUIRED:

@@ -24,7 +24,7 @@ MAX_BODY = 20 * 1024 * 1024
 def dashboard_route(path):
     if path.startswith('/api/dashboard/devices') or path == '/api/dashboard/access-check':
         return False
-    return path.startswith(('/cereri', '/conversatie/', '/oferta/', '/ofertare/',
+    return path == '/master' or path.startswith(('/cereri', '/conversatie/', '/oferta/', '/ofertare/',
         '/tehnician/', '/programator', '/acuratete', '/arhiva', '/baza-dsm',
         '/api/requests', '/api/scheduler/', '/api/dashboard/', '/api/dsm/', '/static/'))
 

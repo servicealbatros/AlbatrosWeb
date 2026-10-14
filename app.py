@@ -209,8 +209,7 @@ async def security_rate_limit(request: Request, call_next):
     if ('text/html' in response.headers.get('content-type', '')
             and request.url.path.startswith(('/cereri', '/oferta/', '/programator', '/conversatie/', '/acuratete'))):
         body = b''.join([chunk async for chunk in response.body_iterator])
-        extra = (b'<a href="/dispozitive" style="position:fixed;bottom:8px;right:12px;z-index:9999;background:white;padding:8px;border-radius:8px">Dispozitive conectate</a>'
-                 if local_client else b'''<script>setInterval(async()=>{try{const r=await fetch('/api/dashboard/access-check',{cache:'no-store'});if(r.status===401||r.status===403){document.body.replaceChildren();location.replace('/receptie/login')}}catch(e){}},5000);</script>''')
+        extra = b'<a href="/master" style="position:fixed;bottom:8px;right:12px;z-index:9999;background:white;padding:8px;border-radius:8px">Panou master</a>' if str(request.state.dashboard_user or '').startswith('master:') else b''
         headers = dict(response.headers)
         headers.pop('content-length', None)
         response = Response(content=body + extra, status_code=response.status_code, headers=headers)
@@ -245,13 +244,13 @@ def reception_login(request: Request, username: str = Form(...), password: str =
         raise HTTPException(status_code=429, detail="Prea multe încercări. Reîncercați peste câteva minute.")
     try:
         from hmac import compare_digest
-        if not (os.getenv('RECEPTION_DASHBOARD_PASSWORD') and
-                compare_digest(username.strip(), os.getenv('RECEPTION_DASHBOARD_USER', 'consilier').strip()) and
-                compare_digest(password, os.getenv('RECEPTION_DASHBOARD_PASSWORD', ''))):
+        master = username.strip() == os.getenv('MASTER_DASHBOARD_USER', 'master').strip()
+        expected_user = os.getenv('MASTER_DASHBOARD_USER', 'master') if master else os.getenv('RECEPTION_DASHBOARD_USER', 'consilier')
+        if not POLICY.dashboard_credentials_valid(username, password):
             raise SecurityViolation('Date de autentificare invalide')
-        device_id, device_state = POLICY.devices.register(
-            request.cookies.get('albatros_device'),
-            request.headers.get('user-agent', 'Calculator recepție'), client)
+        device_id, device_state = None, 'active'
+        if env_bool('DASHBOARD_DEVICE_APPROVAL', True) and not master:
+            device_id, device_state = POLICY.devices.register(request.cookies.get('albatros_device'), request.headers.get('user-agent', 'Calculator recepție'), client)
         if device_state != 'active':
             response = HTMLResponse('<h2>Accesul acestui calculator necesită activarea de către administrator.</h2><a href="/receptie/login">Reîncearcă după activare</a>', status_code=403)
             response.set_cookie('albatros_device', device_id, httponly=True, samesite='strict',
@@ -260,7 +259,7 @@ def reception_login(request: Request, username: str = Form(...), password: str =
         token = POLICY.create_dashboard_session(username, password, device_id=device_id)
     except SecurityViolation as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
-    response = RedirectResponse("/cereri", status_code=303)
+    response = RedirectResponse("/master" if master else "/cereri", status_code=303)
     response.set_cookie("albatros_reception", token, httponly=True, samesite="strict",
                         secure=env_bool("DASHBOARD_COOKIE_SECURE", True), max_age=28800, path="/")
     return response
@@ -414,6 +413,84 @@ def cloud_runtime_status(authorization: str | None = Header(default=None)):
                                           or env_bool('ALBATROS_INTERNAL_WORKER_API', False))
     report['robot_enabled'] = POLICY.robot_enabled
     return report
+
+
+def _master_access(request):
+    user = getattr(request.state, 'dashboard_user', '') or ''
+    master = (request.headers.get('x-albatros-signature') and user.startswith('master:')) or POLICY.is_master_session(request.cookies.get('albatros_reception'))
+    if not master:
+        try:
+            POLICY.require_admin(request.headers.get('authorization'))
+        except SecurityViolation:
+            raise HTTPException(status_code=403, detail='Acces master necesar.')
+    elif request.method != 'GET' and not request.headers.get('x-albatros-signature') and not _same_origin_request(request):
+        raise HTTPException(status_code=403, detail='Origine invalidă.')
+
+
+@app.get('/master', response_class=HTMLResponse)
+def master_page(request: Request):
+    _master_access(request)
+    return HTMLResponse((BASE / 'static/master.html').read_text(encoding='utf-8'))
+
+
+@app.get('/api/dashboard/master/status')
+def master_status(request: Request):
+    _master_access(request)
+    from schedule_import_control import read_state
+    path = DATA_DIR / 'render_runtime_health.json'
+    runtime = json.loads(path.read_text()) if path.exists() else {}
+    return {'robot_enabled': POLICY.robot_enabled, 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
+            'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR),
+            'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True)}
+
+
+class MasterControlInput(BaseModel):
+    enabled: bool
+
+
+class MasterImportInput(BaseModel):
+    enabled: bool = True
+    interval_hours: float = Field(default=5, ge=1, le=168)
+
+
+class MasterPasswordInput(BaseModel):
+    account: str = Field(pattern='^(master|consilier)$')
+    password: str = Field(min_length=10, max_length=128)
+
+
+@app.post('/api/master/password')
+def master_change_password(data: MasterPasswordInput, request: Request):
+    _master_access(request)
+    POLICY.change_dashboard_password(data.account == 'master', data.password)
+    return {'ok': True, 'relogin': data.account == 'master'}
+
+
+@app.post('/api/dashboard/master/robot')
+def master_robot(data: MasterControlInput, request: Request):
+    _master_access(request)
+    POLICY.set_robot_enabled(data.enabled, 'master')
+    interrupted = _interrupt_running_robot_jobs('stopped_by_master') if not data.enabled else {}
+    return {'ok': True, 'robot_enabled': POLICY.robot_enabled, 'interrupted_jobs': interrupted}
+
+
+@app.post('/api/dashboard/master/import-settings')
+def master_import_settings(data: MasterImportInput, request: Request):
+    _master_access(request)
+    from schedule_import_control import read_state, write_state
+    if _dsm_week_import_lock.locked():
+        raise HTTPException(status_code=409, detail='Așteptați terminarea importului în curs.')
+    state = read_state(DATA_DIR)
+    state.update(enabled=data.enabled, interval_hours=data.interval_hours)
+    if state.get('last_success'):
+        state['next_due'] = (datetime.fromisoformat(state['last_success']) + timedelta(hours=data.interval_hours)).isoformat(timespec='seconds')
+    write_state(DATA_DIR, state)
+    return {'ok': True}
+
+
+@app.post('/api/dashboard/master/import-now')
+async def master_import_now(request: Request):
+    _master_access(request)
+    return await _run_periodic_dsm_import()
 
 
 @app.get("/api/admin/metrics")
@@ -7268,23 +7345,22 @@ def _configured_clock(name: str, default: str) -> tuple[int, int]:
 
 
 async def _dsm_schedule_automation_loop() -> None:
-    """Import tomorrow at 17:00 and send today's mechanic schedules at 08:00."""
-    import_clock = _configured_clock("DSM_SCHEDULE_IMPORT_TIME", "17:00")
+    """Import the rolling week periodically; send today's mechanic schedules at 08:00."""
     send_clock = _configured_clock("MECHANIC_SCHEDULE_SEND_TIME", "08:00")
-    await asyncio.sleep(3)
+    from schedule_import_control import read_state, write_state, finish_import
+    previous = read_state(DATA_DIR)
+    if previous.get('status') == 'running':
+        finish_import(previous, {'ok': False, 'days_imported': 0, 'errors': [{'error': 'Import întrerupt de repornirea serverului.'}]}, datetime.now())
+        write_state(DATA_DIR, previous)
+    await asyncio.sleep(60)
     while True:
         try:
             now = datetime.now()
             if POLICY.robot_enabled:
-                import_due = now.replace(hour=import_clock[0], minute=import_clock[1], second=0, microsecond=0)
-                target_date = (now + timedelta(days=1)).date()
-                if now >= import_due and not automation_succeeded(DB_PATH, "dsm_import", target_date):
-                    if automation_attempts(DB_PATH, "dsm_import", target_date) < 3:
-                        try:
-                            result = await import_dsm_schedule(DB_PATH, target_date)
-                            record_automation_run(DB_PATH, "dsm_import", target_date, "success", result)
-                        except Exception as exc:
-                            record_automation_run(DB_PATH, "dsm_import", target_date, "error", {"error": str(exc)})
+                from schedule_import_control import read_state, import_due
+                state = read_state(DATA_DIR)
+                if import_due(state, now):
+                    await _run_periodic_dsm_import()
 
                 send_due = now.replace(hour=send_clock[0], minute=send_clock[1], second=0, microsecond=0)
                 send_window_end = send_due + timedelta(minutes=20)
@@ -7522,6 +7598,30 @@ async def scheduler_import_dsm_week(
     human_action: str | None = Header(None, alias="X-Human-Action"),
 ):
     _require_local_vehicle_action(request, human_action, "import-dsm-schedule")
+    return await _run_periodic_dsm_import()
+
+
+_dsm_week_import_lock = asyncio.Lock()
+
+
+async def _run_periodic_dsm_import():
+    from schedule_import_control import read_state, write_state, finish_import
+    if _dsm_week_import_lock.locked():
+        raise HTTPException(status_code=409, detail='Un import DSM este deja în curs.')
+    async with _dsm_week_import_lock:
+        state = read_state(DATA_DIR)
+        state.update(status='running', last_started=datetime.now().isoformat(timespec='seconds'))
+        write_state(DATA_DIR, state)
+        try:
+            result = await _import_dsm_rolling_week()
+        except Exception as exc:
+            result = {'ok': False, 'days_imported': 0, 'errors': [{'error': str(exc)[:500]}]}
+        finish_import(state, result, datetime.now())
+        write_state(DATA_DIR, state)
+        return result
+
+
+async def _import_dsm_rolling_week():
     # Importă azi și următoarele 7 zile, indiferent de săptămâna afișată.
     from zoneinfo import ZoneInfo
     today = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -7535,9 +7635,6 @@ async def scheduler_import_dsm_week(
             errors.append({"date": target.isoformat(), "error": str(exc)})
             if 'Autentificare DSM necesară' in str(exc):
                 break
-    if not days:
-        detail = errors[0]["error"] if errors else "DSM nu a returnat programări."
-        raise HTTPException(status_code=502, detail=detail)
     return {
         "ok": not errors,
         "week_start": monday.date().isoformat(),

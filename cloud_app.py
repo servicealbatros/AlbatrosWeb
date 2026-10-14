@@ -97,6 +97,8 @@ class CloudGateway:
             if not user:
                 POLICY.require_admin(request.headers.get('authorization'))
                 user = 'cloud-administrator'
+            elif POLICY.is_master_session(request.cookies.get('albatros_reception')):
+                user = 'master:' + user
             if method not in {'GET', 'HEAD', 'OPTIONS'} and user != 'cloud-administrator':
                 from app import _same_origin_request
                 if not _same_origin_request(request):

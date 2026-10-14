@@ -30,6 +30,39 @@ from security import POLICY
 
 
 class CloudAccessTests(unittest.TestCase):
+    def test_password_login_without_device_approval_and_separate_master_access(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {'DASHBOARD_DEVICE_APPROVAL': 'false', 'MASTER_DASHBOARD_USER': 'master',
+                'MASTER_DASHBOARD_PASSWORD': 'distinct-master-password', 'RECEPTION_BRIDGE_URL': ''}):
+            client = TestClient(app, base_url='https://app.servicealbatros.ro')
+            self.assertEqual(client.post('/receptie/login', data={'username': 'test-user', 'password': 'wrong'}).status_code, 401)
+            result = client.post('/receptie/login', data={'username': 'test-user', 'password': 'test-password'}, follow_redirects=False)
+            self.assertEqual(result.status_code, 303)
+            self.assertNotIn('albatros_device', client.cookies)
+            self.assertEqual(client.get('/api/dashboard/master/status').status_code, 403)
+            result = client.post('/receptie/login', data={'username': 'master', 'password': 'distinct-master-password'}, follow_redirects=False)
+            self.assertEqual(result.headers['location'], '/master')
+            self.assertEqual(client.get('/api/dashboard/master/status').status_code, 200)
+            self.assertEqual(client.post('/api/dashboard/master/robot', json={'enabled': False}, headers={'Origin':'https://attacker.example'}).status_code, 403)
+            token = client.cookies.get('albatros_reception')
+            self.assertTrue(POLICY.is_master_session(token))
+            with patch.dict(os.environ, {'MASTER_DASHBOARD_PASSWORD': 'changed-password'}):
+                self.assertIsNone(POLICY.verify_dashboard_session(token))
+
+    def test_password_change_is_hashed_persistent_and_revokes_previous_session(self):
+        from unittest.mock import patch
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as root, patch.object(POLICY, 'data_dir', Path(root)), patch.dict(os.environ, {'DASHBOARD_DEVICE_APPROVAL':'false'}):
+            token = POLICY.create_dashboard_session('test-user', 'test-password')
+            self.assertTrue(POLICY.verify_dashboard_session(token))
+            POLICY.change_dashboard_password(False, 'a-new-test-password')
+            saved = (Path(root) / 'dashboard_passwords.json').read_text()
+            self.assertNotIn('a-new-test-password', saved)
+            self.assertIn('pbkdf2$', saved)
+            self.assertIsNone(POLICY.verify_dashboard_session(token))
+            self.assertFalse(POLICY.dashboard_credentials_valid('test-user', 'test-password'))
+            self.assertTrue(POLICY.dashboard_credentials_valid('test-user', 'a-new-test-password'))
+
     def test_remote_gateway_signature_can_reach_internal_worker_only_when_valid(self):
         import time
         from unittest.mock import AsyncMock, patch

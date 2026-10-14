@@ -628,8 +628,13 @@ async def _discover_oe_vin_candidates(ws, identification: dict, vin: str,
             payload = {"t_id": "0", "c_id": catalog, "s_id": ssd,
                        "g_id": group_id, "vin": vin}
             expression = "(async()=>{const post=%s;return JSON.stringify((await post('/car/get-lcar-categ',%s)).data?.result||{});})()" % (_post_helper_js(), json.dumps(payload))
-            raw = await _evaluate(ws, call_id + index, expression, True)
-            group_cache[group_id] = _json_value(raw, {})
+            try:
+                raw = await _evaluate(ws, call_id + index, expression, True)
+                group_cache[group_id] = _json_value(raw, {})
+            except Exception:
+                # One inaccessible OE diagram must not discard other results
+                # or prevent the independent TecDoc/oil search.
+                group_cache[group_id] = {}
         result = group_cache[group_id]
         for group in result.get("groups") or []:
             for unit in group.get("units") or []:
@@ -653,7 +658,12 @@ async def _discover_oe_vin_candidates(ws, identification: dict, vin: str,
                     name_norm = unicodedata.normalize("NFKD", name.casefold()).encode("ascii", "ignore").decode("ascii")
                     detail_values = " ".join(str(x.get("value") or "") for x in detail.get("attributes") or [])
                     detail_norm = unicodedata.normalize("NFKD", detail_values.casefold()).encode("ascii", "ignore").decode("ascii")
-                    if (not code or not any(term in name_norm for term in target["terms"])
+                    name_matches = any(term in name_norm for term in target['terms'])
+                    if (_revision_product_kind(target['requested_item']) == 'oil_drain_plug'
+                            and re.match(r'^screw plug(?:\b|,)', name_norm)
+                            and re.search(r'\boil (?:pan|sump)\b', unit_norm)):
+                        name_matches = True
+                    if (not code or not name_matches
                             or any(term in name_norm for term in target.get("exclude", ()) )):
                         continue
                     if "nu pentru acest model" in (name_norm + " " + detail_norm):
@@ -853,13 +863,33 @@ def _required_product_kinds(query: str) -> set[str]:
     return required
 
 
-async def _engine_oil_requirements(ws, type_id: str, call_id: int) -> dict:
+def _confirmed_oil_requirements(request_id, vin):
+    for folder in ('tecrmi_output', 'technician_output'):
+        try:
+            data = json.loads((DATA_DIR / folder / f'request_{request_id}_labour.json').read_text(encoding='utf-8'))
+            if str(data.get('vin') or '').upper() != str(vin).upper():
+                continue
+            if data.get('status') not in {'ready', 'needs_verification'}:
+                continue
+            if data.get('engine_oil_options') and float(data.get('engine_oil_liters') or 0) > 0:
+                return {'engine_capacity': {'value': data['engine_oil_liters']},
+                        'engine_oil_options': data['engine_oil_options'],
+                        'requirements_source': data.get('source')}
+        except (OSError, ValueError, TypeError):
+            continue
+    return {}
+
+
+async def _engine_oil_requirements(ws, type_id: str, call_id: int, request_id=None, vin='') -> dict:
     """Read the VIN-selected engine capacity and oil approvals from AutoTotal."""
     expression = """(async()=>{const post=%s;return JSON.stringify((await post('/car/capacitati-umplere',{typeID:%s})).data?.result?.engOil||{});})()""" % (_post_helper_js(), json.dumps(str(type_id)))
     try:
-        return _json_value(await _evaluate(ws, call_id, expression, True), {})
+        requirements = _json_value(await _evaluate(ws, call_id, expression, True), {})
+        if requirements.get('engine_oil_options'):
+            return requirements
     except Exception:
-        return {}
+        pass
+    return _confirmed_oil_requirements(request_id, vin) if request_id is not None else {}
 
 
 def _choose_engine_oil_card(cards: list[dict], requirements: dict) -> dict | None:
@@ -1318,7 +1348,7 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
     if "filtru ulei" in wanted:
         if not any(value in product for value in ("filtru ulei", "filtru de ulei", "oil filter", "cartus filtru")):
             return False
-        if any(value in product for value in ("suport filtru", "capac filtru", "set garnituri", "housing")):
+        if any(value in product for value in ("suport filtru", "capac filtru", "oil filter cover", "set garnituri", "housing")):
             return False
         if any(value in product for value in (
                 "inel de etansare", "garnitura", "set sortiment", "trusa")):
@@ -1703,7 +1733,7 @@ async def run(request_id: int, vin: str, query: str, output: Path,
             await _evaluate(ws, 10, f"location.href={json.dumps(base_url + '#/standard?ti=' + type_id)}; true")
             await asyncio.sleep(2)
             catalog = await _standard_categories(ws, type_id, 11)
-            oil_requirements = await _engine_oil_requirements(ws, type_id, 12)
+            oil_requirements = await _engine_oil_requirements(ws, type_id, 12, request_id, vin)
             oil_requirements['oe_brand'] = str(vehicle.get('make') or '')
             oil_requirements['oe_only'] = bool(re.search(r'ulei[^,;\n]*(?:\boe\b|original|origine)', _plain(query)))
             oe_candidates = []
@@ -1769,6 +1799,8 @@ async def run(request_id: int, vin: str, query: str, output: Path,
                     and not any(_revision_product_kind(
                         p.get("requested_item") or p.get("description")) == "engine_oil"
                                 for p in products)):
+                if not oil_requirements.get('engine_oil_options'):
+                    oil_requirements.update(_confirmed_oil_requirements(request_id, vin))
                 products.extend(await _discover_engine_oil(ws, oil_requirements, 7000))
             products = _keep_one_oil_drain_plug(products)
             required = _required_product_kinds(query)

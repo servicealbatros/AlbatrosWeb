@@ -27,7 +27,6 @@ def stop(*_):
     for process in reversed(CHILDREN):
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
-    for process in reversed(CHILDREN):
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -164,6 +163,17 @@ def probe_browser(keep_provider_tabs=False):
         wait_url('http://127.0.0.1:9222/json/version')
         browser = playwright.chromium.connect_over_cdp('http://127.0.0.1:9222', timeout=30000)
         context = browser.contexts[0]
+        restored_dsm = None
+        state_key = os.getenv('ALBATROS_PROVIDER_STATE_KEY')
+        if state_key:
+            from dsm_session_vault import DsmSessionVault
+            try:
+                restored_dsm = DsmSessionVault(profile, state_key).load()
+                if restored_dsm and restored_dsm['cookies']:
+                    context.add_cookies(restored_dsm['cookies'])
+                REPORT['dsm_session_restore'] = {'configured': True, 'restored_cookie_count': len(restored_dsm['cookies']) if restored_dsm else 0}
+            except Exception as error:
+                REPORT['dsm_session_restore'] = {'configured': True, 'error': type(error).__name__}
         if not context.service_workers:
             context.wait_for_event('serviceworker', timeout=30000)
         workers = context.service_workers
@@ -178,7 +188,7 @@ def probe_browser(keep_provider_tabs=False):
         # Public landing pages only: no provider login, VIN lookup or writes.
         reachability = {}
         public_pages = [] if os.getenv('ALBATROS_PROVIDER_TEST_CONSOLE') == 'true' and not keep_provider_tabs else [
-                         ('dsm', 'https://apps.dsmpro.ro/'),
+                         ('dsm', restored_dsm['landing'] if restored_dsm and restored_dsm['cookies'] else 'https://apps.dsmpro.ro/'),
                           ('autototal', 'https://www3.eoriginal.ro/'),
                           ('intercars', 'https://ro.e-cat.intercars.eu/')]
         if keep_provider_tabs:
@@ -194,6 +204,9 @@ def probe_browser(keep_provider_tabs=False):
             finally:
                 if not keep_provider_tabs:
                     page.close()
+        if state_key:
+            os.environ.setdefault('ALBATROS_BROWSER_PROFILE_DIR', str(profile))
+            spawn([sys.executable, str(BASE / 'scripts/dsm_session_keeper.py')])
         REPORT.update(phase='browser_ready', chromium=True, cdp=True, intercars_extension=True,
                       provider_sessions='unverified', public_provider_pages=reachability)
         print(json.dumps(REPORT), flush=True)

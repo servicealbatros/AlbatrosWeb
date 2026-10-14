@@ -184,16 +184,32 @@ async def snapshot():
         shot = await _page.screenshot(type='png', animations='disabled', timeout=5000)
     except ScreenshotTimeout:
         # A delayed font/image must not prevent a valid login form submission.
-        shot = None
+        debugger = None
+        try:
+            debugger = await _page.context.new_cdp_session(_page)
+            capture = await debugger.send('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': False})
+            shot = base64.b64decode(capture['data'])
+        except Exception:
+            shot = None
+        finally:
+            if debugger is not None:
+                await debugger.detach()
     navigation = await _page.locator('a,button').evaluate_all("""nodes=>nodes.map((e,index)=>({index,
       text:(e.innerText||'').trim(),visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)}))
       .filter(e=>e.visible&&/^(autentificare|conectare|login|log in|sign in|contul meu|my account)$/i.test(e.text))""")
     captcha = _page.locator('[name="g-recaptcha-response"]')
     captcha_present = await captcha.count() > 0
     captcha_complete = await captcha.evaluate_all('nodes=>nodes.some(e=>!!e.value.trim())') if captcha_present else False
+    notice = await _page.locator('[role=alert],.alert-danger,.invalid-feedback').all_text_contents()
+    dsm_saved = False
+    if not forms and os.getenv('ALBATROS_PROVIDER_STATE_KEY'):
+        from dsm_session_vault import DsmSessionVault, trusted_landing
+        if trusted_landing(_page.url) and await _page.locator('a[href*="logout"],a[href*="logoff"],form[action*="logout"]').count():
+            dsm_saved = DsmSessionVault(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], os.environ['ALBATROS_PROVIDER_STATE_KEY']).save(await _page.context.cookies(), _page.url)
     return {'page_open': True, 'page_id': _page_id, 'host': urlparse(_page.url).hostname,
             'forms': forms, 'image': 'data:image/png;base64,' + base64.b64encode(shot).decode() if shot else '',
             'screenshot_unavailable': shot is None,
+            'notice': ' '.join(notice)[:500], 'dsm_session_saved': dsm_saved,
             'login_form_present': bool(forms), 'auth_navigation': [] if forms else navigation,
             'captcha_present': captcha_present, 'captcha_complete': captcha_complete,
             'captcha_regions': await captcha_regions()}

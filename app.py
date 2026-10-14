@@ -497,6 +497,21 @@ async def master_import_now(request: Request):
     return await _run_periodic_dsm_import()
 
 
+@app.post('/api/dashboard/master/provider-login')
+def master_provider_login(request: Request):
+    _master_access(request)
+    import secrets
+    from provider_test_console import enabled, GRANTS
+    enabled()
+    token = secrets.token_urlsafe(32)
+    GRANTS[token] = time.time() + 120
+    origin = os.getenv('ALBATROS_PROVIDER_AUTH_ORIGIN', 'https://albatros-robot-linux-test.onrender.com').rstrip('/')
+    parsed = urlparse(origin)
+    if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
+        raise HTTPException(status_code=503, detail='Originea autentificării furnizorilor nu este configurată corect.')
+    return {'url': origin + '/provider-auth#' + token, 'expires_in': 120}
+
+
 @app.get("/api/admin/metrics")
 def admin_metrics(authorization: str | None = Header(None)):
     _admin_user(authorization)

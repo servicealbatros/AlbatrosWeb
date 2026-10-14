@@ -12,6 +12,8 @@ async function api(path,body){const r=await fetch('/api/provider-auth/'+path,{me
 function render(s,keepForm=false){currentPageId=s.page_id||'';status.textContent=s.blocked_host?'Autentificarea a redirecționat către un domeniu care trebuie verificat: '+s.blocked_host:s.host?'Furnizor: '+s.host+(s.login_form_present?' — completează formularul.':' — nu apare formular de autentificare; urmează verificarea accesului în catalog.'):'Alege un furnizor.';
  if(s.prepared_only)status.textContent='Datele sunt completate în pagina furnizorului. '+(s.captcha_pending?'Completează acum CAPTCHA, apoi apasă CONECTARE.':'Poți apăsa CONECTARE.');else if(s.captcha_complete)status.textContent='Verificarea CAPTCHA este completă. Apasă CONECTARE.';
  if(s.screenshot_unavailable)status.textContent+=' Imagine temporar indisponibilă; formularul rămâne activ.';
+ if(s.notice)status.textContent+=' '+s.notice;
+ if(s.dsm_session_saved)status.textContent+=' Sesiunea DSM a fost salvată criptat pentru repornire.';
  captchaRegions=!s.login_form_present||s.captcha_complete?[]:(s.captcha_regions||[]);document.querySelector('#captcha-help').hidden=!captchaRegions.length;
  for(const b of document.querySelectorAll('#forms button[data-login-submit]')){b.disabled=!!(s.captcha_present&&!s.captcha_complete);b.style.opacity=b.disabled?'0.5':'1';}
  const screen=document.querySelector('#screen');screen.onload=drawCaptcha;screen.src=s.image||'';if(!s.image)document.querySelector('#captcha-panel').replaceChildren();screen.style.cursor=captchaRegions.length?'pointer':'default';if(keepForm)return;const container=document.querySelector('#forms');container.replaceChildren();

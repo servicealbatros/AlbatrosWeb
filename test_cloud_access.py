@@ -80,16 +80,20 @@ class CloudAccessTests(unittest.TestCase):
         core.init_scheduler_db(core.DB_PATH)
         core.ensure_automation_tables(core.DB_PATH)
         with patch.dict(os.environ, {'DASHBOARD_DEVICE_APPROVAL': 'false', 'MASTER_DASHBOARD_USER': 'master',
-                'MASTER_DASHBOARD_PASSWORD': 'distinct-master-password', 'RECEPTION_BRIDGE_URL': ''}):
+                'MASTER_DASHBOARD_PASSWORD': 'distinct-master-password', 'RECEPTION_BRIDGE_URL': '', 'ALBATROS_PROVIDER_TEST_CONSOLE':'true'}):
             client = TestClient(app, base_url='https://app.servicealbatros.ro')
             self.assertEqual(client.post('/receptie/login', data={'username': 'test-user', 'password': 'wrong'}).status_code, 401)
             result = client.post('/receptie/login', data={'username': 'test-user', 'password': 'test-password'}, follow_redirects=False)
             self.assertEqual(result.status_code, 303)
             self.assertNotIn('albatros_device', client.cookies)
             self.assertEqual(client.get('/api/dashboard/master/status').status_code, 403)
+            self.assertEqual(client.post('/api/dashboard/master/provider-login',json={},headers={'Origin':'https://app.servicealbatros.ro'}).status_code,403)
             result = client.post('/receptie/login', data={'username': 'master', 'password': 'distinct-master-password'}, follow_redirects=False)
             self.assertEqual(result.headers['location'], '/master')
             self.assertEqual(client.get('/api/dashboard/master/status').status_code, 200)
+            grant = client.post('/api/dashboard/master/provider-login',json={},headers={'Origin':'https://app.servicealbatros.ro'})
+            self.assertEqual(grant.status_code,200)
+            self.assertIn('/provider-auth#',grant.json()['url'])
             self.assertEqual(client.post('/api/dashboard/master/robot', json={'enabled': False}, headers={'Origin':'https://attacker.example'}).status_code, 403)
             token = client.cookies.get('albatros_reception')
             self.assertTrue(POLICY.is_master_session(token))

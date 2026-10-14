@@ -139,10 +139,12 @@ async def run_crawler(request_id, vin, query, seeds, output):
                                         if part.get('oem') and (oil_pan_plug or any(term in name for term in target['terms'])):
                                             candidates.append({'requested_item':target['requested_item'],'oe_code':part['oem'],'description':part['name']})
                     seen = set()
-                    for candidate in candidates[:12]:
+                    for candidate in candidates:
                         code = re.sub(r'\s+','',str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or ''))
                         if not code or code in seen:
                             continue
+                        if len(seen) >= 12:
+                            break
                         seen.add(code)
                         for card in await crawler.auto_search(code):
                             compact = re.sub(r'[^A-Z0-9]','',card['title'].upper())
@@ -150,6 +152,7 @@ async def run_crawler(request_id, vin, query, seeds, output):
                             if re.sub(r'[^A-Z0-9]','',code.upper()) not in compact:
                                 continue
                             if not _oe_option_allowed(candidate,card['title'],'OE'):
+                                report['rejected_wrong_family'] = report.get('rejected_wrong_family', 0) + 1
                                 continue
                             price = re.search(r'Pret vanzare \(cu TVA\)\s*([\d]+(?:[.,]\d{1,2})?)',card['text'])
                             if not price:

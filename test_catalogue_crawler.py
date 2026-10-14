@@ -5,9 +5,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from catalogue_crawler import safe_url, metrics, run_crawler
+from autototal_request_worker import _oe_option_allowed
 
 
 class CrawlerTests(unittest.IsolatedAsyncioTestCase):
+    def test_filter_search_rejects_housing_and_cover(self):
+        candidate = {'requested_item': 'filtru ulei'}
+        for title in ('BMW 11428507685 CAPAC CORP FILTRU ULEI',
+                      'BMW 11428580415 ANSAMBLU CARCASA FILTRU ULEI MOTOR'):
+            self.assertFalse(_oe_option_allowed(candidate, title, 'OE'))
+        self.assertTrue(_oe_option_allowed(candidate, 'BMW 11428575211 FILTRU ULEI MOTOR', 'OE'))
+
     def test_navigation_boundaries(self):
         self.assertTrue(safe_url('https://www3.eoriginal.ro/search/result','autototal'))
         for url in ('http://www3.eoriginal.ro/search/result','https://evil.test/search/result',

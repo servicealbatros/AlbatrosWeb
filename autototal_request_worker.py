@@ -1364,7 +1364,7 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
     if "filtru ulei" in wanted:
         if not any(value in product for value in ("filtru ulei", "filtru de ulei", "oil filter", "cartus filtru")):
             return False
-        if any(value in product for value in ("suport filtru", "capac filtru", "oil filter cover", "set garnituri", "housing")):
+        if any(value in product for value in ("suport filtru", "capac filtru", "capac corp filtru", "carcasa", "oil filter cover", "set garnituri", "housing")):
             return False
         if any(value in product for value in (
                 "inel de etansare", "garnitura", "set sortiment", "trusa")):

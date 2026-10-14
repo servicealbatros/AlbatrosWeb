@@ -149,7 +149,7 @@ async def _read_dsm_schedule_existing_tab(target_date: date) -> list[dict]:
     navigated = False
     try:
         async with websockets.connect(
-            target["webSocketDebuggerUrl"], origin="http://127.0.0.1:9222",
+            target["webSocketDebuggerUrl"],
             open_timeout=5, close_timeout=3, max_size=16_000_000,
         ) as ws:
             if urlparse(original_url).path != urlparse(schedule_url).path:

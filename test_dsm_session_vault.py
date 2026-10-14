@@ -31,6 +31,29 @@ class VaultTests(unittest.TestCase):
             self.assertEqual(vault.path.read_bytes(),before)
 
 class BrowserRestartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_backend_cdp_connection_needs_no_browser_origin(self):
+        import json
+        from urllib.request import urlopen
+        import websockets
+        from playwright.async_api import async_playwright
+        async with async_playwright() as playwright:
+            if not Path(playwright.chromium.executable_path).exists():
+                self.skipTest('Chromium not installed')
+            with tempfile.TemporaryDirectory() as root:
+                context = await playwright.chromium.launch_persistent_context(root, headless=True,
+                    args=['--no-sandbox','--remote-debugging-address=127.0.0.1','--remote-debugging-port=0'])
+                port = (Path(root)/'DevToolsActivePort').read_text().splitlines()[0]
+                targets = json.load(urlopen('http://127.0.0.1:'+port+'/json/list',timeout=3))
+                target = next(t for t in targets if t['type']=='page')
+                async with websockets.connect(target['webSocketDebuggerUrl'],open_timeout=3) as socket:
+                    await socket.send(json.dumps({'id':1,'method':'Runtime.evaluate','params':{'expression':'1+1','returnByValue':True}}))
+                    while True:
+                        message = json.loads(await asyncio.wait_for(socket.recv(),timeout=3))
+                        if message.get('id') == 1:
+                            self.assertEqual(message['result']['result']['value'],2)
+                            break
+                await context.close()
+
     async def test_session_cookie_is_restored_after_real_browser_restart(self):
         from playwright.async_api import async_playwright
         async with async_playwright() as playwright:

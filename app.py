@@ -6151,6 +6151,7 @@ def request_unified_offer_page(request_id: int):
         labour_breakdown_html = '<div class="span3 muted">Nu există încă timpi de catalog pe operații.</div>'
 
     product_rows = []
+    presentation_groups = {}
     visible_products = _one_offer_product_per_brand(products, selected_products)
     for index, product in visible_products:
             brand = _offer_value(product, "brand")
@@ -6177,21 +6178,19 @@ def request_unified_offer_page(request_id: int):
         <tr id="product-row-{index}" class="{'selected-product' if is_selected else ''}">
           <td>{_escape_html(product.get("requested_item") or "Piesă")}</td>
           <td>{_escape_html(brand)}<br><small>{_escape_html(source)}</small></td>
-          <td>{_escape_html(description)}</td>
+          <td><details class="part-description"><summary>Denumire / detalii</summary>{_escape_html(description)}</details></td>
           <td><b>{_escape_html(manufacturer_code)}</b><br><small>Cod furnizor: {_escape_html(supplier_code)}</small></td>
           <td><b>{_escape_html(price)}</b><br><small>Marcă: {_escape_html(brand)}</small></td>
           <td>{_escape_html(availability)}</td>
           <td>{source_link} {selection_button}</td>
         </tr>
         """)
+            kind = _offer_product_kind(product) or str(product.get("requested_item") or "Piesă")
+            group = presentation_groups.setdefault(kind, {"label": str(product.get("requested_item") or "Piesă"), "rows": [], "selected": False})
+            group["rows"].append(product_rows[-1])
+            group["selected"] = group["selected"] or is_selected
 
-    products_html = (
-        f"""<div class="muted">Este afișată automat o singură variantă, cea mai bună, pentru fiecare tip de piesă și producător.</div>
-        <table><thead><tr><th>Tip</th><th>Marcă</th><th>Piesă / pachet</th><th>Coduri verificare</th><th>Preț</th><th>Disponibilitate</th><th></th></tr></thead>
-        <tbody>{''.join(product_rows)}</tbody></table>"""
-        if product_rows else
-        '<div class="muted">Nu există rezultate de piese. Dacă lucrarea este doar manoperă, poți continua fără piese.</div>'
-    )
+    from offer_presentation import render_parts_workspace
     partial_notice = (
         f'<div class="warn"><b>Rezultate parțiale — oferta nu este completă.</b><br>{_escape_html(offer.get("message") or "Robotul caută restul pieselor.")}</div>'
         if products and offer.get("status") != "ready" else ""
@@ -6209,6 +6208,8 @@ def request_unified_offer_page(request_id: int):
             + _escape_html(", ".join(missing_requested))
             + '. Oferta nu poate fi aprobată până nu sunt identificate și selectate.</div>'
         )
+
+    products_html = render_parts_workspace(list(presentation_groups.values()), missing_requested)
 
     selected_summary_html = '<div class="selection-empty">Nu ai selectat încă nicio piesă.</div>'
     if selected_products:

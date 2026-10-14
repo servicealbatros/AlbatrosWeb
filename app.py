@@ -6163,7 +6163,7 @@ def request_unified_offer_page(request_id: int):
             manufacturer_code = _offer_value(product, "manufacturer_ref", "reference", "oe_code")
             supplier_code = _offer_value(product, "intercars_code", "supplier_code")
             product_code = product.get("intercars_code") or product.get("supplier_code")
-            is_selected = any(
+            is_selected = bool(product_code) and any(
                 (p.get("intercars_code") or p.get("supplier_code")) == product_code
                 for p in selected_products
             )
@@ -6185,7 +6185,7 @@ def request_unified_offer_page(request_id: int):
           <td>{source_link} {selection_button}</td>
         </tr>
         """)
-            kind = _offer_product_kind(product) or str(product.get("requested_item") or "Piesă")
+            kind = _normalize_text(product.get("requested_item") or _offer_product_kind(product) or "Piesă")
             group = presentation_groups.setdefault(kind, {"label": str(product.get("requested_item") or "Piesă"), "rows": [], "selected": False})
             group["rows"].append(product_rows[-1])
             group["selected"] = group["selected"] or is_selected

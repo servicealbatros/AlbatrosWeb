@@ -2,6 +2,7 @@
 import json
 import os
 import time
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from cryptography.fernet import Fernet
@@ -33,11 +34,16 @@ class DsmSessionVault:
             return False
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         raw = json.dumps({'cookies': cookies, 'landing': landing, 'saved_at': time.time()}).encode()
-        temporary = self.path.with_suffix('.tmp')
-        with temporary.open('wb') as output:
-            os.chmod(temporary, 0o600)
-            output.write(self.cipher.encrypt(raw))
-        temporary.replace(self.path)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix='dsm-', suffix='.tmp', delete=False) as output:
+                temporary = Path(output.name)
+                os.chmod(temporary, 0o600)
+                output.write(self.cipher.encrypt(raw))
+            temporary.replace(self.path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return True
 
     def load(self):

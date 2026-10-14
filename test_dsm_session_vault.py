@@ -11,6 +11,16 @@ COOKIE = {'name':'fixture-session','value':'private-fixture-token','domain':'app
 LANDING = 'https://appm.dsmpro.ro/index.php/special/home/index'
 
 class VaultTests(unittest.TestCase):
+    def test_concurrent_snapshots_stay_atomic_and_decryptable(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as root:
+            vault=DsmSessionVault(Path(root)/'profile',Fernet.generate_key().decode())
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results=list(pool.map(lambda i:vault.save([{**COOKIE,'value':'fixture-'+str(i)}],LANDING),range(20)))
+            self.assertTrue(all(results))
+            self.assertTrue(vault.load()['cookies'][0]['value'].startswith('fixture-'))
+            self.assertEqual(list(vault.path.parent.glob('*.tmp')),[])
+
     def test_cached_previous_day_events_do_not_create_wrong_day_appointments(self):
         from datetime import date
         from types import SimpleNamespace

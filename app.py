@@ -512,6 +512,85 @@ def master_provider_login(request: Request):
     return {'url': origin + '/provider-auth#' + token, 'expires_in': 120}
 
 
+@app.get('/api/dashboard/master/provider-tabs')
+async def master_provider_tabs(request: Request):
+    """Read the owned worker browser without navigating or closing any tab."""
+    _master_access(request)
+    async with httpx.AsyncClient(timeout=10) as client:
+        targets = (await client.get('http://127.0.0.1:9222/json/list')).json()
+    domains = {'dsm': ('dsmpro.ro', 'servicemanager.q-service.ro'),
+               'intercars': ('intercars.eu',), 'autototal': ('eoriginal.ro',)}
+    result = {name: [] for name in domains}
+    for target in targets:
+        if target.get('type') != 'page':
+            continue
+        parsed = urlparse(target.get('url', ''))
+        host = parsed.hostname or ''
+        for name, allowed in domains.items():
+            if any(host == domain or host.endswith('.' + domain) for domain in allowed):
+                result[name].append({'id': target.get('id'), 'host': host, 'path': parsed.path})
+    return {'checked_at': datetime.now().isoformat(timespec='seconds'), 'providers': result}
+
+
+@app.post('/api/dashboard/master/clear-requests')
+def master_clear_requests(request: Request):
+    _master_access(request)
+    if request.headers.get('X-Human-Action') != 'clear-all-requests-including-archive':
+        raise HTTPException(status_code=409, detail='Confirmarea explicită a ștergerii este necesară.')
+    if POLICY.robot_enabled or _dsm_week_import_lock.locked():
+        raise HTTPException(status_code=409, detail='Oprește robotul și așteaptă terminarea importului înainte de curățare.')
+    import shutil
+    backup = DATA_DIR / 'backups' / ('requests-clear-' + datetime.now().strftime('%Y%m%dT%H%M%S') + '-' + uuid4().hex[:8])
+    backup.mkdir(parents=True)
+    state_names = ('offer_selections.json', 'last_sent_offers.json', 'offer_flow_state.json',
+                   'offer_drafts.json', 'request_status.json', 'registration_attachments.json',
+                   'new_vehicle_intake_state.json', 'dsm_test_state.json', 'robot_offer_jobs.json')
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        ids = [r[0] for r in conn.execute('SELECT id FROM service_requests')]
+        with closing(sqlite3.connect(backup / 'service_requests.db')) as recovery:
+            conn.backup(recovery)
+        for name in state_names:
+            source = DATA_DIR / name
+            if source.is_file():
+                shutil.copy2(source, backup / name)
+        if OFFER_REQUESTS_DIR.is_dir():
+            shutil.copytree(OFFER_REQUESTS_DIR, backup / 'offer-results')
+        conn.execute('BEGIN IMMEDIATE')
+        # DSM appointments remain real appointments even if a request was linked.
+        conn.execute("DELETE FROM scheduler_mechanic_messages WHERE appointment_id IN (SELECT id FROM scheduler_appointments WHERE request_id IN (SELECT id FROM service_requests) AND source NOT LIKE 'dsm%')")
+        removed = conn.execute("DELETE FROM scheduler_appointments WHERE request_id IN (SELECT id FROM service_requests) AND source NOT LIKE 'dsm%'").rowcount
+        conn.execute('UPDATE scheduler_appointments SET request_id=NULL WHERE request_id IN (SELECT id FROM service_requests)')
+        conn.execute('UPDATE dashboard_yard_orders SET service_request_id=NULL WHERE service_request_id IN (SELECT id FROM service_requests)')
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        for table in tables:
+            if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]*', table) or table == 'scheduler_appointments':
+                continue
+            columns = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
+            if 'request_id' in columns:
+                conn.execute(f'DELETE FROM "{table}" WHERE request_id IN (SELECT id FROM service_requests)')
+        conn.execute('DELETE FROM service_requests')
+        conn.commit()
+    for name in state_names:
+        (DATA_DIR / name).write_text('[]' if name == 'robot_offer_jobs.json' else '{}', encoding='utf-8')
+    history = DATA_DIR / 'conversation_history.db'
+    if history.is_file():
+        with closing(sqlite3.connect(history)) as conn:
+            with closing(sqlite3.connect(backup / history.name)) as recovery:
+                conn.backup(recovery)
+            conn.execute("DELETE FROM agent_messages WHERE session_id LIKE 'whatsapp:%'")
+            conn.execute("DELETE FROM agent_sessions WHERE session_id LIKE 'whatsapp:%'")
+            conn.commit()
+    for request_id in ids:
+        for path in OFFER_REQUESTS_DIR.glob(f'request_{request_id}_*'):
+            if path.is_file():
+                path.unlink()
+    _active_case_by_sender.clear()
+    _plate_by_sender.clear()
+    _pending_new_request_by_sender.clear()
+    return {'ok': True, 'deleted_requests': len(ids), 'deleted_local_appointments': removed,
+            'remaining_requests': 0, 'backup': backup.name, 'dsm_history_preserved': True}
+
+
 @app.get("/api/admin/metrics")
 def admin_metrics(authorization: str | None = Header(None)):
     _admin_user(authorization)

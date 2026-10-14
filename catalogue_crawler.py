@@ -49,8 +49,11 @@ class Crawl:
             raise RuntimeError('login_or_unapproved_redirect')
         if response and response.status in {401,403,429}:
             raise RuntimeError('supplier_access_denied_'+str(response.status))
-        if await self.page.locator('input[type=password]:visible,iframe[src*="recaptcha"],iframe[src*="hcaptcha"]').count():
-            raise RuntimeError('human_login_or_verification_required')
+        if await self.page.locator('input[type=password]:visible').count():
+            raise RuntimeError('supplier_login_required')
+        # A permanently embedded reCAPTCHA badge is not an active challenge.
+        if await self.page.locator('iframe[src*="bframe"]:visible,iframe[title*="challenge"]:visible,iframe[src*="challenges.cloudflare.com"]:visible').count():
+            raise RuntimeError('human_verification_required')
 
     async def post(self, route, payload):
         if route not in {'/search/searchVin','/car/get-lcar-categ','/search/doSearch'}:
@@ -171,6 +174,8 @@ async def run_crawler(request_id, vin, query, seeds, output):
                 save()
                 try:
                     await crawler.visit('https://ro.e-cat.intercars.eu/ro/','intercars')
+                    if not candidates:
+                        raise RuntimeError('no_verified_oe_codes_available_for_search')
                     for candidate in candidates[:12]:
                         code = str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or '')
                         if not code:

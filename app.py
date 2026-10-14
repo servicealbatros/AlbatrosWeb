@@ -8338,15 +8338,81 @@ def requests_dashboard():
             .new-request-grid { grid-template-columns: 1fr; }
             .new-request-field.span2, .new-request-field.span4 { grid-column: span 1; }
         }
+
+        /* Albatros reception: compact layout, restrained status colours. */
+        :root { --bg:#f3f5f7; --text:#202936; --line:#e2e7ed; --muted:#667384; --soft:#f7f9fb; }
+        body { font-family:"Segoe UI",Arial,sans-serif; }
+        .wrap { width:min(1720px,calc(100% - 40px)); margin:22px auto 60px; }
+        .topbar { align-items:center; background:linear-gradient(110deg,#202936,#111923); border-radius:18px; padding:24px 26px; gap:28px; box-shadow:0 8px 24px #17233412; }
+        .dashboard-brand { color:#fff; font-size:14px; font-weight:800; letter-spacing:2px; margin-bottom:12px; }
+        .dashboard-brand span { color:#edbe5c; }
+        .dashboard-brand small { font-size:10px; font-weight:500; color:#b2bdc9; border-left:1px solid #52606e; margin-left:10px; padding-left:12px; letter-spacing:1.5px; }
+        h1 { color:#fff; font-size:27px; font-weight:650; letter-spacing:-.6px; }
+        .topbar .subtitle { color:#bcc7d3; max-width:350px; line-height:1.5; }
+        .actions { justify-content:flex-end; max-width:750px; gap:8px; }
+        .actions button,.actions .link-button { background:#ffffff09; color:#e3eaf1; border-color:#ffffff24; font-size:12px; padding:10px 13px; }
+        .actions .primary-action { background:#edbe5c; color:#202936; border-color:#edbe5c; }
+        .actions button:hover,.actions .link-button:hover { background:#ffffff18; border-color:#ffffff50; }
+        .actions .primary-action:hover { background:#f4ce81; }
+        button,.link-button { transition:background .15s,border-color .15s,box-shadow .15s; }
+        button:active,.link-button:active { transform:translateY(1px); }
+        button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,tr:focus-visible { outline:3px solid #c89936; outline-offset:3px; }
+        .stats { gap:12px; margin:20px 0; }
+        .stat { position:relative; border-radius:14px; padding:16px 18px; box-shadow:0 2px 8px #25344604; border-top:3px solid #334155; }
+        .stat:nth-child(2) { border-top-color:#8496ad; }
+        .stat:nth-child(3) { border-top-color:#dc5656; }
+        .stat:nth-child(4) { border-top-color:#5583ca; }
+        .stat:nth-child(5) { border-top-color:#d7a346; }
+        .stat .label { font-size:11px; letter-spacing:.5px; line-height:1.5; }
+        .stat .value { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; color:#202936; }
+        .stat:nth-child(3) .value { color:#b93a3a; }
+        .stat-clickable:hover { box-shadow:0 4px 16px #25344612; border-color:#adb9c8; }
+        .status-filter { border-radius:999px; padding:8px 14px; font-size:12px; }
+        .status-filter.active { box-shadow:0 0 0 2px #fff,0 0 0 4px #596779; }
+        .toolbar { border-radius:14px; gap:10px; padding:12px; flex-wrap:wrap; }
+        .toolbar input,.toolbar select { min-width:150px; background:#f8fafc; border-radius:9px; }
+        .toolbar #search { min-width:280px; }
+        .toolbar #monthFilter { flex:0 1 165px; }
+        .yard-launch { margin:18px 0; }
+        .yard-launch button { background:#fff; border-color:#e2c386; color:#795d24; border-radius:10px; }
+        .yard-count { background:#faefd7; color:#795d24; padding:4px 9px; font-size:12px; }
+        .table-card { border-radius:14px; box-shadow:0 4px 20px #25344606; }
+        th { background:#f7f9fb; color:#647184; padding:15px 12px; font-size:10px; letter-spacing:.8px; }
+        td { padding:17px 12px; font-size:13px; line-height:1.5; }
+        tr.status-new td { background:#fff; }
+        tr.status-blue td { background:#f0f6ff; }
+        tr.status-green td { background:#edf9f1; }
+        tr.status-accepted td { background:#fff8eb; }
+        tr.status-waiting td { background:#fffbea; }
+        tr.status-urgent td { background:#fff1f1; }
+        tr.status-gray td { background:#f3f5f7; }
+        tr.request-clickable-row:hover td { box-shadow:inset 0 0 0 9999px #24374d06; }
+        tr.status-new td:first-child { border-left:3px solid #97a6b9; }
+        tr.status-blue td:first-child { border-left:3px solid #5583ca; }
+        tr.status-green td:first-child { border-left:3px solid #45a36d; }
+        tr.status-accepted td:first-child,tr.status-waiting td:first-child { border-left:3px solid #d7a346; }
+        tr.status-urgent td:first-child { border-left:3px solid #dc5656; }
+        .id { color:#344b67; }
+        .plate { font-size:14px; letter-spacing:.5px; color:#172d47; }
+        .pill { font-size:11px; color:#526174; padding:4px 8px; background:#ffffffb3; }
+        .status-select { font-size:12px; min-width:125px; color:#344b67; border-radius:9px; }
+        .problem { min-width:190px; max-width:330px; }
+        .empty { padding:58px 20px; background:#fff; line-height:1.7; }
+        .empty::before { content:"✓"; display:block; color:#c0a05a; font-size:30px; margin-bottom:10px; }
+        .new-request-panel { border-color:#c5a15b; box-shadow:0 4px 20px #25344608; }
+        .new-request-panel .primary-action { background:#24374d; border-color:#24374d; }
+        @media(max-width:1100px) { .topbar { align-items:flex-start; flex-direction:column; gap:18px; } .actions { justify-content:flex-start; max-width:none; } }
+        @media(max-width:700px) { .wrap { width:calc(100% - 20px); margin-top:10px; } .topbar { padding:20px; } .stats { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; } .stat { padding:12px; } .toolbar #search { min-width:0; } .toolbar #monthFilter { flex:auto; } }
     </style>
 </head>
 <body>
 <div class="wrap">
     <div class="topbar">
         <div>
-            <h1>Centrala Cereri Albatros AI</h1>
+            <div class="dashboard-brand">ALBATROS <span>A</span> <small>RECEPȚIE</small></div>
+            <h1>Cereri service</h1>
             <div class="subtitle">
-                Solicitări salvate de recepționerul AI din WhatsApp și chat.
+                Toate solicitările, de la primul mesaj până la programare.
             </div>
         </div>
         <div class="actions">

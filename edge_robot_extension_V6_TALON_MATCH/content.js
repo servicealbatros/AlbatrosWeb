@@ -859,10 +859,6 @@ function productPlan(job){
 async function searchProduct(job){
  const mode=await chrome.storage.local.get(["robotHistoryOnly"]);
  const historyOnly=!!mode.robotHistoryOnly;
- if(!historyOnly && /Nu a fost selectat niciun vehicul/i.test(document.body.innerText)){
-   if(Array.isArray(job.history_parts)&&job.history_parts.length)return await startHistoryCodeLookup(job,"Inter Cars nu a păstrat selecția; caut codurile facturate pentru VIN-ul confirmat.");
-   throw new Error("Oferta completa nu are vehicul selectat; reiau identificarea TecDoc.");
- }
  if(/\/vehicle\/(?:external|CAR_[^/]+)\/?$/i.test(location.pathname)){
    const offerLink=[...document.querySelectorAll("a,button")].find(e=>
      vis(e) && /MERGEȚI LA OFERTA COMPLETĂ|MERGETI LA OFERTA COMPLETA/i.test(clean(e.innerText||e.textContent||""))
@@ -873,6 +869,10 @@ async function searchProduct(job){
    location.assign(offerUrl.href);
    setTimeout(resume,1200);
    return;
+ }
+ if(!historyOnly && /Nu a fost selectat niciun vehicul/i.test(document.body.innerText)){
+   if(Array.isArray(job.history_parts)&&job.history_parts.length)return await startHistoryCodeLookup(job,"Inter Cars nu a păstrat selecția; caut codurile facturate pentru VIN-ul confirmat.");
+   throw new Error("Oferta completa nu are vehicul selectat; reiau identificarea TecDoc.");
  }
  const plan=productPlan(job);
  const {robotSearchIndex=0,robotItemIndex=0}=await chrome.storage.local.get(["robotSearchIndex","robotItemIndex"]);

@@ -72,6 +72,7 @@ OE_ENGLISH_PARTS = {
             "oil drain plug",
             "screw plug, oil sump",
             "screw plug with sealing ring",
+            "screw plug with gasket ring",
             # Denumirea folosită de planșele OE VAG în limba română.
             "surub obturator cu inel de etansare",
         ),

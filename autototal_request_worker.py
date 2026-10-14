@@ -855,7 +855,7 @@ def _required_product_kinds(query: str) -> set[str]:
 
 async def _engine_oil_requirements(ws, type_id: str, call_id: int) -> dict:
     """Read the VIN-selected engine capacity and oil approvals from AutoTotal."""
-    expression = """(async()=>JSON.stringify((await axios.post('/car/capacitati-umplere',{typeID:%s})).data?.result?.engOil||{}))()""" % json.dumps(str(type_id))
+    expression = """(async()=>{const post=%s;return JSON.stringify((await post('/car/capacitati-umplere',{typeID:%s})).data?.result?.engOil||{});})()""" % (_post_helper_js(), json.dumps(str(type_id)))
     try:
         return _json_value(await _evaluate(ws, call_id, expression, True), {})
     except Exception:
@@ -912,6 +912,13 @@ def _choose_engine_oil_card(cards: list[dict], requirements: dict) -> dict | Non
         code = (code_match.group(1).strip() if code_match else left.split()[-1])
         upper_card = (title + " " + text).upper()
         brand = next((value for value in ENGINE_OIL_BRANDS if value in upper_card), "")
+        oe_brand = str(requirements.get('oe_brand') or '').upper().strip()
+        # Manufacturer must be in the card heading, not just in an approval
+        # printed in the description of an aftermarket oil.
+        if oe_brand and re.search(r'^(?:OE\s+)?' + re.escape(oe_brand) + r'\b', left.upper()):
+            brand = oe_brand
+        if requirements.get('oe_only') and brand != oe_brand:
+            continue
         # The catalogue sometimes lists Havoline under either the TEXACO or
         # HAVOLINE name.  Keep one stable display brand for the adviser.
         if brand == "HAVOLINE":
@@ -977,7 +984,8 @@ async def _discover_engine_oil(ws, requirements: dict, call_id: int) -> list[dic
         ]
         approval = approvals[0] if approvals else ""
         accumulated = list(cards)
-        for offset, brand in enumerate(("CASTROL", "MOTUL", "HAVOLINE"), start=1):
+        search_brands = ([requirements.get('oe_brand')] if requirements.get('oe_only') else ("CASTROL", "MOTUL", "HAVOLINE"))
+        for offset, brand in enumerate(search_brands, start=1):
             search = " ".join(value for value in (brand, grade, approval) if value)
             script = """(async()=>{
               const post=%s;
@@ -1696,6 +1704,8 @@ async def run(request_id: int, vin: str, query: str, output: Path,
             await asyncio.sleep(2)
             catalog = await _standard_categories(ws, type_id, 11)
             oil_requirements = await _engine_oil_requirements(ws, type_id, 12)
+            oil_requirements['oe_brand'] = str(vehicle.get('make') or '')
+            oil_requirements['oe_only'] = bool(re.search(r'ulei[^,;\n]*(?:\boe\b|original|origine)', _plain(query)))
             oe_candidates = []
             products = []
             standard_plan = _independent_plan(query)
@@ -1749,6 +1759,7 @@ async def run(request_id: int, vin: str, query: str, output: Path,
                 r"[^A-Z0-9]", "", str(p.get("manufacturer_ref") or "").upper()
             ) not in exact_codes] + exact_products
             if ("engine_oil" in _required_product_kinds(query)
+                    and not oil_requirements.get('oe_only')
                     and not any(_revision_product_kind(
                         p.get("requested_item") or p.get("description")) == "engine_oil"
                                 for p in products)):

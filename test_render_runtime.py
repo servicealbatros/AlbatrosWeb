@@ -12,6 +12,37 @@ spec.loader.exec_module(runtime)
 
 
 class RenderRuntimeTests(unittest.TestCase):
+    def test_migration_activates_once_and_keeps_original_browser_profile(self):
+        import json
+        with TemporaryDirectory() as work:
+            root = Path(work)
+            source = root / 'worker_backups' / 'snapshot.tar.gz'
+            digest = 'a' * 64
+            target = root / ('live-' + digest[:16])
+            def fixture_restore(archive, sha, destination):
+                destination.mkdir()
+                (destination / 'migration_validation.json').write_text(json.dumps({
+                    'source_sha256': sha, 'counts': {'requests': 20}}))
+            env = {'ALBATROS_DATA_DIR': str(root), 'ALBATROS_MIGRATION_ARCHIVE': str(source),
+                   'ALBATROS_MIGRATION_SHA256': digest}
+            with patch.dict(os.environ, env), patch('scripts.restore_cloud_migration.restore', side_effect=fixture_restore) as restore:
+                os.environ.pop('ALBATROS_BROWSER_PROFILE_DIR', None)
+                runtime.prepare_operational_data()
+                self.assertEqual(os.environ['ALBATROS_DATA_DIR'], str(target))
+                self.assertEqual(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], str(root / 'linux_browser'))
+                (target / 'new-request').write_text('keep')
+                os.environ['ALBATROS_DATA_DIR'] = str(root)
+                runtime.prepare_operational_data()
+                self.assertEqual(restore.call_count, 1)
+                self.assertEqual((target / 'new-request').read_text(), 'keep')
+
+    def test_migration_rejects_source_outside_backup_directory(self):
+        with TemporaryDirectory() as work, patch.dict(os.environ, {
+                'ALBATROS_DATA_DIR': work, 'ALBATROS_MIGRATION_ARCHIVE': str(Path(work) / 'outside.tar.gz'),
+                'ALBATROS_MIGRATION_SHA256': 'a' * 64}):
+            with self.assertRaises(ValueError):
+                runtime.prepare_operational_data()
+
     def test_render_stale_marker_recovery_is_scoped_to_same_single_instance_service(self):
         alive = lambda pid: True
         self.assertTrue(runtime.stale_lock_owner('srv-test-old-44', 'srv-test-new', 'srv-test', alive))

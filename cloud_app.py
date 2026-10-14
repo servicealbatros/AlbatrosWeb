@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from app import app as backend
 from security import POLICY, SecurityViolation
-from reception_bridge import bridge_url, dashboard_route, forward
+from reception_bridge import bridge_url, dashboard_route, forward, verify_request
 
 BASE = Path(__file__).resolve().parent
 
@@ -77,6 +77,17 @@ class CloudGateway:
                     response = JSONResponse({'detail': 'Invalid webhook signature'}, status_code=401)
                 else:
                     response = await forward(request, 'meta-webhook')
+        elif (os.getenv('ALBATROS_INTERNAL_BRIDGE') == 'true' and dashboard_route(path)
+              and request.headers.get('x-albatros-signature')):
+            # An authenticated reception gateway can delegate to the Linux worker.
+            # Re-sign internally with a fresh nonce; never consume one twice.
+            try:
+                target = path + ('?' + request.url.query if request.url.query else '')
+                actor = verify_request(request.headers, method, target, await request.body())
+            except (ValueError, TypeError):
+                response = JSONResponse({'detail': 'Invalid bridge signature'}, status_code=403)
+            else:
+                response = await forward(request, actor)
         elif not is_authenticated(request):
             response = (RedirectResponse("/receptie/login", status_code=303)
                         if method == "GET" and "text/html" in request.headers.get("accept", "")

@@ -30,6 +30,27 @@ from security import POLICY
 
 
 class CloudAccessTests(unittest.TestCase):
+    def test_remote_gateway_signature_can_reach_internal_worker_only_when_valid(self):
+        import time
+        from unittest.mock import AsyncMock, patch
+        from starlette.responses import JSONResponse
+        from reception_bridge import signature
+        stamp, nonce, actor = str(int(time.time())), 'cloud-worker-valid-fixture', 'consilier'
+        path = '/api/requests'
+        secret = 'test-bridge-secret-' * 3
+        headers = {'x-albatros-time': stamp, 'x-albatros-nonce': nonce,
+                   'x-albatros-actor': actor,
+                   'x-albatros-signature': signature(secret, stamp, nonce, actor, 'GET', path, b'')}
+        with patch.dict(os.environ, {'ALBATROS_INTERNAL_BRIDGE': 'true', 'RECEPTION_BRIDGE_SECRET': secret}), patch(
+                'cloud_app.forward', new_callable=AsyncMock, return_value=JSONResponse({'worker': True})) as proxy:
+            client = TestClient(app, base_url='https://worker.example.com')
+            result = client.get(path, headers=headers)
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(proxy.call_count, 1)
+            self.assertEqual(client.get(path, headers=headers).status_code, 403)  # replay
+            self.assertEqual(client.get(path).status_code, 401)
+            self.assertEqual(proxy.call_count, 1)
+
     def test_private_worker_listener_never_opens_public_gateway(self):
         from unittest.mock import patch
         from cloud_app import backend

@@ -156,7 +156,8 @@ def probe_browser(keep_provider_tabs=False):
             pass
         time.sleep(0.2)
     with sync_playwright() as playwright:
-        profile = Path(os.getenv('ALBATROS_DATA_DIR', '/tmp/albatros-probe')) / 'linux_browser'
+        profile = Path(os.getenv('ALBATROS_BROWSER_PROFILE_DIR') or
+                       str(Path(os.getenv('ALBATROS_DATA_DIR', '/tmp/albatros-probe')) / 'linux_browser'))
         REPORT.update(profile_storage(profile))
         lock_browser_profile(profile)
         spawn(browser_command(playwright.chromium.executable_path, profile))
@@ -214,6 +215,31 @@ def core_environment():
     return env
 
 
+def prepare_operational_data():
+    """Activate a verified snapshot once, without replacing existing live data."""
+    archive = os.getenv('ALBATROS_MIGRATION_ARCHIVE', '')
+    if not archive:
+        return
+    from scripts.restore_cloud_migration import restore
+    root = Path(os.environ['ALBATROS_DATA_DIR']).resolve()
+    source = Path(archive).resolve()
+    digest = os.environ['ALBATROS_MIGRATION_SHA256']
+    target = root / ('live-' + digest[:16])
+    if source.parent != root / 'worker_backups' or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        raise ValueError('Invalid migration source')
+    if target.exists():
+        validation = json.loads((target / 'migration_validation.json').read_text())
+        if validation.get('source_sha256') != digest:
+            raise ValueError('Migration validation mismatch')
+    else:
+        restore(source, digest, target)
+    os.environ.setdefault('ALBATROS_BROWSER_PROFILE_DIR', str(root / 'linux_browser'))
+    os.environ['ALBATROS_DATA_DIR'] = str(target)
+    os.environ['ALBATROS_OFFERING_DIR'] = str(target / 'offering')
+    REPORT.update(live_data_loaded=True, migration_counts=json.loads(
+        (target / 'migration_validation.json').read_text())['counts'])
+
+
 def main():
     print('Starting isolated Render runtime', flush=True)
     signal.signal(signal.SIGTERM, stop)
@@ -221,6 +247,7 @@ def main():
     production = os.getenv('ALBATROS_RENDER_MODE', 'probe') == 'production'
     if production:
         os.environ.setdefault('ALBATROS_DATA_DIR', '/var/data/albatros')
+        prepare_operational_data()
         if not os.getenv('RECEPTION_BRIDGE_SECRET'):
             os.environ['RECEPTION_BRIDGE_SECRET'] = secrets.token_urlsafe(48)
         core = spawn([sys.executable, str(BASE / 'scripts/render_single_app.py')], core_environment())

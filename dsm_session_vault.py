@@ -40,7 +40,14 @@ class DsmSessionVault:
                 temporary = Path(output.name)
                 os.chmod(temporary, 0o600)
                 output.write(self.cipher.encrypt(raw))
-            temporary.replace(self.path)
+            for attempt in range(10):
+                try:
+                    temporary.replace(self.path)
+                    break
+                except PermissionError:
+                    if attempt == 9:
+                        raise
+                    time.sleep(0.02)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

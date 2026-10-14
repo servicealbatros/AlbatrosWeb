@@ -442,8 +442,13 @@ def master_status(request: Request):
     from schedule_import_control import read_state
     path = DATA_DIR / 'render_runtime_health.json'
     runtime = json.loads(path.read_text()) if path.exists() else {}
+    session_path = DATA_DIR / 'dsm_session_health.json'
+    try:
+        dsm_session = json.loads(session_path.read_text()) if session_path.exists() else {}
+    except (OSError, ValueError):
+        dsm_session = {}
     return {'robot_enabled': POLICY.robot_enabled, 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
-            'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR),
+            'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR), 'dsm_session': dsm_session,
             'mechanic_send': _mechanic_send_readiness(),
             'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True)}
 

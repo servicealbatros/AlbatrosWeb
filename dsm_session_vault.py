@@ -9,6 +9,34 @@ from cryptography.fernet import Fernet
 
 HOSTS = {'apps.dsmpro.ro', 'appm.dsmpro.ro', 's.servicemanager.q-service.ro'}
 
+def trusted_login(url):
+    parsed = urlparse(url)
+    return (parsed.scheme == 'https' and parsed.hostname in {'appm.dsmpro.ro', 'apps.dsmpro.ro'}
+            and not parsed.username and not parsed.password
+            and parsed.path.rstrip('/').endswith('/login'))
+
+class DsmLoginVault:
+    """Explicitly configured credentials, encrypted locally, never exported."""
+    def __init__(self, profile, key):
+        self.path = Path(profile).parent / 'private_sessions' / 'dsm-login.enc'
+        self.cipher = Fernet(key.encode())
+
+    def save(self, username, password):
+        if not username.strip() or not password or max(len(username), len(password)) > 512:
+            raise ValueError('Completează utilizatorul și parola DSM.')
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix='login-', suffix='.tmp', delete=False) as output:
+            temporary = Path(output.name)
+            os.chmod(temporary, 0o600)
+            output.write(self.cipher.encrypt(json.dumps({'username': username.strip(), 'password': password}).encode()))
+        try:
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def load(self):
+        return json.loads(self.cipher.decrypt(self.path.read_bytes())) if self.path.exists() else None
+
 def trusted_landing(url):
     parsed = urlparse(url)
     if parsed.scheme != 'https' or parsed.hostname not in HOSTS or parsed.username or parsed.password or '/special/' not in parsed.path:

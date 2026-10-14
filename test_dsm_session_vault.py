@@ -5,12 +5,29 @@ import time
 import unittest
 from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
-from dsm_session_vault import DsmSessionVault
+from dsm_session_vault import DsmSessionVault, DsmLoginVault, trusted_login
 
 COOKIE = {'name':'fixture-session','value':'private-fixture-token','domain':'appm.dsmpro.ro','path':'/','expires':-1,'httpOnly':True,'secure':True,'sameSite':'Lax'}
 LANDING = 'https://appm.dsmpro.ro/index.php/special/home/index'
 
 class VaultTests(unittest.TestCase):
+    def test_credentials_encrypted_and_not_shared_with_cookie_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            key = Fernet.generate_key().decode()
+            vault = DsmLoginVault(Path(root)/'profile', key)
+            vault.save('fixture-user', 'fixture-private-password')
+            self.assertNotIn(b'fixture-private-password', vault.path.read_bytes())
+            self.assertEqual(vault.load()['password'], 'fixture-private-password')
+            with self.assertRaises(InvalidToken):
+                DsmLoginVault(Path(root)/'profile', Fernet.generate_key().decode()).load()
+            self.assertFalse(DsmSessionVault(Path(root)/'profile',key).path.exists())
+
+    def test_automatic_login_only_on_exact_dsm_https_hosts(self):
+        self.assertTrue(trusted_login('https://appm.dsmpro.ro/login'))
+        for url in ('http://appm.dsmpro.ro/login', 'https://appm.dsmpro.ro.evil.test/login',
+                    'https://evil.test/login', 'https://user@appm.dsmpro.ro/login', LANDING):
+            self.assertFalse(trusted_login(url), url)
+
     def test_concurrent_snapshots_stay_atomic_and_decryptable(self):
         from concurrent.futures import ThreadPoolExecutor
         with tempfile.TemporaryDirectory() as root:

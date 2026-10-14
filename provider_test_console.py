@@ -291,6 +291,7 @@ class Submit(PageAction):
     button: int = Field(ge=0)
     fields: dict[str, str]
     prepare_only: bool = False
+    remember_dsm: bool = False
 
 
 @router.post('/api/provider-auth/submit')
@@ -331,7 +332,32 @@ async def submit(body: Submit, request: Request):
             # an application traceback or return them to the console.
             raise HTTPException(502, 'Formularul nu a răspuns. Actualizează ecranul și verifică autentificarea.') from None
         await asyncio.sleep(2)
-        return await snapshot()
+        result = await snapshot()
+        if body.remember_dsm and result.get('dsm_session_saved'):
+            from dsm_session_vault import DsmLoginVault
+            password_field = next((str(f['index']) for f in form['fields'] if f['type'] == 'password'), None)
+            username_field = next((str(f['index']) for f in form['fields'] if f['type'] in {'text','email'}), None)
+            if password_field and username_field and body.fields.get(password_field) and body.fields.get(username_field):
+                DsmLoginVault(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], os.environ['ALBATROS_PROVIDER_STATE_KEY']).save(body.fields[username_field], body.fields[password_field])
+                result['dsm_auto_login_configured'] = True
+        return result
+
+
+class DsmCredentials(BaseModel):
+    username: str = Field(min_length=1, max_length=512)
+    password: str = Field(min_length=1, max_length=512)
+
+
+@router.post('/api/provider-auth/dsm-auto-login')
+async def configure_dsm_login(body: DsmCredentials, request: Request):
+    session(request)
+    same_origin(request)
+    from dsm_session_vault import DsmLoginVault
+    key = os.getenv('ALBATROS_PROVIDER_STATE_KEY')
+    if not key:
+        raise HTTPException(503, 'Stocarea criptată nu este configurată.')
+    DsmLoginVault(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], key).save(body.username, body.password)
+    return {'ok': True}
 
 
 class LoginLink(PageAction):

@@ -19,6 +19,7 @@ from urllib.request import urlopen
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 CHILDREN = []
+PROFILE_LOCK_HANDLE = None
 REPORT = {"phase": "starting", "messages_enabled": False, "live_data_loaded": False}
 
 
@@ -89,6 +90,55 @@ def profile_storage(profile):
             'browser_profile_on_persistent_mount': os.path.ismount(profile.parent)}
 
 
+def stale_lock_owner(target, current_host, service_id, process_alive):
+    try:
+        owner_host, owner_pid = target.rsplit('-', 1)
+        owner_pid = int(owner_pid)
+        if owner_pid <= 0:
+            return False
+    except (ValueError, TypeError):
+        return False
+    if owner_host == current_host:
+        return not process_alive(owner_pid)
+    # Render gives a disk to only one instance. Never apply this rule to an
+    # arbitrary foreign host or a desktop Chrome profile.
+    return bool(service_id and owner_host.startswith(service_id + '-')
+                and current_host.startswith(service_id + '-'))
+
+
+def lock_browser_profile(profile):
+    global PROFILE_LOCK_HANDLE
+    import fcntl
+    handle = (profile / '.albatros-runtime.lock').open('a+b')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise RuntimeError('Another owned runtime is using this browser profile') from None
+    PROFILE_LOCK_HANDLE = handle
+    lock = profile / 'SingletonLock'
+    if not lock.is_symlink():
+        return
+
+    def process_alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    service_id = os.getenv('ALBATROS_RENDER_SINGLE_INSTANCE_ID', '')
+    if not stale_lock_owner(os.readlink(lock), socket.gethostname(), service_id, process_alive):
+        return
+    for name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+        link = profile / name
+        if link.is_symlink():
+            link.unlink()  # Only stale marker links, never session data or targets.
+    print('Recovered stale owned Chromium profile markers', flush=True)
+
+
 def probe_browser(keep_provider_tabs=False):
     from playwright.sync_api import sync_playwright
     display = ':' + str(100 + secrets.randbelow(10000))
@@ -108,6 +158,7 @@ def probe_browser(keep_provider_tabs=False):
     with sync_playwright() as playwright:
         profile = Path(os.getenv('ALBATROS_DATA_DIR', '/tmp/albatros-probe')) / 'linux_browser'
         REPORT.update(profile_storage(profile))
+        lock_browser_profile(profile)
         spawn(browser_command(playwright.chromium.executable_path, profile))
         wait_url('http://127.0.0.1:9222/json/version')
         browser = playwright.chromium.connect_over_cdp('http://127.0.0.1:9222', timeout=30000)

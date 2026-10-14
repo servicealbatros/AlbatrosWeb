@@ -12,6 +12,18 @@ spec.loader.exec_module(runtime)
 
 
 class RenderRuntimeTests(unittest.TestCase):
+    def test_render_stale_marker_recovery_is_scoped_to_same_single_instance_service(self):
+        alive = lambda pid: True
+        self.assertTrue(runtime.stale_lock_owner('srv-test-old-44', 'srv-test-new', 'srv-test', alive))
+        self.assertFalse(runtime.stale_lock_owner('personal-laptop-44', 'srv-test-new', 'srv-test', alive))
+        self.assertFalse(runtime.stale_lock_owner('srv-other-old-44', 'srv-test-new', 'srv-test', alive))
+        self.assertFalse(runtime.stale_lock_owner('srv-test-old-44', 'srv-test-new', '', alive))
+
+    def test_active_same_host_owner_is_not_unlocked(self):
+        self.assertFalse(runtime.stale_lock_owner('srv-test-new-44', 'srv-test-new', 'srv-test', lambda pid: True))
+        self.assertTrue(runtime.stale_lock_owner('srv-test-new-44', 'srv-test-new', 'srv-test', lambda pid: False))
+        self.assertFalse(runtime.stale_lock_owner('invalid-marker', 'srv-test-new', 'srv-test', lambda pid: False))
+
     def test_browser_profile_identity_survives_runtime_reinitialization(self):
         with TemporaryDirectory() as root:
             profile = Path(root) / 'linux_browser'

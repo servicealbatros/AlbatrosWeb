@@ -10880,6 +10880,21 @@ async def _route_new_vehicle_intake(sender: str, body: str) -> bool:
             _save_new_vehicle_states(states)
             return False
 
+        mileage_match = re.fullmatch(r"\s*(\d{1,3}(?:[ .]\d{3})+|\d{3,7})\s*(?:km|kilometri)?[.!]?\s*", body, re.I)
+        if mileage_match:
+            mileage = int(re.sub(r"\D", "", mileage_match.group(1)))
+            if 0 < mileage <= 2000000:
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute("UPDATE service_requests SET mileage=? WHERE id=?", (str(mileage), request_id))
+                    conn.commit()
+                conn.close()
+                flow["mileage_km"] = mileage
+                states[sender] = flow
+                _save_new_vehicle_states(states)
+                formatted = f"{mileage:,}".replace(",", ".")
+                await send_whatsapp_text(sender, f"Am notat {formatted} km la cererea existentă pentru {flow.get('registration') or 'mașina dvs.'}. Lucrările solicitate rămân înregistrate.")
+                return True
+
         preference = _oil_brand_preference(body)
         if preference:
             addition = f"Preferință ulei client: {preference}."
@@ -11241,6 +11256,16 @@ def _get_or_create_case(sender: str) -> str:
     case_id = _active_case_by_sender.get(sender)
 
     if case_id:
+        return case_id
+
+    # Intake is persisted separately from the AI history. Reuse its case after
+    # a restart so follow-ups receive the already saved vehicle and work list.
+    flow = _new_vehicle_states().get(sender) or {}
+    case_id = str(flow.get("case_id") or "")
+    if case_id:
+        _active_case_by_sender[sender] = case_id
+        if flow.get("registration"):
+            _plate_by_sender[sender] = str(flow["registration"])
         return case_id
 
     # IMPORTANT:

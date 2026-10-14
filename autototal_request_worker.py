@@ -863,6 +863,21 @@ def _required_product_kinds(query: str) -> set[str]:
     return required
 
 
+def _normalize_oil_requirements(data):
+    result = dict(data or {})
+    options = []
+    for option in result.get('engine_oil_options') or []:
+        if not isinstance(option, dict):
+            continue
+        normalized = dict(option)
+        for field in ('classifications', 'grades'):
+            normalized[field] = [{'value': str(row.get('value') if isinstance(row,dict) else row)}
+                                 for row in option.get(field) or [] if row]
+        options.append(normalized)
+    result['engine_oil_options'] = options
+    return result
+
+
 def _confirmed_oil_requirements(request_id, vin):
     for folder in ('tecrmi_output', 'technician_output'):
         try:
@@ -872,9 +887,9 @@ def _confirmed_oil_requirements(request_id, vin):
             if data.get('status') not in {'ready', 'needs_verification'}:
                 continue
             if data.get('engine_oil_options') and float(data.get('engine_oil_liters') or 0) > 0:
-                return {'engine_capacity': {'value': data['engine_oil_liters']},
+                return _normalize_oil_requirements({'engine_capacity': {'value': data['engine_oil_liters']},
                         'engine_oil_options': data['engine_oil_options'],
-                        'requirements_source': data.get('source')}
+                        'requirements_source': data.get('source')})
         except (OSError, ValueError, TypeError):
             continue
     return {}
@@ -886,7 +901,7 @@ async def _engine_oil_requirements(ws, type_id: str, call_id: int, request_id=No
     try:
         requirements = _json_value(await _evaluate(ws, call_id, expression, True), {})
         if requirements.get('engine_oil_options'):
-            return requirements
+            return _normalize_oil_requirements(requirements)
     except Exception:
         pass
     return _confirmed_oil_requirements(request_id, vin) if request_id is not None else {}
@@ -894,6 +909,7 @@ async def _engine_oil_requirements(ws, type_id: str, call_id: int, request_id=No
 
 def _choose_engine_oil_card(cards: list[dict], requirements: dict) -> dict | None:
     """Choose a live oil card matching the OE approval and viscosity."""
+    requirements = _normalize_oil_requirements(requirements)
     capacity = float((requirements.get("engine_capacity") or {}).get("value") or 0)
     options = requirements.get("engine_oil_options") or []
     approvals = [

@@ -134,7 +134,9 @@ async def run_crawler(request_id, vin, query, seeds, output):
                                         continue  # Side-specific diagrams require a reviewed side match.
                                     for part in unit.get('details') or []:
                                         name = _plain(part.get('name'))
-                                        if part.get('oem') and any(term in name for term in target['terms']):
+                                        oil_pan_plug = (_revision_product_kind(target['requested_item']) == 'oil_drain_plug'
+                                            and re.match(r'^screw plug\b', name) and re.search(r'\boil (pan|sump)\b',position))
+                                        if part.get('oem') and (oil_pan_plug or any(term in name for term in target['terms'])):
                                             candidates.append({'requested_item':target['requested_item'],'oe_code':part['oem'],'description':part['name']})
                     seen = set()
                     for candidate in candidates[:12]:
@@ -180,8 +182,13 @@ async def run_crawler(request_id, vin, query, seeds, output):
                         code = str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or '')
                         if not code:
                             continue
-                        field = page.locator('input[placeholder*="nume, index"],input[placeholder*="Căutare produse"],input[aria-label*="Search products"]').first
-                        if not await field.count():
+                        field = None
+                        for node in await page.locator('input:visible').all():
+                            label = (await node.get_attribute('placeholder') or '')+' '+(await node.get_attribute('aria-label') or '')
+                            if re.search(r'c[aă]utare produse|search products|search by name|nume, index',label,re.I) and not re.search(r'vin|category|categorie',label,re.I):
+                                field = node
+                                break
+                        if field is None:
                             raise RuntimeError('product_search_not_available')
                         await field.fill(code)
                         await field.press('Enter')

@@ -12,7 +12,7 @@ import re
 import sqlite3
 import time
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.request import urlopen
 from urllib.parse import urlparse
@@ -99,6 +99,15 @@ async def _call(ws, call_id: int, method: str, params: dict | None = None) -> di
     )
     while True:
         message = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+        pending = getattr(ws, '_dsm_pending_reads', None)
+        if pending is not None:
+            params = message.get('params') or {}
+            if message.get('method') == 'Network.requestWillBeSent' and params.get('type') in {'Fetch', 'XHR'}:
+                pending.add(params['requestId'])
+                ws._dsm_last_read_activity = time.monotonic()
+            elif message.get('method') in {'Network.loadingFinished', 'Network.loadingFailed'} and params.get('requestId') in pending:
+                pending.discard(params['requestId'])
+                ws._dsm_last_read_activity = time.monotonic()
         if message.get("id") == call_id:
             if message.get("error"):
                 raise DsmScheduleError(str(message["error"]))
@@ -152,6 +161,9 @@ async def _read_dsm_schedule_existing_tab(target_date: date) -> list[dict]:
             target["webSocketDebuggerUrl"],
             open_timeout=5, close_timeout=3, max_size=16_000_000,
         ) as ws:
+            ws._dsm_pending_reads = set()
+            ws._dsm_last_read_activity = time.monotonic()
+            await _call(ws, 0, 'Network.enable')
             if urlparse(original_url).path != urlparse(schedule_url).path:
                 await _call(ws, 1, 'Page.navigate', {'url': schedule_url})
                 navigated = True
@@ -178,7 +190,7 @@ async def _read_dsm_schedule_existing_tab(target_date: date) -> list[dict]:
             else:
                 raise DsmScheduleError(f"DSM nu a ajuns la data {wanted} în intervalul maxim de 10 zile.")
 
-            raw = await _eval(ws, 300, """(() => {
+            expression = """(() => {
               const root=document.getElementById('appointments-day-calendar');
               const calendar=root?.__k?.props?.children?.[0]?.props?.emitter?.thisContext;
               if(!calendar || typeof calendar.getEvents!=='function') return JSON.stringify({error:'Calendarul DSM nu este disponibil; importul nu a fost executat.'});
@@ -200,14 +212,12 @@ async def _read_dsm_schedule_existing_tab(target_date: date) -> list[dict]:
                   status:String(extra.appointment_status||'')
                 };
               });
-              return JSON.stringify({resources,events});
-            })()""")
-            snapshot = json.loads(raw or "{}")
-            if snapshot.get("error"):
-                raise DsmScheduleError(snapshot["error"])
-            if "events" not in snapshot or "resources" not in snapshot:
-                raise DsmScheduleError("Snapshot DSM incomplet; importul a fost oprit.")
-            return _appointments_from_snapshot(snapshot, target_date)
+              const day=calendar.getDate?.();
+              const view_date=day ? day.getFullYear()+'-'+String(day.getMonth()+1).padStart(2,'0')+'-'+String(day.getDate()).padStart(2,'0') : '';
+              const loading=Object.values(calendar.getCurrentData?.()?.eventSources||{}).some(x=>x.isFetching);
+              return JSON.stringify({resources,events,view_date,loading});
+            })()"""
+            return await _wait_valid_schedule_snapshot(ws, expression, target_date)
     finally:
         if navigated:
             try:
@@ -235,6 +245,46 @@ async def _wait_restored_page(ws, original_url: str) -> None:
             return
         await asyncio.sleep(0.25)
     raise DsmScheduleError("Fila DSM nu a terminat revenirea la pagina inițială.")
+
+
+async def _wait_valid_schedule_snapshot(ws, expression, target_date):
+    deadline = time.monotonic() + 20
+    previous = None
+    error = DsmScheduleError('Calendarul DSM încă se încarcă.')
+    while time.monotonic() < deadline:
+        snapshot = json.loads(await _eval(ws, 300, expression) or '{}')
+        settled = not getattr(ws, '_dsm_pending_reads', set()) and time.monotonic() - getattr(ws, '_dsm_last_read_activity', 0) >= 0.5
+        try:
+            if snapshot.get('error'):
+                raise DsmScheduleError(snapshot['error'])
+            if 'events' not in snapshot or 'resources' not in snapshot:
+                raise DsmScheduleError('Snapshot DSM incomplet; importul a fost oprit.')
+            if snapshot.get('view_date') != target_date.isoformat() or snapshot.get('loading') or not settled:
+                raise DsmScheduleError('Calendarul DSM încă se încarcă pentru ziua solicitată.')
+            # FullCalendar's event store can retain cached events outside the
+            # visible day. Wait for reads to settle, then import only overlaps.
+            begin = datetime.combine(target_date, datetime.min.time())
+            end = begin + timedelta(days=1)
+            visible = []
+            for event in snapshot['events']:
+                try:
+                    starts = datetime.fromisoformat(event['start'])
+                    ends = datetime.fromisoformat(event['end'])
+                except (ValueError, KeyError):
+                    raise DsmScheduleError('Programare DSM cu interval invalid.')
+                if ends <= starts:
+                    raise DsmScheduleError('Programare DSM cu durată invalidă.')
+                if starts < end and ends > begin:
+                    visible.append(event)
+            rows = _appointments_from_snapshot({**snapshot, 'events': visible}, target_date)
+            if snapshot == previous:
+                return rows
+            previous = snapshot
+        except DsmScheduleError as exc:
+            error = exc
+            previous = None
+        await asyncio.sleep(0.5)
+    raise error
 
 
 def _resource_department(name: str) -> str:

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import time
 import unittest
@@ -10,6 +11,27 @@ COOKIE = {'name':'fixture-session','value':'private-fixture-token','domain':'app
 LANDING = 'https://appm.dsmpro.ro/index.php/special/home/index'
 
 class VaultTests(unittest.TestCase):
+    def test_cached_previous_day_events_do_not_create_wrong_day_appointments(self):
+        from datetime import date
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from dsm_schedule_sync import _wait_valid_schedule_snapshot
+        snapshot={'view_date':'2026-10-16','resources':[],'events':[{'id':'1','start':'2026-10-15T08:30','end':'2026-10-15T11:30'}]}
+        with patch('dsm_schedule_sync._eval', AsyncMock(return_value=json.dumps(snapshot))), patch('dsm_schedule_sync.asyncio.sleep',AsyncMock()):
+            self.assertEqual(asyncio.run(_wait_valid_schedule_snapshot(SimpleNamespace(), '', date(2026,10,16))),[])
+
+    def test_stale_calendar_events_are_retried_before_import(self):
+        from datetime import date
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from dsm_schedule_sync import _wait_valid_schedule_snapshot
+        stale={'view_date':'2026-10-16','resources':[],'events':[{'id':'1','start':'2026-10-15T08:30','end':'2026-10-15T11:30'}]}
+        good={'view_date':'2026-10-16','resources':[],'events':[{'id':'2','start':'2026-10-16T09:00','end':'2026-10-16T10:00'}]}
+        import json
+        with patch('dsm_schedule_sync._eval', AsyncMock(side_effect=[json.dumps(stale),json.dumps(good),json.dumps(good)])), patch('dsm_schedule_sync.asyncio.sleep',AsyncMock()):
+            rows=asyncio.run(_wait_valid_schedule_snapshot(SimpleNamespace(), '', date(2026,10,16)))
+        self.assertEqual(rows[0]['start_at'],'2026-10-16T09:00')
+
     def test_encrypted_session_cookies_roundtrip_and_domain_scope(self):
         with tempfile.TemporaryDirectory() as root:
             key = Fernet.generate_key().decode()

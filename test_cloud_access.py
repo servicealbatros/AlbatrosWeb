@@ -30,8 +30,55 @@ from security import POLICY
 
 
 class CloudAccessTests(unittest.TestCase):
+    def test_morning_tick_sends_once_on_weekday_and_never_on_weekend(self):
+        import asyncio
+        import app as core
+        from datetime import datetime
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock, PropertyMock, patch
+        async def run():
+            with TemporaryDirectory() as root, patch.object(core, 'DB_PATH', Path(root) / 'scheduler.db'), patch.object(
+                    type(POLICY), 'robot_enabled', new_callable=PropertyMock, return_value=True), patch.dict(os.environ, {
+                    'MECHANIC_SCHEDULE_SEND_TIME':'08:00', 'MECHANIC_SCHEDULE_AUTOMATIC_ENABLED':'true'}), patch.object(
+                    core, '_send_all_technician_schedules_for_date', AsyncMock(return_value={'ok':True})) as send:
+                await core._mechanic_schedule_tick(datetime(2026,10,17,8))
+                send.assert_not_awaited()
+                await core._mechanic_schedule_tick(datetime(2026,10,15,7,59))
+                send.assert_not_awaited()
+                await core._mechanic_schedule_tick(datetime(2026,10,15,8))
+                await core._mechanic_schedule_tick(datetime(2026,10,15,8,1))
+                self.assertEqual(send.await_count, 1)
+                self.assertTrue(send.call_args.kwargs['automatic'])
+        asyncio.run(run())
+
+    def test_automatic_batch_skips_already_accepted_employee_after_retry(self):
+        import asyncio
+        import app as core
+        from datetime import datetime
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock, patch
+        from dsm_schedule_sync import ensure_automation_tables
+        async def run():
+            with TemporaryDirectory() as root:
+                db = Path(root) / 'scheduler.db'
+                ensure_automation_tables(db)
+                employee = {'id':1,'name':'Fixture employee','phone':'0700100003'}
+                jobs = [{'id':1,'technician_id':1,'start_at':'2026-10-15T08:30:00','end_at':'2026-10-15T10:30:00','operations':'Revizie','registration':'TEST','vehicle':'Fixture'}]
+                with patch.object(core,'DB_PATH',db), patch.object(core,'scheduler_list_technicians',return_value=[employee]), patch.object(
+                        core,'scheduler_list_appointments',return_value=jobs), patch.object(core,'send_whatsapp_notification',AsyncMock(return_value={'messages':[{'id':'fixture-message'}]})) as send, patch.object(
+                        core.asyncio,'sleep',AsyncMock()), patch.dict(core.WHATSAPP_DELIVERY_STATUS,{},clear=True):
+                    first = await core._send_all_technician_schedules_for_date(datetime(2026,10,15),automatic=True)
+                    second = await core._send_all_technician_schedules_for_date(datetime(2026,10,15),automatic=True)
+                    self.assertEqual(send.await_count,1)
+                    self.assertEqual(len(first['sent']),1)
+                    self.assertEqual(second['skipped'][0]['reason'],'deja trimis astăzi')
+        asyncio.run(run())
+
     def test_password_login_without_device_approval_and_separate_master_access(self):
         from unittest.mock import patch
+        import app as core
+        core.init_scheduler_db(core.DB_PATH)
+        core.ensure_automation_tables(core.DB_PATH)
         with patch.dict(os.environ, {'DASHBOARD_DEVICE_APPROVAL': 'false', 'MASTER_DASHBOARD_USER': 'master',
                 'MASTER_DASHBOARD_PASSWORD': 'distinct-master-password', 'RECEPTION_BRIDGE_URL': ''}):
             client = TestClient(app, base_url='https://app.servicealbatros.ro')

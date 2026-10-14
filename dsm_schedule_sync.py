@@ -297,7 +297,7 @@ def _appointments_from_snapshot(snapshot: dict, target_date: date) -> list[dict]
 
 
 def ensure_automation_tables(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduler_automation_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,7 +328,7 @@ def ensure_automation_tables(db_path: Path) -> None:
 
 def automation_succeeded(db_path: Path, kind: str, run_date: date) -> bool:
     ensure_automation_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         row = conn.execute(
             "SELECT status FROM scheduler_automation_runs WHERE kind=? AND run_date=?",
             (kind, run_date.isoformat()),
@@ -338,7 +338,7 @@ def automation_succeeded(db_path: Path, kind: str, run_date: date) -> bool:
 
 def automation_attempts(db_path: Path, kind: str, run_date: date) -> int:
     ensure_automation_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         row = conn.execute(
             "SELECT attempts FROM scheduler_automation_runs WHERE kind=? AND run_date=?",
             (kind, run_date.isoformat()),
@@ -348,7 +348,7 @@ def automation_attempts(db_path: Path, kind: str, run_date: date) -> int:
 
 def mechanic_schedule_was_sent(db_path: Path, schedule_date: date, technician_id: int) -> bool:
     ensure_automation_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         row = conn.execute(
             """SELECT status FROM scheduler_mechanic_schedule_deliveries
                WHERE schedule_date=? AND technician_id=?""",
@@ -363,7 +363,7 @@ def record_mechanic_schedule_delivery(
 ) -> None:
     ensure_automation_tables(db_path)
     payload = json.dumps(details, ensure_ascii=False, default=str)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("""
             INSERT INTO scheduler_mechanic_schedule_deliveries
               (schedule_date,technician_id,phone,message_id,status,details)
@@ -378,7 +378,7 @@ def record_mechanic_schedule_delivery(
 def record_automation_run(db_path: Path, kind: str, run_date: date, status: str, details: object) -> None:
     ensure_automation_tables(db_path)
     payload = json.dumps(details, ensure_ascii=False, default=str)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("""
             INSERT INTO scheduler_automation_runs(kind,run_date,status,attempts,details)
             VALUES(?,?,?,1,?)

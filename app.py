@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import closing
 from datetime import datetime, timedelta
 from uuid import uuid4
 import os
@@ -443,6 +444,7 @@ def master_status(request: Request):
     runtime = json.loads(path.read_text()) if path.exists() else {}
     return {'robot_enabled': POLICY.robot_enabled, 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
             'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR),
+            'mechanic_send': _mechanic_send_readiness(),
             'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True)}
 
 
@@ -2743,6 +2745,7 @@ async def startup():
     app.state.robot_reaper_task = asyncio.create_task(_robot_reaper_loop())
     app.state.delay_notification_task = asyncio.create_task(_delay_notification_loop())
     app.state.dsm_schedule_automation_task = asyncio.create_task(_dsm_schedule_automation_loop())
+    app.state.mechanic_schedule_automation_task = asyncio.create_task(_mechanic_schedule_automation_loop())
 
 
 @app.on_event("shutdown")
@@ -2771,6 +2774,13 @@ async def shutdown():
         schedule_task.cancel()
         try:
             await schedule_task
+        except asyncio.CancelledError:
+            pass
+    mechanic_task = getattr(app.state, 'mechanic_schedule_automation_task', None)
+    if mechanic_task:
+        mechanic_task.cancel()
+        try:
+            await mechanic_task
         except asyncio.CancelledError:
             pass
 
@@ -7242,7 +7252,15 @@ def _technician_schedule_template_payload(appointments: list[dict]) -> str:
     return " | ".join(entries)
 
 
-async def _send_all_technician_schedules_for_date(
+_technician_schedule_send_lock = asyncio.Lock()
+
+
+async def _send_all_technician_schedules_for_date(start: datetime, *, automatic: bool, technician_ids: set[int] | None = None) -> dict:
+    async with _technician_schedule_send_lock:
+        return await _send_all_technician_schedules_unlocked(start, automatic=automatic, technician_ids=technician_ids)
+
+
+async def _send_all_technician_schedules_unlocked(
     start: datetime, *, automatic: bool, technician_ids: set[int] | None = None
 ) -> dict:
     """Send one day's schedules; automatic runs are idempotent per mechanic/day."""
@@ -7347,8 +7365,7 @@ def _configured_clock(name: str, default: str) -> tuple[int, int]:
 
 
 async def _dsm_schedule_automation_loop() -> None:
-    """Import the rolling week periodically; send today's mechanic schedules at 08:00."""
-    send_clock = _configured_clock("MECHANIC_SCHEDULE_SEND_TIME", "08:00")
+    """Import the rolling week periodically, independently of WhatsApp sending."""
     from schedule_import_control import read_state, write_state, finish_import
     previous = read_state(DATA_DIR)
     if previous.get('status') == 'running':
@@ -7364,22 +7381,80 @@ async def _dsm_schedule_automation_loop() -> None:
                 if import_due(state, now):
                     await _run_periodic_dsm_import()
 
-                send_due = now.replace(hour=send_clock[0], minute=send_clock[1], second=0, microsecond=0)
-                send_window_end = send_due + timedelta(minutes=20)
-                today = now.date()
-                if send_due <= now < send_window_end and not automation_succeeded(DB_PATH, "mechanic_send", today):
-                    if automation_attempts(DB_PATH, "mechanic_send", today) < 3:
-                        result = await _send_all_technician_schedules_for_date(send_due, automatic=True)
-                        record_automation_run(
-                            DB_PATH, "mechanic_send", today,
-                            "success" if result.get("ok") else "error", result,
-                        )
         except asyncio.CancelledError:
             raise
         except Exception:
             # The next bounded cycle retries; errors are also persisted by each operation.
             pass
         await asyncio.sleep(60)
+
+
+async def _mechanic_schedule_tick(now):
+    from mechanic_schedule_clock import due_day
+    day = due_day(now, _configured_clock('MECHANIC_SCHEDULE_SEND_TIME', '08:00'))
+    if not day or not POLICY.robot_enabled or not env_bool('MECHANIC_SCHEDULE_AUTOMATIC_ENABLED', True):
+        return
+    if automation_succeeded(DB_PATH, 'mechanic_send', day) or automation_attempts(DB_PATH, 'mechanic_send', day) >= 3:
+        return
+    last = _last_mechanic_send_run()
+    if last and last['run_date'] == day.isoformat() and last['status'] == 'error':
+        from datetime import timezone
+        from mechanic_schedule_clock import local_time
+        attempted = datetime.fromisoformat(last['updated_at']).replace(tzinfo=timezone.utc)
+        if (local_time(now) - attempted).total_seconds() < 120:
+            return
+    try:
+        result = await _send_all_technician_schedules_for_date(datetime.combine(day, datetime.min.time()), automatic=True)
+    except Exception as exc:
+        result = {'ok': False, 'failed': [{'reason': str(exc)[:500]}]}
+    record_automation_run(DB_PATH, 'mechanic_send', day, 'success' if result.get('ok') else 'error', result)
+    return result
+
+
+async def _mechanic_schedule_automation_loop():
+    from mechanic_schedule_clock import ROMANIA
+    await asyncio.sleep(3)
+    while True:
+        try:
+            await _mechanic_schedule_tick(datetime.now(ROMANIA))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(15)
+
+
+def _last_mechanic_send_run():
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM scheduler_automation_runs WHERE kind='mechanic_send' ORDER BY run_date DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result['details'] = json.loads(result.get('details') or '{}')
+    return result
+
+
+def _mechanic_send_readiness():
+    from mechanic_schedule_clock import ROMANIA, next_send
+    clock = _configured_clock('MECHANIC_SCHEDULE_SEND_TIME', '08:00')
+    due = next_send(datetime.now(ROMANIA), clock)
+    start = due.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+    rows = scheduler_list_appointments(DB_PATH, start.isoformat(), (start + timedelta(days=1)).isoformat())
+    recipients, missing = [], []
+    for technician in scheduler_list_technicians(DB_PATH, include_inactive=False):
+        jobs = [r for r in rows if r.get('technician_id') == technician['id'] and r.get('status') != 'anulat' and r.get('source') != 'yard_capacity_exercise']
+        if not jobs:
+            continue
+        try:
+            _normalize_whatsapp_phone(str(technician.get('phone') or ''))
+        except HTTPException:
+            missing.append(technician['name'])
+            continue
+        recipients.append({'name': technician['name'], 'appointments': len(jobs)})
+    return {'enabled': env_bool('MECHANIC_SCHEDULE_AUTOMATIC_ENABLED', True), 'time': f'{clock[0]:02}:{clock[1]:02}',
+            'timezone': 'Europe/Bucharest', 'weekdays': 'luni–vineri', 'next_send': due.isoformat(),
+            'recipients': recipients, 'missing_phones': missing, 'last_run': _last_mechanic_send_run()}
 
 
 def _claim_delay_notification(notification_id: int, *, due_only: bool = False) -> dict:
@@ -12219,6 +12294,17 @@ def _capture_whatsapp_delivery_statuses(payload: dict) -> None:
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
                 }
                 WHATSAPP_DELIVERY_STATUS[message_id] = receipt
+                # Keep scheduled-send receipts across restarts and surface late failures.
+                with closing(sqlite3.connect(DB_PATH)) as conn:
+                    match = conn.execute('SELECT schedule_date FROM scheduler_mechanic_schedule_deliveries WHERE message_id=?', (message_id,)).fetchone()
+                    if match:
+                        conn.execute("""UPDATE scheduler_mechanic_schedule_deliveries
+                            SET status=CASE WHEN status='read' AND ? IN ('sent','delivered') THEN status
+                              WHEN status='delivered' AND ?='sent' THEN status ELSE ? END,details=?
+                            WHERE message_id=?""", (receipt['status'], receipt['status'], receipt['status'], json.dumps(receipt), message_id))
+                        if receipt['status'] == 'failed':
+                            conn.execute("UPDATE scheduler_automation_runs SET status='error',updated_at=CURRENT_TIMESTAMP WHERE kind='mechanic_send' AND run_date=?", (match[0],))
+                        conn.commit()
                 print(
                     "WHATSAPP DELIVERY STATUS: "
                     f"id={message_id} recipient={receipt['recipient_id']} status={receipt['status']} "

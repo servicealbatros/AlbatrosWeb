@@ -10,7 +10,7 @@ BASE = Path(__file__).resolve().parents[1]
 FILES = (
     'app.py', 'cloud_app.py', 'reception_bridge.py', 'cloud_backup.py',
     'agent.py', 'security.py', 'database.py', 'labour.py',
-    'vision.py', 'dashboard_devices.py', 'scheduler.py', 'schedule_import_control.py', 'automotive_vocabulary.py',
+    'vision.py', 'dashboard_devices.py', 'scheduler.py', 'schedule_import_control.py', 'mechanic_schedule_clock.py', 'automotive_vocabulary.py',
     'oe_english_vocabulary.py', 'part_accuracy.py', 'worker_run_guard.py',
     'catalogue_probe.py', 'dsm_readonly.py', 'dsm_schedule_sync.py',
     'dsm_open_orders_readonly.py', 'dsm_history_import.py', 'dsm_history_cache.py',

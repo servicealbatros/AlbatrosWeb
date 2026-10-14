@@ -176,10 +176,12 @@ def probe_browser(keep_provider_tabs=False):
         page.close()
         # Public landing pages only: no provider login, VIN lookup or writes.
         reachability = {}
-        public_pages = [] if os.getenv('ALBATROS_PROVIDER_TEST_CONSOLE') == 'true' else [
+        public_pages = [] if os.getenv('ALBATROS_PROVIDER_TEST_CONSOLE') == 'true' and not keep_provider_tabs else [
                          ('dsm', 'https://apps.dsmpro.ro/'),
                           ('autototal', 'https://www3.eoriginal.ro/'),
                           ('intercars', 'https://ro.e-cat.intercars.eu/')]
+        if keep_provider_tabs:
+            public_pages.append(('haynes', 'https://www.workshopdata.com/touch/site/layout/makesOverview'))
         for name, url in public_pages:
             page = context.new_page()
             try:
@@ -192,7 +194,7 @@ def probe_browser(keep_provider_tabs=False):
                 if not keep_provider_tabs:
                     page.close()
         REPORT.update(phase='browser_ready', chromium=True, cdp=True, intercars_extension=True,
-                      provider_sessions='not_authenticated', public_provider_pages=reachability)
+                      provider_sessions='unverified', public_provider_pages=reachability)
         print(json.dumps(REPORT), flush=True)
         if os.getenv('ALBATROS_RENDER_MODE') == 'production':
             path = Path(os.environ['ALBATROS_DATA_DIR']) / 'render_runtime_health.json'

@@ -25,6 +25,13 @@ PROVIDERS = {'DSM': 'https://apps.dsmpro.ro/',
              'Haynes': 'https://www.workshopdata.com/touch/site/layout/makesOverview'}
 DOMAINS = ('dsmpro.ro', 'q-service.ro', 'intercars.eu', 'eoriginal.ro', 'workshopdata.com', 'microsoftonline.com')
 _playwright = _browser = _page = None
+_page_id = ''
+_provider_pages = {}
+
+
+def check_page(page_id):
+    if not _page_id or not hmac.compare_digest(page_id, _page_id):
+        raise HTTPException(409, 'Furnizorul s-a schimbat. Actualizează ecranul înainte să continui.')
 
 
 def enabled():
@@ -59,6 +66,13 @@ def allowed_url(url):
         host == domain or host.endswith('.' + domain) for domain in DOMAINS)
 
 
+def provider_page(url, provider):
+    families = {'DSM': ('dsmpro.ro', 'q-service.ro'), 'Inter Cars': ('intercars.eu',),
+                'AutoTotal': ('eoriginal.ro',), 'Haynes': ('workshopdata.com',)}
+    host = urlparse(url).hostname or ''
+    return allowed_url(url) and any(host == d or host.endswith('.' + d) for d in families[provider])
+
+
 def captcha_url(url):
     parsed = urlparse(url)
     host = parsed.hostname or ''
@@ -74,7 +88,7 @@ async def captcha_regions():
     regions = []
     for frame in await _page.locator('iframe').all():
         src = await frame.get_attribute('src') or ''
-        if captcha_url(src):
+        if captcha_url(src) and await frame.is_visible():
             box = await frame.bounding_box()
             if box and box['width'] > 0 and box['height'] > 0:
                 regions.append(box)
@@ -122,11 +136,13 @@ async def panel():
 
 
 async def context():
-    global _playwright, _browser
+    global _playwright, _browser, _page, _page_id
     if _browser is None or not _browser.is_connected():
         from playwright.async_api import async_playwright
         _playwright = await async_playwright().start()
         _browser = await _playwright.chromium.connect_over_cdp('http://127.0.0.1:9222', timeout=30000)
+        _provider_pages.clear()
+        _page, _page_id = None, ''
     return _browser.contexts[0]
 
 
@@ -163,17 +179,25 @@ async def snapshot():
          ||(newDevice&&/^(salvare|save)$/i.test(e.text.trim())))&&
         !/comand|co[sș]|cart|checkout|cump|pl[aă]t|order|buy|register|cre.*cont/i.test(e.text));
       return {index,fields,buttons}; }).filter(Boolean)}""")
-    shot = await _page.screenshot(type='jpeg', quality=45, timeout=20000)
+    shot = await _page.screenshot(type='png', timeout=20000)
     navigation = await _page.locator('a,button').evaluate_all("""nodes=>nodes.map((e,index)=>({index,
       text:(e.innerText||'').trim(),visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)}))
       .filter(e=>e.visible&&/^(autentificare|conectare|login|log in|sign in|contul meu|my account)$/i.test(e.text))""")
-    return {'page_open': True, 'host': urlparse(_page.url).hostname,
-            'forms': forms, 'image': 'data:image/jpeg;base64,' + base64.b64encode(shot).decode(),
-            'login_form_present': bool(forms), 'auth_navigation': navigation,
+    captcha = _page.locator('[name="g-recaptcha-response"]')
+    captcha_present = await captcha.count() > 0
+    captcha_complete = await captcha.evaluate_all('nodes=>nodes.some(e=>!!e.value.trim())') if captcha_present else False
+    return {'page_open': True, 'page_id': _page_id, 'host': urlparse(_page.url).hostname,
+            'forms': forms, 'image': 'data:image/png;base64,' + base64.b64encode(shot).decode(),
+            'login_form_present': bool(forms), 'auth_navigation': [] if forms else navigation,
+            'captcha_present': captcha_present, 'captcha_complete': captcha_complete,
             'captcha_regions': await captcha_regions()}
 
 
-class CaptchaClick(BaseModel):
+class PageAction(BaseModel):
+    page_id: str = Field(min_length=1, max_length=100)
+
+
+class CaptchaClick(PageAction):
     x: float = Field(ge=0, le=10000, allow_inf_nan=False)
     y: float = Field(ge=0, le=10000, allow_inf_nan=False)
 
@@ -185,6 +209,7 @@ async def captcha_click(body: CaptchaClick, request: Request):
     session(request)
     same_origin(request)
     async with LOCK:
+        check_page(body.page_id)
         regions = await captcha_regions()
         if not inside_region(body.x, body.y, regions):
             raise HTTPException(403, 'Apasă numai în verificarea CAPTCHA din imagine.')
@@ -202,20 +227,33 @@ class Provider(BaseModel):
 
 @router.post('/api/provider-auth/open')
 async def open_provider(body: Provider, request: Request):
-    global _page
+    global _page, _page_id
     session(request)
     same_origin(request)
     if body.provider not in PROVIDERS:
         raise HTTPException(422, 'Unknown provider')
     async with LOCK:
         ctx = await context()
-        if _page is not None and not _page.is_closed():
-            await _page.close()
-        _page = await ctx.new_page()
-        try:
-            await _page.goto(PROVIDERS[body.provider], wait_until='domcontentloaded', timeout=45000)
-        except Exception:
-            pass  # A loaded login form can still be usable after a navigation timeout.
+        cached = _provider_pages.get(body.provider)
+        if cached and not cached[0].is_closed():
+            _page, _page_id = cached
+        else:
+            _page = next((p for p in ctx.pages if not p.is_closed() and provider_page(p.url, body.provider)), None)
+            existing = _page is not None
+            if not existing:
+                _page = await ctx.new_page()
+            _page_id = secrets.token_urlsafe(24)
+            _provider_pages[body.provider] = (_page, _page_id)
+            if not existing:
+                try:
+                    await _page.goto(PROVIDERS[body.provider], wait_until='domcontentloaded', timeout=45000)
+                except Exception:
+                    pass  # A loaded login form can still be usable after a navigation timeout.
+        if await _page.get_by_text('503 Service Unavailable', exact=True).is_visible():
+            try:
+                await _page.reload(wait_until='domcontentloaded', timeout=30000)
+            except Exception:
+                pass
         return await snapshot()
 
 
@@ -226,10 +264,11 @@ async def state(request: Request):
         return await snapshot()
 
 
-class Submit(BaseModel):
+class Submit(PageAction):
     form: int = Field(ge=-1)
     button: int = Field(ge=0)
     fields: dict[str, str]
+    prepare_only: bool = False
 
 
 @router.post('/api/provider-auth/submit')
@@ -237,6 +276,7 @@ async def submit(body: Submit, request: Request):
     session(request)
     same_origin(request)
     async with LOCK:
+        check_page(body.page_id)
         current = await snapshot()
         form = next((form for form in current.get('forms', []) if form['index'] == body.form), None)
         if not form or body.button not in {button['index'] for button in form['buttons']}:
@@ -246,8 +286,23 @@ async def submit(body: Submit, request: Request):
             raise HTTPException(422, 'Invalid login fields')
         locator = _page.locator('body') if body.form == -1 else _page.locator('form').nth(body.form)
         try:
+            fields_changed = False
             for index, value in body.fields.items():
-                await locator.locator('input').nth(int(index)).fill(value, timeout=15000)
+                field = locator.locator('input').nth(int(index))
+                if await field.input_value() != value:
+                    fields_changed = True
+                    await field.fill(value, timeout=15000)
+            # Human verification is left intact: unchanged credentials must
+            # not fire input events again after the CAPTCHA has been solved.
+            captcha = _page.locator('[name="g-recaptcha-response"]')
+            captcha_present = await captcha.count() > 0
+            captcha_pending = (captcha_present and not
+                await captcha.evaluate_all('nodes=>nodes.some(e=>!!e.value.trim())'))
+            if body.prepare_only or captcha_pending or (captcha_present and fields_changed):
+                state = await snapshot()
+                state['captcha_pending'] = captcha_pending
+                state['prepared_only'] = True
+                return state
             await locator.locator('button,input[type=submit]').nth(body.button).click(timeout=15000)
         except Exception:
             # Don't let a browser exception include entered credentials in
@@ -257,7 +312,7 @@ async def submit(body: Submit, request: Request):
         return await snapshot()
 
 
-class LoginLink(BaseModel):
+class LoginLink(PageAction):
     index: int = Field(ge=0)
 
 
@@ -266,6 +321,7 @@ async def login_link(body: LoginLink, request: Request):
     session(request)
     same_origin(request)
     async with LOCK:
+        check_page(body.page_id)
         current = await snapshot()
         if body.index not in {item['index'] for item in current.get('auth_navigation', [])}:
             raise HTTPException(403, 'Only displayed authentication links are allowed')
@@ -284,9 +340,9 @@ async def prepare_offer(request: Request):
     same_origin(request)
     async with LOCK:
         ctx = await context()
-        for name in ('DSM', 'Inter Cars', 'AutoTotal'):
+        for name in PROVIDERS:
             url = PROVIDERS[name]
-            if any(urlparse(page.url).hostname == urlparse(url).hostname for page in ctx.pages):
+            if any(provider_page(page.url, name) for page in ctx.pages):
                 continue
             page = await ctx.new_page()
             try:

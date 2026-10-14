@@ -8422,7 +8422,6 @@ def requests_dashboard():
             <a class="link-button" href="/baza-dsm">Baza DSM</a>
             <a class="link-button" href="/arhiva">Arhivă / curăță cereri</a>
             <a class="link-button" href="/acuratete">Măsurare acuratețe</a>
-            <a class="link-button" href="/">Chat AI</a>
         </div>
     </div>
 

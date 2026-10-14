@@ -210,6 +210,8 @@ async def security_rate_limit(request: Request, call_next):
             and request.url.path.startswith(('/cereri', '/oferta/', '/programator', '/conversatie/', '/acuratete'))):
         body = b''.join([chunk async for chunk in response.body_iterator])
         extra = b'<a href="/master" style="position:fixed;bottom:8px;right:12px;z-index:9999;background:white;padding:8px;border-radius:8px">Panou master</a>' if str(request.state.dashboard_user or '').startswith('master:') else b''
+        if bridge_user or not local_client:
+            extra += b'''<script>setInterval(async()=>{try{const r=await fetch('/api/dashboard/access-check',{cache:'no-store'});if(r.status===401||r.status===403)location.replace('/receptie/login')}catch(e){}},5000);</script>'''
         headers = dict(response.headers)
         headers.pop('content-length', None)
         response = Response(content=body + extra, status_code=response.status_code, headers=headers)

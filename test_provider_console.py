@@ -144,6 +144,16 @@ class ProviderFormBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('value', state['forms'][0]['fields'][0])
         self.assertEqual(state['auth_navigation'], [])
 
+    async def test_delayed_screenshot_does_not_block_login_metadata(self):
+        from playwright.async_api import TimeoutError
+        await self.page.set_content('<h1>Login</h1><form><input type="email"><input type="password"><button>Login</button></form>')
+        with patch.object(self.page, 'screenshot', AsyncMock(side_effect=TimeoutError('fixture'))):
+            state = await console.snapshot()
+        self.assertTrue(state['login_form_present'])
+        self.assertTrue(state['screenshot_unavailable'])
+        self.assertEqual(state['image'], '')
+        self.assertEqual(len(state['forms']), 1)
+
     async def test_prepared_fields_do_not_reset_human_verification_on_submit(self):
         import httpx
         await self.page.set_content('''<form><label>Username<input name="username"></label>

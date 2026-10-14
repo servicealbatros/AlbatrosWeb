@@ -96,10 +96,10 @@ class CloudGateway:
             user = POLICY.verify_dashboard_session(request.cookies.get('albatros_reception'))
             if not user:
                 POLICY.require_admin(request.headers.get('authorization'))
-                user = 'cloud-administrator'
+                user = 'master:cloud-administrator' if path == '/master' or path.startswith('/api/dashboard/master/') else 'cloud-administrator'
             elif POLICY.is_master_session(request.cookies.get('albatros_reception')):
                 user = 'master:' + user
-            if method not in {'GET', 'HEAD', 'OPTIONS'} and user != 'cloud-administrator':
+            if method not in {'GET', 'HEAD', 'OPTIONS'} and user not in {'cloud-administrator', 'master:cloud-administrator'}:
                 from app import _same_origin_request
                 if not _same_origin_request(request):
                     response = JSONResponse({'detail': 'Cerere respinsă: origine invalidă'}, status_code=403)

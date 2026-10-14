@@ -179,7 +179,12 @@ async def snapshot():
          ||(newDevice&&/^(salvare|save)$/i.test(e.text.trim())))&&
         !/comand|co[sș]|cart|checkout|cump|pl[aă]t|order|buy|register|cre.*cont/i.test(e.text));
       return {index,fields,buttons}; }).filter(Boolean)}""")
-    shot = await _page.screenshot(type='png', timeout=20000)
+    from playwright.async_api import TimeoutError as ScreenshotTimeout
+    try:
+        shot = await _page.screenshot(type='png', animations='disabled', timeout=5000)
+    except ScreenshotTimeout:
+        # A delayed font/image must not prevent a valid login form submission.
+        shot = None
     navigation = await _page.locator('a,button').evaluate_all("""nodes=>nodes.map((e,index)=>({index,
       text:(e.innerText||'').trim(),visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)}))
       .filter(e=>e.visible&&/^(autentificare|conectare|login|log in|sign in|contul meu|my account)$/i.test(e.text))""")
@@ -187,7 +192,8 @@ async def snapshot():
     captcha_present = await captcha.count() > 0
     captcha_complete = await captcha.evaluate_all('nodes=>nodes.some(e=>!!e.value.trim())') if captcha_present else False
     return {'page_open': True, 'page_id': _page_id, 'host': urlparse(_page.url).hostname,
-            'forms': forms, 'image': 'data:image/png;base64,' + base64.b64encode(shot).decode(),
+            'forms': forms, 'image': 'data:image/png;base64,' + base64.b64encode(shot).decode() if shot else '',
+            'screenshot_unavailable': shot is None,
             'login_form_present': bool(forms), 'auth_navigation': [] if forms else navigation,
             'captcha_present': captcha_present, 'captcha_complete': captcha_complete,
             'captcha_regions': await captcha_regions()}

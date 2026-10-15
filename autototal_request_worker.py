@@ -1718,11 +1718,27 @@ async def run(request_id: int, vin: str, query: str, output: Path,
                                                  vehicle.get("drivetrain") or "", vehicle.get("year"),
                                                  vehicle.get("power_kw"))
             if not selected_type:
+                # An ambiguous TecDoc type must not block the independent
+                # VIN-specific OE diagrams. Keep the ambiguity for review.
+                oe_candidates = await _discover_oe_vin_candidates(ws, identification, vin, query)
+                oe_products = []
+                for index, candidate in enumerate(oe_candidates):
+                    try:
+                        oe_products.extend(await _search_oe_code_options(ws, candidate, 900 + index * 200))
+                    except Exception as exc:
+                        print(f"AUTOTOTAL OE search failed code={candidate.get('oe_code')}: {exc}", flush=True)
+                unique_products, product_keys = [], set()
+                for product in oe_products:
+                    key = (product.get('requested_item'), product.get('brand'), product.get('manufacturer_ref'))
+                    if key not in product_keys:
+                        product_keys.add(key)
+                        unique_products.append(product)
                 save(output, {
                     **base,
-                    "status": "vehicle_ready" if complete else "vehicle_partial",
+                    "status": "partial" if unique_products else ("vehicle_ready" if complete else "vehicle_partial"),
                     "vehicle": vehicle,
-                    "products": [],
+                    "products": unique_products,
+                    "oe_candidates": oe_candidates,
                     "catalog_status": "variant_needs_confirmation",
                     "tecrmi_status": "unavailable",
                     "power_resolution": power_resolution,

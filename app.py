@@ -1612,6 +1612,11 @@ def _required_offer_part_kinds(value: str) -> dict[str, str]:
         checks made e.g. `discuri spate ... placute fata` require front discs.
         """
         axes: set[str] = set()
+        # In shorthand such as "discuri placute fata spate", the trailing
+        # pair of axles qualifies both adjacent components, not only the last.
+        shared_group = re.search(r'\b(?:discur\w*|placut\w*)\s+(?:(?:de\s+)?frana\s+)?(?:si\s+)?(?:discur\w*|placut\w*)\s+(?:(?:de\s+)?frana\s+)?(fata|spate)\s*(?:si|/|,|&|\s+)\s*(fata|spate)\b', raw)
+        if shared_group and re.search(pattern, shared_group.group(0)):
+            axes.update('rear' if axle == 'spate' else 'front' for axle in shared_group.groups())
         axle_re = re.compile(r"\b(fata|anterior|spate|posterior)\b")
         for match in re.finditer(pattern, raw):
             start, end = match.span()

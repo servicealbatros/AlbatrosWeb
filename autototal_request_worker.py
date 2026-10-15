@@ -621,7 +621,7 @@ def _oe_vin_targets(query: str) -> list[dict]:
         if 'disc' in wanted and 'fran' in wanted:
             aliases = ('disc de frana', 'disc frana')
         elif 'placut' in wanted and 'senzor' not in wanted:
-            aliases = ('placute de frana', 'placute frana')
+            aliases = ('placute de frana', 'placute frana', 'set garnituri pt.frana cu disc', 'set garnituri pt. frana cu disc', 'set garnituri de frana')
         elif 'senzor' in wanted and 'uzur' in wanted:
             aliases = ('senzor uzura', 'indicator uzura')
         target['terms'] = tuple(dict.fromkeys(tuple(target['terms']) + aliases))
@@ -1357,8 +1357,13 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
         return False
     if "placute" in wanted and not any(term in product for term in ('placute frana','placute de frana')):
         return False
-    if "discuri frana" in wanted and not any(value in product for value in ("disc frana", "discuri frana", "disc de frana")):
-        return False
+    if 'placute' in wanted and any(term in product for term in ('discuri', 'disc de frana')):
+        return False  # Combined disc/pad packages are not standalone pad sets.
+    if 'disc' in wanted and 'fran' in wanted and 'placut' not in wanted:
+        if not any(value in product for value in ('disc frana','discuri frana','disc de frana')):
+            return False
+        if any(value in product for value in ('protect', 'deflector', 'tabla', 'placa ', 'suport', 'surub', 'placute')):
+            return False
     if "curea accesorii" in wanted:
         if "curea transmisie cu caneluri" not in product:
             return False

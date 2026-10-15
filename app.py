@@ -2175,9 +2175,13 @@ def _load_request_offer_result(request_id: int) -> dict:
                     )
         request_row = _request_by_id(request_id) or {}
         from original_oil_policy import is_original_engine_oil
+        from autototal_request_worker import _oe_option_allowed
         data['products'] = [p for p in data.get('products') or []
                             if _offer_product_kind(p) != 'engine_oil'
                             or is_original_engine_oil(p, request_row.get('vehicle'))]
+        data['products'] = [p for p in data['products']
+                            if _offer_product_kind(p) not in {'brake_discs_front','brake_discs_rear','brake_pads','brake_pads_rear'}
+                            or _oe_option_allowed({'requested_item':p.get('requested_item') or ''}, str(p.get('description') or ''), str(p.get('brand') or ''))]
         catalog_products = _filter_catalog_misclassifications(
             request_row, data.get("products") or [], data.get("vehicle") or {}
         )

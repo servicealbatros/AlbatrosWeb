@@ -1,9 +1,17 @@
 import unittest
 import app
-from autototal_request_worker import _oe_vin_targets
+from autototal_request_worker import _oe_vin_targets, _oe_option_allowed
 
 
 class SharedAxleTests(unittest.TestCase):
+    def test_protection_plate_and_combined_package_are_not_standalone_parts(self):
+        disc = {'requested_item':'discuri frână spate'}
+        self.assertFalse(_oe_option_allowed(disc, 'placa protectie disc frana', 'OE'))
+        self.assertTrue(_oe_option_allowed(disc, 'Disc de frână 302X12MM', 'OE'))
+        pads = {'requested_item':'plăcuțe frână față'}
+        self.assertFalse(_oe_option_allowed(pads, '1 set discuri de frână cu plăcuţe de frână', 'OE'))
+        self.assertTrue(_oe_option_allowed(pads, 'SET PLACUTE FRANA TEXTAR', 'TEXTAR'))
+
     def test_vin_planner_preserves_both_axles_and_localized_names(self):
         rows = _oe_vin_targets('Discuri de frana fata si spate si placute de frana fata si spate')
         discs = [r for r in rows if r['requested_item'].startswith('discuri')]

@@ -1357,7 +1357,7 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
         # repair assortments or unrelated VAG plugs. Keep only the drain plug
         # itself; vehicle-family filtering is applied again in the dashboard.
         if not any(value in product for value in (
-                "surub de golire", "buson de golire", "buson baie", "surub obturator",
+                "surub de golire", "surub golire", "buson de golire", "buson baie", "surub obturator",
                 "oil drain plug", "screw plug, oil sump")):
             return False
     if "filtru aer" in wanted:

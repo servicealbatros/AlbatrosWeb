@@ -2,10 +2,14 @@ import unittest
 from unittest.mock import patch
 
 from original_oil_policy import is_original_engine_oil
-from autototal_request_worker import _choose_engine_oil_card
+from autototal_request_worker import _choose_engine_oil_card, _oe_option_allowed
 
 
 class OriginalOilTests(unittest.TestCase):
+    def test_observed_bmw_drain_plug_heading_is_not_rejected(self):
+        self.assertTrue(_oe_option_allowed({'requested_item':'bușon baie ulei'}, 'AUTOTOTAL OE 11137535106 | SURUB GOLIRE ULEI - O.E. BMW', 'OE'))
+        self.assertFalse(_oe_option_allowed({'requested_item':'bușon baie ulei'}, 'INEL ETANSARE', 'OE'))
+
     def test_approval_does_not_turn_aftermarket_into_original(self):
         self.assertFalse(is_original_engine_oil({'title': 'CASTROL EDGE BMW LL04', 'brand': 'CASTROL'}, 'BMW 320D'))
         self.assertFalse(is_original_engine_oil({'title': 'MOTUL BMW LL04', 'brand': 'BMW'}, 'BMW 320D'))

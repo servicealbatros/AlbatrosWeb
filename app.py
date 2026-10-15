@@ -2169,6 +2169,10 @@ def _load_request_offer_result(request_id: int) -> dict:
                         + _oe_accessory_belt_catalog_products(other)
                     )
         request_row = _request_by_id(request_id) or {}
+        from original_oil_policy import is_original_engine_oil
+        data['products'] = [p for p in data.get('products') or []
+                            if _offer_product_kind(p) != 'engine_oil'
+                            or is_original_engine_oil(p, request_row.get('vehicle'))]
         catalog_products = _filter_catalog_misclassifications(
             request_row, data.get("products") or [], data.get("vehicle") or {}
         )
@@ -4013,7 +4017,17 @@ def _missing_draft_labour_operations(request_row: dict, draft: dict) -> list[str
     return [name for ident,name in expected.items() if ident not in covered]
 
 
+def _require_original_oil_selection(request_id: int) -> None:
+    from original_oil_policy import is_original_engine_oil
+    row = _request_by_id(request_id) or {}
+    selected = _load_offer_selections().get(str(request_id), {})
+    products = selected.get('products') or ([selected['product']] if selected.get('product') else [])
+    if any(_offer_product_kind(p) == 'engine_oil' and not is_original_engine_oil(p, row.get('vehicle')) for p in products):
+        raise HTTPException(409, 'Uleiul trebuie să fie original, al mărcii mașinii. Verifică și înlocuiește selecția veche înainte de aprobarea sau trimiterea ofertei.')
+
+
 def _require_advisor_labour_review(request_id: int) -> dict:
+    _require_original_oil_selection(request_id)
     draft = _draft_for_request(request_id)
     if not draft or not draft.get("labour_reviewed"):
         raise HTTPException(
@@ -5361,6 +5375,7 @@ async def robot_error(job_id: str, data: RobotOfferErrorInput,
 def request_offer_approve(request_id: int, request: Request,
                           human_action: str | None = Header(None, alias="X-Human-Action")):
     _confirm_local_dashboard_click(request, Action.MODIFY_ESTIMATE, request_id, human_action, "approve-offer")
+    _require_original_oil_selection(request_id)
     request_row = _request_by_id(request_id)
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost gasita.")
@@ -5476,7 +5491,7 @@ async def request_crawler_start(request_id: int, request: Request):
     from catalogue_crawler import run_crawler
     output.write_text(json.dumps({'request_id':request_id,'vin':vin,'query':query,
                                  'status':'running','products':[],'sources':{}}),encoding='utf-8')
-    _crawler_task = asyncio.create_task(run_crawler(request_id,vin,query,seeds,output))
+    _crawler_task = asyncio.create_task(run_crawler(request_id,vin,query,seeds,output,vehicle_make=row.get('vehicle') or ''))
     return {'ok':True, 'mode':'crawler', 'request_id':request_id}
 
 
@@ -5693,7 +5708,7 @@ def request_offer_select(request_id: int, data: OfferSelectionInput, confirmatio
             )
         ]
         selected_product = dict(product)
-        selected_product["quantity"] = 1
+        selected_product["quantity"] = product.get('quantity') or 1 if _offer_product_kind(product) == 'engine_oil' else 1
         selected_products.append(selected_product)
     selections[str(request_id)] = {
         "request_id": request_id,

@@ -83,7 +83,7 @@ class Crawl:
         return await self.page.locator('.article-card').evaluate_all("nodes=>nodes.slice(0,30).map(c=>({title:c.querySelector('.card-title')?.innerText||'',text:c.innerText||'',url:location.href}))")
 
 
-async def run_crawler(request_id, vin, query, seeds, output):
+async def run_crawler(request_id, vin, query, seeds, output, vehicle_make=''):
     started = time.monotonic()
     required = _required_product_kinds(query)
     report = {'request_id':request_id,'vin':vin,'query':query,'mode':'crawler',
@@ -122,6 +122,8 @@ async def run_crawler(request_id, vin, query, seeds, output):
                             if group_id not in groups:
                                 data = await crawler.post('/car/get-lcar-categ',{'t_id':'0','c_id':catalogue['catalog'],'s_id':catalogue['ssd'],'g_id':group_id,'vin':vin})
                                 groups[group_id] = data.get('result') or {}
+                                report.setdefault('oe_diagrams', []).append({'group_id': group_id,
+                                    'units': [str(u.get('name') or '') for g in groups[group_id].get('groups') or [] for u in g.get('units') or []][:40]})
                             for group in groups[group_id].get('groups') or []:
                                 for unit in group.get('units') or []:
                                     position = _plain(str(group.get('name') or '')+' '+str(unit.get('name') or ''))
@@ -139,6 +141,7 @@ async def run_crawler(request_id, vin, query, seeds, output):
                                         if part.get('oem') and (oil_pan_plug or any(term in name for term in target['terms'])):
                                             candidates.append({'requested_item':target['requested_item'],'oe_code':part['oem'],'description':part['name']})
                     seen = set()
+                    report['oe_candidates'] = candidates
                     for candidate in candidates:
                         code = re.sub(r'\s+','',str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or ''))
                         if not code or code in seen:
@@ -164,15 +167,22 @@ async def run_crawler(request_id, vin, query, seeds, output):
                     requirements = _confirmed_oil_requirements(request_id,vin)
                     make = str(identification.get('td_catalog') or '')
                     # OEM name comes from the request evidence, never a guessed engine.
-                    oe_brand = next((s for s in ('BMW','AUDI','VW','MERCEDES') if s in query.upper()), '')
+                    from original_oil_policy import original_oil_brands
+                    brands = original_oil_brands(vehicle_make)
+                    oe_brand = brands[0] if brands else ''
                     if requirements and oe_brand and 'engine_oil' in required:
                         requirements.update(oe_brand=oe_brand,oe_only=True)
                         grades = [r['value'] for option in requirements['engine_oil_options'] for r in option.get('grades') or []]
                         approvals = [r['value'] for option in requirements['engine_oil_options'] for r in option.get('classifications') or []]
-                        oil = _choose_engine_oil_card(await crawler.auto_search(' '.join([oe_brand]+grades[:1]+approvals[:1])),requirements)
-                        if oil:
-                            oil['source']='AutoTotal crawler — normă confirmată TecRMI'
-                            report['products'].append(oil)
+                        for oil_query in (' '.join([oe_brand]+grades[:1]), oe_brand+' ULEI'):
+                            cards = await crawler.auto_search(oil_query)
+                            report.setdefault('oil_searches', []).append({'query': oil_query, 'card_count': len(cards),
+                                'headings': [str(c.get('title') or '') for c in cards][:12]})
+                            oil = _choose_engine_oil_card(cards,requirements)
+                            if oil:
+                                oil['source']='AutoTotal crawler — normă confirmată TecRMI'
+                                report['products'].append(oil)
+                                break
                     report['sources']['autototal']={'status':'finished'}
                 except Exception as error:
                     report['sources']['autototal']={'status':'error','error':str(error)[:300]}

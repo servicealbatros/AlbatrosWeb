@@ -910,6 +910,7 @@ async def _engine_oil_requirements(ws, type_id: str, call_id: int, request_id=No
 def _choose_engine_oil_card(cards: list[dict], requirements: dict) -> dict | None:
     """Choose a live oil card matching the OE approval and viscosity."""
     requirements = _normalize_oil_requirements(requirements)
+    from original_oil_policy import is_original_engine_oil, original_oil_brands
     capacity = float((requirements.get("engine_capacity") or {}).get("value") or 0)
     options = requirements.get("engine_oil_options") or []
     approvals = [
@@ -922,7 +923,7 @@ def _choose_engine_oil_card(cards: list[dict], requirements: dict) -> dict | Non
         for option in options for row in option.get("grades") or []
         if row.get("value")
     ]
-    if capacity <= 0 or not grades:
+    if capacity <= 0 or not grades or not approvals:
         return None
     grade = grades[0]
     approval_tokens = [re.sub(r"[^A-Z0-9]", "", value) for value in approvals]
@@ -963,7 +964,10 @@ def _choose_engine_oil_card(cards: list[dict], requirements: dict) -> dict | Non
         # printed in the description of an aftermarket oil.
         if oe_brand and re.search(r'^(?:OE\s+)?' + re.escape(oe_brand) + r'\b', left.upper()):
             brand = oe_brand
-        if requirements.get('oe_only') and brand != oe_brand:
+        else:
+            brand = next((name for name in original_oil_brands(oe_brand)
+                          if re.search(r'^(?:OE\s+)?' + re.escape(name) + r'\b', left.upper())), brand)
+        if not is_original_engine_oil({'title': title, 'brand': brand}, oe_brand):
             continue
         # The catalogue sometimes lists Havoline under either the TEXACO or
         # HAVOLINE name.  Keep one stable display brand for the adviser.
@@ -1030,7 +1034,7 @@ async def _discover_engine_oil(ws, requirements: dict, call_id: int) -> list[dic
         ]
         approval = approvals[0] if approvals else ""
         accumulated = list(cards)
-        search_brands = ([requirements.get('oe_brand')] if requirements.get('oe_only') else ("CASTROL", "MOTUL", "HAVOLINE"))
+        search_brands = [requirements.get('oe_brand')]
         for offset, brand in enumerate(search_brands, start=1):
             search = " ".join(value for value in (brand, grade, approval) if value)
             script = """(async()=>{
@@ -1751,7 +1755,7 @@ async def run(request_id: int, vin: str, query: str, output: Path,
             catalog = await _standard_categories(ws, type_id, 11)
             oil_requirements = await _engine_oil_requirements(ws, type_id, 12, request_id, vin)
             oil_requirements['oe_brand'] = str(vehicle.get('make') or '')
-            oil_requirements['oe_only'] = bool(re.search(r'ulei[^,;\n]*(?:\boe\b|original|origine)', _plain(query)))
+            oil_requirements['oe_only'] = True
             oe_candidates = []
             products = []
             standard_plan = _independent_plan(query)
@@ -1804,6 +1808,9 @@ async def run(request_id: int, vin: str, query: str, output: Path,
             products = [p for p in products if re.sub(
                 r"[^A-Z0-9]", "", str(p.get("manufacturer_ref") or "").upper()
             ) not in exact_codes] + exact_products
+            from original_oil_policy import is_original_engine_oil
+            products = [p for p in products if _revision_product_kind(p.get('requested_item') or p.get('description')) != 'engine_oil'
+                        or is_original_engine_oil(p, vehicle.get('make'))]
             if ("engine_oil" in _required_product_kinds(query)
                     and not oil_requirements.get('oe_only')
                     and not any(_revision_product_kind(
@@ -1818,6 +1825,9 @@ async def run(request_id: int, vin: str, query: str, output: Path,
                 if not oil_requirements.get('engine_oil_options'):
                     oil_requirements.update(_confirmed_oil_requirements(request_id, vin))
                 products.extend(await _discover_engine_oil(ws, oil_requirements, 7000))
+            from original_oil_policy import is_original_engine_oil
+            products = [p for p in products if _revision_product_kind(p.get('requested_item') or p.get('description')) != 'engine_oil'
+                        or is_original_engine_oil(p, vehicle.get('make'))]
             products = _keep_one_oil_drain_plug(products)
             required = _required_product_kinds(query)
             found_kinds = {_revision_product_kind(p.get("requested_item") or p.get("description")) for p in products}

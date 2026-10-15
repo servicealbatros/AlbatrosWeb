@@ -9,6 +9,10 @@ class OriginalOilTests(unittest.TestCase):
     def test_observed_bmw_drain_plug_heading_is_not_rejected(self):
         self.assertTrue(_oe_option_allowed({'requested_item':'bușon baie ulei'}, 'AUTOTOTAL OE 11137535106 | SURUB GOLIRE ULEI - O.E. BMW', 'OE'))
         self.assertFalse(_oe_option_allowed({'requested_item':'bușon baie ulei'}, 'INEL ETANSARE', 'OE'))
+        candidate = {'requested_item':'bușon baie ulei', 'vin_exact':True, 'catalog_unit':'Oil pan/oil level indicator'}
+        self.assertTrue(_oe_option_allowed(candidate, 'Screw plug', 'OE'))
+        self.assertFalse(_oe_option_allowed({**candidate, 'catalog_unit':'Transmission'}, 'Screw plug', 'OE'))
+        self.assertFalse(_oe_option_allowed({**candidate, 'vin_exact':False}, 'Screw plug', 'OE'))
 
     def test_approval_does_not_turn_aftermarket_into_original(self):
         self.assertFalse(is_original_engine_oil({'title': 'CASTROL EDGE BMW LL04', 'brand': 'CASTROL'}, 'BMW 320D'))

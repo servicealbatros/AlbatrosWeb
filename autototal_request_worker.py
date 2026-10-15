@@ -1356,7 +1356,10 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
         # A search by the VIN-exact OE code may also return sealing rings,
         # repair assortments or unrelated VAG plugs. Keep only the drain plug
         # itself; vehicle-family filtering is applied again in the dashboard.
-        if not any(value in product for value in (
+        vin_oil_pan_plug = (candidate.get('vin_exact') is True
+                            and re.search(r'\boil (?:pan|sump)\b', _plain(candidate.get('catalog_unit')))
+                            and re.fullmatch(r'screw plug(?: with (?:sealing|gasket) ring)?', product))
+        if not vin_oil_pan_plug and not any(value in product for value in (
                 "surub de golire", "surub golire", "buson de golire", "buson baie", "surub obturator",
                 "oil drain plug", "screw plug, oil sump")):
             return False

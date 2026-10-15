@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 from autototal_request_worker import (_post_helper_js, _oe_vin_targets, _plain,
     _oe_option_allowed, _revision_product_kind, _required_product_kinds,
@@ -37,6 +37,7 @@ class Crawl:
         self.page = page
         self.pages = []
         self.requests = 0
+        self.searches = []
 
     async def visit(self, url, supplier):
         if not safe_url(url, supplier) or len(self.pages) >= 24:
@@ -71,8 +72,11 @@ class Crawl:
         data = await self.post('/search/doSearch', {'search':query,'searchType':0,'section':section,
             'ref':'crawler','autoSelection':1,'useAiSearch':False})
         result = data.get('result') or {}
-        url = next((s for s in (data.get('redirect'),result.get('result'),result.get('redirect'))
-                    if isinstance(s,str) and safe_url(s,'autototal')), None)
+        redirects = (data.get('redirect'), result.get('result'), result.get('redirect')) if isinstance(result,dict) else (data.get('redirect'), result)
+        url = next((urljoin('https://www3.eoriginal.ro/',s) for s in redirects
+                    if isinstance(s,str) and s and safe_url(urljoin('https://www3.eoriginal.ro/',s),'autototal')), None)
+        trace = {'query':query, 'result_keys': sorted(result) if isinstance(result,dict) else [], 'redirect_found': bool(url)}
+        self.searches.append(trace)
         if not url:
             return []
         await self.visit(url,'autototal')
@@ -80,7 +84,9 @@ class Crawl:
             await self.page.wait_for_function("[...document.querySelectorAll('.article-card')].some(c=>/Pret vanzare.*[0-9]/s.test(c.innerText))", timeout=12000)
         except Exception:
             pass
-        return await self.page.locator('.article-card').evaluate_all("nodes=>nodes.slice(0,30).map(c=>({title:c.querySelector('.card-title')?.innerText||'',text:c.innerText||'',url:location.href}))")
+        cards = await self.page.locator('.article-card').evaluate_all("nodes=>nodes.slice(0,30).map(c=>({title:c.querySelector('.card-title')?.innerText||'',text:c.innerText||'',url:location.href}))")
+        trace.update(card_count=len(cards), headings=[str(c.get('title') or '') for c in cards][:12])
+        return cards
 
 
 async def run_crawler(request_id, vin, query, seeds, output, vehicle_make=''):
@@ -183,6 +189,18 @@ async def run_crawler(request_id, vin, query, seeds, output, vehicle_make=''):
                                 oil['source']='AutoTotal crawler — normă confirmată TecRMI'
                                 report['products'].append(oil)
                                 break
+                        if not oil and grades:
+                            await crawler.visit('https://www3.eoriginal.ro/uleiuri/#/?filter_v='+re.sub(r'[^A-Z0-9]','',grades[0].upper()),'autototal')
+                            try:
+                                await page.locator('.article-card').first.wait_for(timeout=12000)
+                            except Exception:
+                                pass
+                            cards = await page.locator('.article-card').evaluate_all("nodes=>nodes.slice(0,100).map(c=>({title:c.querySelector('.card-title')?.innerText||'',text:c.innerText||'',url:location.href}))")
+                            report.setdefault('oil_searches', []).append({'query':'dedicated_oil_catalogue', 'card_count':len(cards), 'headings':[str(c.get('title') or '') for c in cards][:20]})
+                            oil = _choose_engine_oil_card(cards,requirements)
+                            if oil:
+                                oil['source']='AutoTotal crawler — normă confirmată TecRMI'
+                                report['products'].append(oil)
                     report['sources']['autototal']={'status':'finished'}
                 except Exception as error:
                     report['sources']['autototal']={'status':'error','error':str(error)[:300]}
@@ -231,6 +249,7 @@ async def run_crawler(request_id, vin, query, seeds, output, vehicle_make=''):
             report['sources']['timeout']={'status':'error','error':'Crawler stopped at 300 seconds'}
         finally:
             report['pages']=crawler.pages
+            report['searches']=crawler.searches
             report['explicit_catalogue_requests']=crawler.requests
             report['status']='partial' if report['products'] else 'error'
             report['finished_at']=datetime.now().isoformat(timespec='seconds')

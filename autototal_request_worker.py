@@ -603,6 +603,28 @@ def _oe_vin_targets(query: str) -> list[dict]:
                                tuple(item.get("brands") or ()) + ("OE",)),
         })
         existing.add((_plain(requested_item), group_id))
+    # Localized VAG diagrams use Romanian names. Explicit dual-axle requests
+    # must retain both axles for each component.
+    for pattern, requested, terms, quantity in (
+            (r'discur\w*\s+(?:de\s+)?frana\s+fata\s+si\s+spate', 'discuri frână', ('brake disc','disc de frana','disc frana'), 2),
+            (r'placut\w*\s+(?:de\s+)?frana\s+fata\s+si\s+spate', 'plăcuțe frână', ('repair kit, brake pads','set of brake pads','placute de frana','placute frana'), 1)):
+        if re.search(pattern, text):
+            family = 'disc' if requested.startswith('discuri') else 'placut'
+            targets = [row for row in targets if family not in _plain(row['requested_item']) or 'senzor' in _plain(row['requested_item'])]
+            for axle, label in (('front','față'),('rear','spate')):
+                targets.append({'requested_item':requested+' '+label,'group_id':10130,'terms':terms,
+                                axle:True,'require_position_context':True,'forced_quantity':quantity,
+                                'allowed_brands':('TEXTAR','TRW','OE')})
+    for target in targets:
+        wanted = _plain(target['requested_item'])
+        aliases = ()
+        if 'disc' in wanted and 'fran' in wanted:
+            aliases = ('disc de frana', 'disc frana')
+        elif 'placut' in wanted and 'senzor' not in wanted:
+            aliases = ('placute de frana', 'placute frana')
+        elif 'senzor' in wanted and 'uzur' in wanted:
+            aliases = ('senzor uzura', 'indicator uzura')
+        target['terms'] = tuple(dict.fromkeys(tuple(target['terms']) + aliases))
     return targets
 
 
@@ -1333,9 +1355,9 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
     if "bieleta bara stabilizatoare" in wanted and not any(
             value in product for value in ("bieleta", "antiruliu", "stabiliz", "swing support")):
         return False
-    if "placute" in wanted and "placute frana" not in product:
+    if "placute" in wanted and not any(term in product for term in ('placute frana','placute de frana')):
         return False
-    if "discuri frana" in wanted and not any(value in product for value in ("disc frana", "discuri frana")):
+    if "discuri frana" in wanted and not any(value in product for value in ("disc frana", "discuri frana", "disc de frana")):
         return False
     if "curea accesorii" in wanted:
         if "curea transmisie cu caneluri" not in product:

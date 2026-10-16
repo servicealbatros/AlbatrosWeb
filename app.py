@@ -58,6 +58,7 @@ from scheduler import (
     cancel_appointment as scheduler_cancel_appointment,
     claim_appointment as scheduler_claim_appointment,
     create_appointment as scheduler_create_appointment,
+    get_appointment as scheduler_get_appointment,
     init_scheduler_db,
     list_appointments as scheduler_list_appointments,
     list_yard_capacity_exercise as scheduler_list_yard_capacity_exercise,
@@ -7249,12 +7250,33 @@ def scheduler_data(week_start: str = ""):
         "technicians": scheduler_list_technicians(DB_PATH, include_inactive=True),
         "appointments": scheduler_list_appointments(DB_PATH, start.isoformat(), end.isoformat()),
         "accepted_requests": waiting,
-        "pending_notifications": scheduler_list_pending_notifications(DB_PATH),
+        "pending_notifications": _scheduler_notifications_for_dashboard(),
         "mechanic_reports": _mechanic_reports_for_dashboard(),
         "skill_labels": SKILL_LABELS,
         "department_labels": DEPARTMENT_LABELS,
         "safe_local_only": True,
     }
+
+
+def _scheduler_notifications_for_dashboard():
+    notifications = scheduler_list_pending_notifications(DB_PATH)
+    if not notifications:
+        return notifications
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        request_ids = {row[0] for row in conn.execute("SELECT id FROM service_requests WHERE id IN (" + ",".join("?" for _ in notifications) + ")", [n.get("request_id") for n in notifications])}
+        appointment_ids = {row[0] for row in conn.execute("SELECT id FROM scheduler_appointments WHERE id IN (" + ",".join("?" for _ in notifications) + ")", [n.get("appointment_id") for n in notifications])}
+    for notification in notifications:
+        notification["request_exists"] = notification.get("request_id") in request_ids
+        notification["appointment_exists"] = notification.get("appointment_id") in appointment_ids
+    return notifications
+
+
+@app.get("/api/scheduler/appointments/{appointment_id}")
+def scheduler_appointment_details(appointment_id: int):
+    appointment = scheduler_get_appointment(DB_PATH, appointment_id)
+    if not appointment:
+        raise HTTPException(404, "Programarea nu mai există în programator.")
+    return {"appointment": appointment}
 
 
 @app.get("/api/scheduler/calendar-capacity")

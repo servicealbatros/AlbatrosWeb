@@ -479,6 +479,21 @@ def list_appointments(db_path: Path, start: str, end: str) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def get_appointment(db_path: Path, appointment_id: int) -> dict | None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("""
+            SELECT a.*,t.name technician_name,t.color technician_color
+            FROM scheduler_appointments a
+            LEFT JOIN scheduler_technicians t ON t.id=a.technician_id
+            WHERE a.id=?
+        """, (appointment_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def list_yard_capacity_exercise(db_path: Path) -> list[dict]:
     """Return every temporary yard-capacity block, across all exercise dates."""
     conn = sqlite3.connect(db_path)

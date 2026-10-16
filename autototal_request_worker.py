@@ -1241,6 +1241,7 @@ async def _search_code(ws, candidate: dict, call_id: int) -> dict | None:
         return None
     await _evaluate(ws, call_id, "location.href='https://www3.eoriginal.ro/#/'; true")
     await asyncio.sleep(1.5)
+    await _wait_value(ws, "document.readyState === 'complete' && typeof section !== 'undefined'", 20)
     script = """(async () => {
       const post=%s;
       const response=await post('/search/doSearch',{
@@ -1490,6 +1491,7 @@ async def _search_oe_code_options_once(ws, candidate: dict, call_id: int) -> lis
         return []
     await _evaluate(ws, call_id, "location.href='https://www3.eoriginal.ro/#/'; true")
     await asyncio.sleep(1.2)
+    await _wait_value(ws, "document.readyState === 'complete' && typeof section !== 'undefined'", 20)
     script = """(async () => {
       const post=%s;
       const response=await post('/search/doSearch',{

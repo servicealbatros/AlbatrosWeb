@@ -7244,6 +7244,7 @@ def scheduler_data(week_start: str = ""):
         "appointments": scheduler_list_appointments(DB_PATH, start.isoformat(), end.isoformat()),
         "accepted_requests": waiting,
         "pending_notifications": scheduler_list_pending_notifications(DB_PATH),
+        "mechanic_reports": _mechanic_reports_for_dashboard(),
         "skill_labels": SKILL_LABELS,
         "department_labels": DEPARTMENT_LABELS,
         "safe_local_only": True,
@@ -10065,6 +10066,35 @@ def _mechanic_appointment_any(job_reference: object) -> dict | None:
                      if _appointment_matches_reference(item, job_reference)), None)
 
 
+def _mechanic_plate_candidates(plate: str) -> list[dict]:
+    today = datetime.now().date()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""SELECT * FROM scheduler_appointments
+            WHERE status NOT IN ('anulat','finalizat') AND COALESCE(source,'')!='yard_capacity_exercise'
+            AND (substr(start_at,1,10) BETWEEN ? AND ? OR status IN ('in_lucru','neterminat'))""",
+            ((today-timedelta(days=7)).isoformat(), today.isoformat())).fetchall()
+        matches = [dict(row) for row in rows if re.sub(r'[^A-Z0-9]','',str(row['registration'] or '').upper()) == plate]
+        current = [row for row in matches if str(row['start_at'])[:10] == today.isoformat()]
+        return current or matches
+    finally:
+        conn.close()
+
+
+def _mechanic_reports_for_dashboard() -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute("""SELECT m.id,m.message,m.action,m.status,m.created_at,
+            t.name technician_name,a.registration,a.job_number FROM scheduler_mechanic_messages m
+            LEFT JOIN scheduler_technicians t ON t.id=m.technician_id
+            LEFT JOIN scheduler_appointments a ON a.id=m.appointment_id
+            WHERE m.status IN ('needs_review','awaiting_duration') ORDER BY m.id DESC LIMIT 20""")]
+    finally:
+        conn.close()
+
+
 def _record_mechanic_message(technician_id: int, sender: str, text: str,
                              appointment_id: int | None, action: str, status: str) -> int:
     with sqlite3.connect(DB_PATH) as conn:
@@ -10121,6 +10151,27 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
     beta_test = _is_beta_test_phone(sender)
     technician = _technician_for_sender(sender)
     appointment = None
+    if technician and _looks_like_mechanic_delay(body) and not job_reference:
+        plate = _extract_plate(body)
+        if plate:
+            candidates = _mechanic_plate_candidates(plate)
+            owned = [row for row in candidates if int(row.get('technician_id') or 0) == int(technician['id'])]
+            if len(owned) == 1:
+                appointment = owned[0]
+                job_reference = str(appointment.get('job_number') or '#' + str(appointment['id']))
+            else:
+                linked = candidates[0] if len(candidates) == 1 else None
+                _record_mechanic_message(int(technician['id']),sender,body,
+                                         int(linked['id']) if linked else None,'delay_plate','needs_review')
+                await send_whatsapp_text(sender,
+                    f"Am înregistrat semnalarea pentru {plate}. Nu am găsit o singură programare repartizată ție. "
+                    "Mesajul apare în programator pentru verificarea consilierului; programările nu au fost mutate. "
+                    "Verifică repartizarea sau trimite codul APP/devizului.")
+                return True
+        elif not _pending_mechanic_delay(int(technician['id']), sender):
+            _record_mechanic_message(int(technician['id']),sender,body,None,'delay_missing_reference','needs_review')
+            await send_whatsapp_text(sender,'Pentru ce mașină anunți întârzierea? Trimite numărul de înmatriculare sau codul APP/devizului.')
+            return True
     # Numărul de înmatriculare + GATA este o comandă de mecanic, nu un mesaj de client.
     ready_plate = _extract_plate(body) if re.search(r"\b(gata|terminat|finalizat)\b", normalized) else None
     if ready_plate and (technician or beta_test):

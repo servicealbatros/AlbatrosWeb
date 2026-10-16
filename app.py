@@ -2201,6 +2201,9 @@ def _load_request_offer_result(request_id: int) -> dict:
         data["products"] = annotate_part_accuracy(products, data["identity_review"])
         data["missing_requested_parts"] = _missing_requested_parts(request_row, data["products"],
             (data.get('autototal') or {}).get('oe_candidates'))
+        if data['missing_requested_parts'] and data.get('status') == 'ready':
+            data.update(status='partial', review_status='PARTIAL_REVIEW',
+                        message='Ofertă parțială. Lipsesc: ' + ', '.join(data['missing_requested_parts']) + '.')
         if (not data["missing_requested_parts"] and data["products"]
                 and data.get("status") in {"partial", "error"}
                 and data.get("autototal_status") in {"ready", "partial", "vehicle_ready"}):
@@ -4736,7 +4739,9 @@ def _autototal_complete_offer(request_id: int) -> dict:
         return {}
     if (payload.get("status") == "ready" and payload.get("products")
             and not (payload.get("missing_product_kinds") or [])):
-        return payload
+        row = _request_by_id(request_id) or {}
+        if not _missing_requested_parts(row, payload['products'], payload.get('oe_candidates')):
+            return payload
     return {}
 
 

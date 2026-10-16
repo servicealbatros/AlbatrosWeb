@@ -1,6 +1,8 @@
 import unittest
+import json
+from unittest.mock import AsyncMock, patch
 import app
-from autototal_request_worker import _oe_vin_targets, _oe_option_allowed, _rank_standard_models
+from autototal_request_worker import _oe_vin_targets, _oe_option_allowed, _rank_standard_models, _discover_oe_vin_candidates, _required_product_kinds, _revision_product_kind, _search_oe_code_options
 from technician_request_worker_v6_time_parse_fix import detect_operations
 
 
@@ -64,6 +66,43 @@ class SharedAxleTests(unittest.TestCase):
         sensors = [{'requested_item': 'senzor uzura placute frana fata', 'position': 'FATA'}]
         self.assertEqual(app._missing_requested_parts(request, pads, sensors),
                          ['senzor uzură plăcuțe frână față'])
+
+    def test_partial_front_only_result_cannot_count_as_complete(self):
+        required = _required_product_kinds('discuri placute fata spate')
+        self.assertEqual(required, {'brake_pads', 'brake_pads_rear', 'brake_discs_front', 'brake_discs_rear'})
+        found = {_revision_product_kind(name) for name in ('plăcuțe frână față', 'discuri frână față')}
+        self.assertEqual(required - found, {'brake_pads_rear', 'brake_discs_rear'})
+
+
+class VinBrakeDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_supplier_rejection_retries_same_oe_code(self):
+        result = [{'oe_code': '4F0698451D'}]
+        search = AsyncMock(side_effect=[RuntimeError('AutoTotal HTTP 403'), result])
+        with patch('autototal_request_worker._search_oe_code_options_once', search), \
+             patch('autototal_request_worker.asyncio.sleep', AsyncMock()):
+            self.assertEqual(await _search_oe_code_options(None, {'oe_code': '4F0698451D'}, 900), result)
+        self.assertEqual(search.await_count, 2)
+
+    async def test_localized_vin_diagram_returns_all_four_parts(self):
+        def unit(axle, rows):
+            return {'name': 'Frână cu etrier mobil', 'attributes': [{'value': axle}],
+                    'details': [{'oem': code, 'name': name, 'match': 1} for code, name in rows]}
+        diagram = {'groups': [{'units': [
+            unit('fata', [('4F0615301D', 'Disc de frană (ventilat)'),
+                          ('8E0698151K', '1 set garnituri frane cu indi- cator uzura pentru frane cu discuri'),
+                          ('SHIELD', 'placa protectie disc frana'),
+                          ('PACKAGE', '1 set discuri de frână cu plăcuţe de frână')]),
+            unit('spate', [('4F0615601E', 'Disc de frână'),
+                           ('4F0698451D', '1 set garnituri frane pt. frane cu discuri')]),
+        ]}]}
+        read = AsyncMock(return_value=json.dumps(diagram))
+        with patch('autototal_request_worker._evaluate', read):
+            found = await _discover_oe_vin_candidates(None, {'lx_catalog': {'vin': {
+                'catalog': 'test', 'ssd': 'test'}}}, 'TESTVIN',
+                'Discuri de frana fata si spate si placute de frana fata si spate')
+        self.assertEqual({row['oe_code'] for row in found},
+                         {'4F0615301D', '8E0698151K', '4F0615601E', '4F0698451D'})
+        self.assertEqual(read.await_count, 1)
 
 
 if __name__ == '__main__':

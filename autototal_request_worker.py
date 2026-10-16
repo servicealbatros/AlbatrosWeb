@@ -862,6 +862,10 @@ def _history_search_candidates(vehicle_context: dict, query: str) -> list[dict]:
 def _revision_product_kind(value: str) -> str:
     ascii_text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^a-z0-9]", "", ascii_text.casefold())
+    if 'placut' in text and 'senzor' not in text:
+        return 'brake_pads_rear' if 'spate' in text else 'brake_pads'
+    if 'disc' in text and 'fran' in text:
+        return 'brake_discs_rear' if 'spate' in text else 'brake_discs_front'
     if "filtru" in text and "ulei" in text:
         return "oil_filter"
     if "filtru" in text and any(x in text for x in ("habitaclu", "polen", "cabina")):
@@ -890,6 +894,10 @@ def _revision_product_kind(value: str) -> str:
 def _required_product_kinds(query: str) -> set[str]:
     plain = unicodedata.normalize("NFKD", str(query or "").casefold()).encode("ascii", "ignore").decode("ascii")
     required: set[str] = set()
+    for target in _oe_vin_targets(query):
+        kind = _revision_product_kind(target['requested_item'])
+        if kind in {'brake_pads', 'brake_pads_rear', 'brake_discs_front', 'brake_discs_rear'}:
+            required.add(kind)
     if any(token in plain for token in ("revizie", "filtre", "filtru", "ulei")):
         required.update({"oil_filter", "air_filter", "cabin_filter", "fuel_filter", "engine_oil", "oil_drain_plug"})
     if "kit" in plain and "curea" in plain and any(
@@ -1380,9 +1388,9 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
     if 'placute' in wanted and re.search(r'\b(?:set\s+)?discuri\s+(?:de\s+)?frana\s+cu\b|\bbrake discs?\s+(?:with|and)\s+(?:brake\s+)?pads', product):
         return False  # Combined disc/pad packages are not standalone pad sets.
     if 'disc' in wanted and 'fran' in wanted and 'placut' not in wanted:
-        if not any(value in product for value in ('disc frana','discuri frana','disc de frana')):
+        if not any(value in product for value in ('disc frana','discuri frana','disc de frana','brake disc','brake rotor')):
             return False
-        if any(value in product for value in ('protect', 'deflector', 'tabla', 'placa ', 'suport', 'surub', 'placute')):
+        if any(value in product for value in ('protect', 'deflector', 'tabla', 'placa ', 'suport', 'surub', 'placute', 'shield', 'brake pads')):
             return False
     if "curea accesorii" in wanted:
         if "curea transmisie cu caneluri" not in product:
@@ -1465,6 +1473,17 @@ def _keep_one_oil_drain_plug(products: list[dict]) -> list[dict]:
 
 
 async def _search_oe_code_options(ws, candidate: dict, call_id: int) -> list[dict]:
+    """Retry transient catalogue rejections without treating them as no matches."""
+    for attempt in range(3):
+        try:
+            return await _search_oe_code_options_once(ws, candidate, call_id)
+        except RuntimeError as exc:
+            if attempt == 2 or not any(token in str(exc) for token in ('403', '429', '502', '503', '504')):
+                raise
+            await asyncio.sleep((4, 10)[attempt])
+
+
+async def _search_oe_code_options_once(ws, candidate: dict, call_id: int) -> list[dict]:
     """Find priced OE and aftermarket equivalents for one VIN-exact OE code."""
     code = str(candidate.get("oe_code") or candidate.get("manufacturer_ref") or "").strip()
     if not code:

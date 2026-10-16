@@ -102,5 +102,28 @@ class NotificationDetailsTests(unittest.TestCase):
             self.assertEqual(caught.exception.status_code,403)
 
 
+    def test_pending_mechanic_delay_marks_appointment_without_client_notification(self):
+        tech = scheduler.save_technician(self.db, {'name':'TEST'})['id']
+        with sqlite3.connect(self.db) as conn:
+            cur = conn.execute("INSERT INTO scheduler_mechanic_messages (technician_id,appointment_id,sender,message,action,status) VALUES (?,?,?,?,?,?)", (tech,self.booking['id'],'40700100004','B105TST intarziere','delay','awaiting_duration'))
+            message_id = cur.lastrowid
+            # Even a report outside the dashboard's last 20 messages must flag its booking.
+            for _ in range(22):
+                conn.execute("INSERT INTO scheduler_mechanic_messages (technician_id,sender,message,action,status) VALUES (?,?,?,?,?)",(tech,'40700100004','Necunoscut','delay','needs_review'))
+        conn.close()
+        rows = scheduler.list_appointments(self.db,'2026-10-19','2026-10-20')
+        self.assertTrue(rows[0]['delay_reported'])
+        self.assertEqual(app._scheduler_notifications_for_dashboard(), [])
+        app._dismiss_scheduler_message('mechanic',message_id)
+        self.assertFalse(scheduler.list_appointments(self.db,'2026-10-19','2026-10-20')[0]['delay_reported'])
+
+    def test_unrelated_mechanic_report_does_not_flag_another_booking(self):
+        tech = scheduler.save_technician(self.db, {'name':'TEST'})['id']
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO scheduler_mechanic_messages (technician_id,sender,message,action,status) VALUES (?,?,?,?,?)", (tech,'40700100004','B106TST intarziere','delay','awaiting_duration'))
+        conn.close()
+        self.assertFalse(scheduler.list_appointments(self.db,'2026-10-19','2026-10-20')[0]['delay_reported'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -470,7 +470,10 @@ def list_appointments(db_path: Path, start: str, end: str) -> list[dict]:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT a.*,t.name technician_name,t.color technician_color
+            SELECT a.*,t.name technician_name,t.color technician_color,
+                   EXISTS(SELECT 1 FROM scheduler_mechanic_messages m
+                          WHERE m.appointment_id=a.id AND m.action='delay'
+                            AND m.status IN ('awaiting_duration','needs_review')) AS delay_reported
             FROM scheduler_appointments a
             LEFT JOIN scheduler_technicians t ON t.id=a.technician_id
             WHERE a.end_at>? AND a.start_at<? AND a.status!='anulat'

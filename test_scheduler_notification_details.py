@@ -58,5 +58,49 @@ class NotificationDetailsTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 404)
 
 
+    def test_dismissed_notification_is_preserved_but_cannot_be_sent(self):
+        item = self.notification(None)
+        app._dismiss_scheduler_message('notification', item['id'])
+        self.assertEqual(app._scheduler_notifications_for_dashboard(), [])
+        with self.assertRaises(app.HTTPException) as caught:
+            app._claim_delay_notification(item['id'])
+        self.assertEqual(caught.exception.status_code, 409)
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT status,auto_send_after FROM scheduler_notifications WHERE id=?', (item['id'],)).fetchone(), ('dismissed',None))
+        conn.close()
+        self.assertEqual(app._dismiss_scheduler_message('notification',item['id'])['status'], 'dismissed')
+        self.assertEqual(app.scheduler_appointment_details(self.booking['id'])['appointment']['start_at'], '2026-10-19T09:30')
+
+    def test_sending_notification_cannot_be_reported_as_cancelled(self):
+        item = self.notification(None)
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE scheduler_notifications SET status='sending' WHERE id=?", (item['id'],))
+        conn.close()
+        with self.assertRaises(app.HTTPException) as caught:
+            app._dismiss_scheduler_message('notification',item['id'])
+        self.assertEqual(caught.exception.status_code, 409)
+
+    def test_dismiss_mechanic_message_clears_pending_duration_without_deleting_booking(self):
+        tech = scheduler.save_technician(self.db, {'name':'TEST'})['id']
+        with sqlite3.connect(self.db) as conn:
+            for status in ('awaiting_duration','needs_review'):
+                conn.execute("INSERT INTO scheduler_mechanic_messages (technician_id,appointment_id,sender,message,action,status) VALUES (?,?,?,?,?,?)", (tech,self.booking['id'],'40700100004','B105TST intarziere','delay',status))
+            ids = [row[0] for row in conn.execute('SELECT id FROM scheduler_mechanic_messages')]
+        conn.close()
+        for message_id in ids:
+            app._dismiss_scheduler_message('mechanic',message_id)
+        self.assertEqual(app._mechanic_reports_for_dashboard(), [])
+        self.assertIsNone(app._pending_mechanic_delay(tech,'40700100004'))
+        self.assertIsNotNone(scheduler.get_appointment(self.db,self.booking['id']))
+
+    def test_dismiss_routes_require_authenticated_human_action(self):
+        from starlette.requests import Request
+        request = Request({'type':'http','headers':[]})
+        for endpoint in (app.scheduler_dismiss_notification, app.scheduler_dismiss_mechanic_message):
+            with self.assertRaises(app.HTTPException) as caught:
+                endpoint(1,request)
+            self.assertEqual(caught.exception.status_code,403)
+
+
 if __name__ == '__main__':
     unittest.main()

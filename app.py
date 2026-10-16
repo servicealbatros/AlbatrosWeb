@@ -7835,6 +7835,40 @@ async def _delay_notification_loop() -> None:
                 continue
 
 
+def _dismiss_scheduler_message(kind: str, message_id: int) -> dict:
+    table, pending = {
+        "notification": ("scheduler_notifications", ("pending_review", "failed")),
+        "mechanic": ("scheduler_mechanic_messages", ("needs_review", "awaiting_duration")),
+    }[kind]
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        # Serialize with the sender's claim so an in-flight message cannot be
+        # reported as cancelled after it has already started sending.
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(f"SELECT status FROM {table} WHERE id=?", (message_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "Mesajul nu a fost găsit.")
+            if row[0] == "dismissed":
+                return {"ok": True, "status": "dismissed", "id": message_id}
+            if row[0] not in pending:
+                raise HTTPException(409, "Mesajul este deja procesat sau în curs de trimitere. Reîmprospătează lista.")
+            extra = ",auto_send_after=NULL" if kind == "notification" else ",updated_at=CURRENT_TIMESTAMP"
+            conn.execute(f"UPDATE {table} SET status='dismissed'{extra} WHERE id=?", (message_id,))
+    return {"ok": True, "status": "dismissed", "id": message_id}
+
+
+@app.post("/api/scheduler/notifications/{notification_id}/dismiss")
+def scheduler_dismiss_notification(notification_id: int, request: Request):
+    _require_local_vehicle_action(request, request.headers.get("X-Human-Action"), "dismiss-scheduler-message")
+    return _dismiss_scheduler_message("notification", notification_id)
+
+
+@app.post("/api/scheduler/mechanic-messages/{message_id}/dismiss")
+def scheduler_dismiss_mechanic_message(message_id: int, request: Request):
+    _require_local_vehicle_action(request, request.headers.get("X-Human-Action"), "dismiss-scheduler-message")
+    return _dismiss_scheduler_message("mechanic", message_id)
+
+
 @app.post("/api/scheduler/notifications/{notification_id}/send-whatsapp")
 async def scheduler_send_delay_notification(
     notification_id: int,

@@ -621,7 +621,7 @@ def _oe_vin_targets(query: str) -> list[dict]:
         if 'disc' in wanted and 'fran' in wanted:
             aliases = ('disc de frana', 'disc frana')
         elif 'placut' in wanted and 'senzor' not in wanted:
-            aliases = ('placute de frana', 'placute frana', 'set garnituri pt.frana cu disc', 'set garnituri pt. frana cu disc', 'set garnituri de frana')
+            aliases = ('placute de frana', 'placute frana', 'set garnituri pt.frana cu disc', 'set garnituri pt. frana cu disc', 'set garnituri de frana', 'set garnituri frane')
         elif 'senzor' in wanted and 'uzur' in wanted:
             aliases = ('senzor uzura', 'indicator uzura')
         target['terms'] = tuple(dict.fromkeys(tuple(target['terms']) + aliases))
@@ -692,6 +692,9 @@ async def _discover_oe_vin_candidates(ws, identification: dict, vin: str,
                         continue
                     if any(x.get("key") == "archiveStatus" for x in detail.get("attributes") or []):
                         continue
+                    wanted = _plain(target['requested_item'])
+                    if ('fran' in wanted or 'placut' in wanted) and not _oe_option_allowed(target, name, 'OE'):
+                        continue
                     if target.get("left") and "dreapta" in detail_norm and "stanga" not in detail_norm:
                         continue
                     if target.get("right") and "stanga" in detail_norm and "dreapta" not in detail_norm:
@@ -741,6 +744,17 @@ async def _standard_categories(ws, type_id: str, call_id: int) -> dict:
     return _json_value(await _evaluate(ws, call_id, script, True), {})
 
 
+def _rank_standard_models(models: list[dict], wanted_model: str) -> list[dict]:
+    """Prefer the decoded chassis/body code over a longer family label."""
+    wanted_tokens = set(re.findall(r'[a-z0-9]+', str(wanted_model or '').casefold()))
+    chassis = {token for token in wanted_tokens if re.search(r'[a-z]', token) and re.search(r'\d', token)}
+    def rank(row):
+        tokens = set(re.findall(r'[a-z0-9]+', str(row.get('rangeNameField') or '').casefold()))
+        matched_chassis = len(chassis & tokens)
+        return (-matched_chassis, -len(wanted_tokens & tokens), len(tokens - wanted_tokens))
+    return sorted(models, key=rank)
+
+
 async def _standard_vin_types(ws, identification: dict, wanted_model: str,
                               call_id: int = 50) -> list[dict]:
     """Complete a VIN decode through AutoTotal's standard catalogue.
@@ -752,11 +766,7 @@ async def _standard_vin_types(ws, identification: dict, wanted_model: str,
     models = td_catalog.get("models") or []
     if not models:
         return []
-    wanted = re.sub(r"[^a-z0-9]", "", str(wanted_model or "").casefold())
-    ranked = sorted(models, key=lambda row: (
-        wanted not in re.sub(r"[^a-z0-9]", "", str(row.get("rangeNameField") or "").casefold()),
-        -len(re.sub(r"[^a-z0-9]", "", str(row.get("rangeNameField") or "").casefold())),
-    ))
+    ranked = _rank_standard_models(models, wanted_model)
     selected_model = ranked[0] if ranked else None
     model_id = str((selected_model or {}).get("rangeIdField") or "")
     link = str(identification.get("link") or "")
@@ -770,17 +780,23 @@ async def _standard_vin_types(ws, identification: dict, wanted_model: str,
       const select=[...document.querySelectorAll('select')]
         .find(node=>[...node.options].some(option=>option.value===modelId));
       if(!select)return false;
+      const previousTypes=JSON.stringify(window.td?.types||[]);
+      const changed=select.value!==modelId;
       select.value=modelId;
       select.dispatchEvent(new Event('input',{bubbles:true}));
       select.dispatchEvent(new Event('change',{bubbles:true}));
-      return true;
+      return {changed,previousTypes};
     })()""" % json.dumps(model_id)
-    if not await _evaluate(ws, call_id + 1, selection, True):
+    selection_state = await _evaluate(ws, call_id + 1, selection, True)
+    if not selection_state:
         return []
+    fresh_types = ''
+    if isinstance(selection_state, dict) and selection_state.get('changed'):
+        fresh_types = ' && JSON.stringify(window.td.types) !== ' + json.dumps(selection_state['previousTypes'])
     try:
         raw = await _wait_value(
             ws,
-            "window.td && Array.isArray(window.td.types) && window.td.types.length "
+            "window.td && Array.isArray(window.td.types) && window.td.types.length " + fresh_types +
             "? JSON.stringify(window.td.types) : ''",
             15,
         )
@@ -1355,9 +1371,13 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
     if "bieleta bara stabilizatoare" in wanted and not any(
             value in product for value in ("bieleta", "antiruliu", "stabiliz", "swing support")):
         return False
-    if "placute" in wanted and not any(term in product for term in ('placute frana','placute de frana')):
+    standalone_pads = any(term in product for term in (
+        'placute frana', 'placute de frana', 'brake pads', 'brake pad set',
+        'set garnituri frane', 'set garnituri de frana',
+        'set garnituri pt.frana cu disc', 'set garnituri pt. frana cu disc'))
+    if "placute" in wanted and 'senzor' not in wanted and not standalone_pads:
         return False
-    if 'placute' in wanted and any(term in product for term in ('discuri', 'disc de frana')):
+    if 'placute' in wanted and re.search(r'\b(?:set\s+)?discuri\s+(?:de\s+)?frana\s+cu\b|\bbrake discs?\s+(?:with|and)\s+(?:brake\s+)?pads', product):
         return False  # Combined disc/pad packages are not standalone pad sets.
     if 'disc' in wanted and 'fran' in wanted and 'placut' not in wanted:
         if not any(value in product for value in ('disc frana','discuri frana','disc de frana')):
@@ -1623,13 +1643,17 @@ async def run(request_id: int, vin: str, query: str, output: Path,
                 engine_match = re.search(r"^\s*([A-Z][A-Z0-9.-]{2,15})\b", aggregates, re.I)
             if not engine_match:
                 engine_match = re.search(r"(?:Engine:\s*\d+\s+\d+\s+|ENGINE\s+)([A-Z0-9. -]{3,40})", text, re.I)
-            aggregate_power = re.search(r"\b(\d{2,3})\s*kW\b", aggregates, re.I)
+            engine_info = lx_attributes.get('engine_info') or {}
+            power_info = ' '.join(str(value or '') for value in (
+                engine_info.get('full_value'), engine_info.get('value'), aggregates))
+            aggregate_power = re.search(r"\b(\d{2,3})\s*kW\b", power_info, re.I)
+            manufactured = str((lx_attributes.get('manufactured') or {}).get('value') or '')
             drive_value = str((lx_attributes.get("drive") or {}).get("value") or "")
             vehicle = {
                 "make": vehicle_match.group(1).strip() if vehicle_match else None,
                 "model": vehicle_match.group(2).strip() if vehicle_match else None,
                 "engine_or_variant": (engine_match.group(1).strip() if engine_match else None),
-                "year": int(date_match.group(3)) if date_match else None,
+                "year": int(manufactured[:4]) if re.match(r'^\d{4}', manufactured) else (int(date_match.group(3)) if date_match else None),
                 "first_registration": ".".join(date_match.groups()) if date_match else None,
                 "power_kw": int(power_match.group(1)) if power_match else (
                     int(aggregate_power.group(1)) if aggregate_power else None

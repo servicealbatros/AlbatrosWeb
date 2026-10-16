@@ -1,6 +1,7 @@
 import unittest
 import app
-from autototal_request_worker import _oe_vin_targets, _oe_option_allowed
+from autototal_request_worker import _oe_vin_targets, _oe_option_allowed, _rank_standard_models
+from technician_request_worker_v6_time_parse_fix import detect_operations
 
 
 class SharedAxleTests(unittest.TestCase):
@@ -32,6 +33,37 @@ class SharedAxleTests(unittest.TestCase):
                          {'brake_discs_rear', 'brake_pads'})
         self.assertEqual(set(app._required_offer_part_kinds('discuri fata si placute spate')),
                          {'brake_discs_front', 'brake_pads_rear'})
+
+    def test_labour_preserves_shared_axles(self):
+        for text in ('discuri placute fata spate', 'discuri si placute fata si spate',
+                     'placute si discuri fata/spate'):
+            self.assertEqual({row['id'] for row in detect_operations(text)},
+                             {'brake_discs_front', 'brake_discs_rear',
+                              'brake_pads_front', 'brake_pads_rear'}, text)
+
+    def test_standard_model_uses_chassis_instead_of_longest_name(self):
+        models = [{'rangeNameField': 'A6 Allroad C6 (4FH)'},
+                  {'rangeNameField': 'A6 Avant C6 (4F5)'},
+                  {'rangeNameField': 'A6 C6 (4F2)'}]
+        self.assertEqual(_rank_standard_models(models, 'A6 (4F2, C6)')[0]['rangeNameField'],
+                         'A6 C6 (4F2)')
+
+    def test_localized_vag_pad_rows_are_not_caliper_seals_or_disc_packages(self):
+        pads = {'requested_item': 'plăcuțe frână față'}
+        for title in ('1 set garnituri frane cu indi- cator uzura pentru frane cu discuri',
+                      '1 set garnituri frane pt. frane cu discuri',
+                      'Repair kit, brake pads asbestos-free'):
+            self.assertTrue(_oe_option_allowed(pads, title, 'OE'), title)
+        for title in ('Set garnituri carcasă etrier', '1 set discuri de frână cu plăcuţe de frână'):
+            self.assertFalse(_oe_option_allowed(pads, title, 'OE'), title)
+
+    def test_sensors_are_required_by_vin_evidence_rather_than_make(self):
+        request = {'symptom': 'placute fata spate', 'vehicle': 'AUDI A6'}
+        pads = [{'requested_item': 'placute frana fata'}, {'requested_item': 'placute frana spate'}]
+        self.assertEqual(app._missing_requested_parts(request, pads), [])
+        sensors = [{'requested_item': 'senzor uzura placute frana fata', 'position': 'FATA'}]
+        self.assertEqual(app._missing_requested_parts(request, pads, sensors),
+                         ['senzor uzură plăcuțe frână față'])
 
 
 if __name__ == '__main__':

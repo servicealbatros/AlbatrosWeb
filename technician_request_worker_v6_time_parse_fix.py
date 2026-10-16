@@ -481,6 +481,12 @@ def detect_operations(request: str) -> list[dict]:
     # long sentence must not turn "discuri spate" into discs on both axles.
     def component_axles(pattern: str) -> set[str]:
         axes = set()
+        shared_group = re.search(
+            r'\b(?:discur\w*|placut\w*)\s+(?:(?:de\s+)?frana\s+)?(?:si\s+)?'
+            r'(?:discur\w*|placut\w*)\s+(?:(?:de\s+)?frana\s+)?'
+            r'(fata|spate)\s+(?:si\s+)?(fata|spate)\b', s)
+        if shared_group and re.search(pattern, shared_group.group(0)):
+            axes.update('rear' if axle == 'spate' else 'front' for axle in shared_group.groups())
         for match in re.finditer(pattern, s):
             shared = re.match(r'\s+(?:(?:de\s+)?frana\s+)?(fata|anterior|spate|posterior)\s+(?:si\s+)?(fata|anterior|spate|posterior)\b', s[match.end():])
             if shared:

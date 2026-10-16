@@ -1595,6 +1595,7 @@ def _required_offer_part_kinds(value: str) -> dict[str, str]:
         if kind in {
             "brake_caliper_rear", "brake_caliper", "brake_pads_rear", "brake_pads",
             "brake_discs_front", "brake_discs_rear", "stabilizer_link_front",
+            "brake_pad_wear_sensor_front", "brake_pad_wear_sensor_rear",
             "shock_front", "shock_rear", "accessory_belt", "accessory_belt_roller",
             "accessory_belt_tensioner", "water_pump",
             "tie_rod_end", "control_arm", "suspension_ball_joint",
@@ -1706,20 +1707,21 @@ def _deferred_inspection_notice(value: str) -> str:
     return ""
 
 
-def _missing_requested_parts(request_row: dict, products: list[dict]) -> list[str]:
+def _missing_requested_parts(request_row: dict, products: list[dict], oe_candidates: list[dict] | None = None) -> list[str]:
     request_text = " ".join(str(request_row.get(key) or "") for key in (
         "symptom", "request", "solicitare", "problem",
     ))
     required = _required_offer_part_kinds(request_text)
-    hints = _vehicle_hints_for_request(request_row)
-    make = _normalize_text(hints.get("make") or request_row.get("vehicle") or "")
-    if any(kind in required for kind in ("brake_pads", "brake_pads_rear")) and any(
-        brand in make for brand in ("bmw", "audi", "mercedes", "iveco", "peugeot")
+    # A make alone cannot establish that each axle has a separate sensor.
+    # Some VIN catalogues have an integrated indicator in the pad set. Require
+    # separate sensors when explicitly requested or identified in the VIN diagram.
+    catalog_kinds = {_offer_product_kind(row) for row in (oe_candidates or [])}
+    for pads, sensor, label in (
+        ('brake_pads', 'brake_pad_wear_sensor_front', 'senzor uzură plăcuțe frână față'),
+        ('brake_pads_rear', 'brake_pad_wear_sensor_rear', 'senzor uzură plăcuțe frână spate'),
     ):
-        if "brake_pads" in required:
-            required["brake_pad_wear_sensor_front"] = "senzor uzură plăcuțe frână față"
-        if "brake_pads_rear" in required:
-            required["brake_pad_wear_sensor_rear"] = "senzor uzură plăcuțe frână spate"
+        if pads in required and sensor in catalog_kinds:
+            required[sensor] = label
     available = {
         _offer_product_kind(row)
         for row in products if isinstance(row, dict)
@@ -2197,9 +2199,10 @@ def _load_request_offer_result(request_id: int) -> dict:
         )
         data["identity_review"] = _identity_review_for_request(request_id, data)
         data["products"] = annotate_part_accuracy(products, data["identity_review"])
-        data["missing_requested_parts"] = _missing_requested_parts(request_row, data["products"])
+        data["missing_requested_parts"] = _missing_requested_parts(request_row, data["products"],
+            (data.get('autototal') or {}).get('oe_candidates'))
         if (not data["missing_requested_parts"] and data["products"]
-                and data.get("status") == "partial"
+                and data.get("status") in {"partial", "error"}
                 and data.get("autototal_status") in {"ready", "partial", "vehicle_ready"}):
             data["status"] = "ready"
             data["review_status"] = "READY_FOR_REVIEW"

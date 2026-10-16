@@ -7838,7 +7838,7 @@ async def _delay_notification_loop() -> None:
 def _dismiss_scheduler_message(kind: str, message_id: int) -> dict:
     table, pending = {
         "notification": ("scheduler_notifications", ("pending_review", "failed")),
-        "mechanic": ("scheduler_mechanic_messages", ("needs_review", "awaiting_duration")),
+        "mechanic": ("scheduler_mechanic_messages", ("needs_review", "awaiting_duration", "awaiting_reference")),
     }[kind]
     with closing(sqlite3.connect(DB_PATH)) as conn:
         # Serialize with the sender's claim so an in-flight message cannot be
@@ -10163,7 +10163,7 @@ def _mechanic_reports_for_dashboard() -> list[dict]:
             t.name technician_name,a.registration,a.job_number FROM scheduler_mechanic_messages m
             LEFT JOIN scheduler_technicians t ON t.id=m.technician_id
             LEFT JOIN scheduler_appointments a ON a.id=m.appointment_id
-            WHERE m.status IN ('needs_review','awaiting_duration') ORDER BY m.id DESC LIMIT 20""")]
+            WHERE m.status IN ('needs_review','awaiting_duration','awaiting_reference') ORDER BY m.id DESC LIMIT 20""")]
     finally:
         conn.close()
 
@@ -10233,6 +10233,25 @@ async def _claim_mechanic_booking(technician: dict, sender: str, body: str, appo
     return current
 
 
+def _pending_mechanic_reference(technician_id: int, sender: str) -> dict | None:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("""SELECT * FROM scheduler_mechanic_messages
+            WHERE technician_id=? AND sender=?
+              AND ((status='awaiting_reference' AND action='command_missing_reference')
+                   OR (status='needs_review' AND action='delay_missing_reference'))
+              AND created_at>=datetime('now','-30 minutes')
+            ORDER BY id DESC LIMIT 1""", (technician_id, _conversation_digits(sender))).fetchone()
+        return dict(row) if row else None
+
+
+def _supersede_mechanic_reference(technician_id: int, sender: str) -> None:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+        conn.execute("""UPDATE scheduler_mechanic_messages SET status='superseded',updated_at=CURRENT_TIMESTAMP
+            WHERE technician_id=? AND sender=? AND status='awaiting_reference'""",
+            (technician_id, _conversation_digits(sender)))
+
+
 async def _route_mechanic_message(sender: str, body: str) -> bool:
     normalized = _normalize_text(body)
     job_reference = _extract_mechanic_job_reference(body)
@@ -10240,6 +10259,13 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
     technician = _technician_for_sender(sender)
     appointment = None
     staff_command = _looks_like_mechanic_delay(body) or bool(re.search(r'\b(gata|terminat|finalizat|pornit|pornita|inceput|inceputa)\b', normalized))
+    reference_context = None
+    if technician and not staff_command and (job_reference or _extract_plate(body)):
+        reference_context = _pending_mechanic_reference(int(technician['id']), sender)
+        if reference_context:
+            body = f"{reference_context['message']} {body}"
+            normalized = _normalize_text(body)
+            staff_command = True
     if technician and staff_command and not job_reference:
         plate = _extract_plate(body)
         if plate:
@@ -10261,8 +10287,9 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
                     f"Am înregistrat semnalarea pentru {plate}, dar nu am identificat o singură programare. "
                     "Trimite codul APP/devizului ca să preiau mașina corect. Mesajul apare și în programator pentru verificare.")
                 return True
-        elif not _pending_mechanic_delay(int(technician['id']), sender):
-            _record_mechanic_message(int(technician['id']),sender,body,None,'delay_missing_reference','needs_review')
+        elif not _looks_like_mechanic_delay(body) or not _pending_mechanic_delay(int(technician['id']), sender):
+            _supersede_mechanic_reference(int(technician['id']), sender)
+            _record_mechanic_message(int(technician['id']),sender,body,None,'command_missing_reference','awaiting_reference')
             await send_whatsapp_text(sender,'Pentru ce mașină este mesajul? Trimite numărul de înmatriculare sau codul APP/devizului.')
             return True
     # Numărul de înmatriculare + GATA este o comandă de mecanic, nu un mesaj de client.
@@ -10341,6 +10368,12 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
         _record_mechanic_message(int(technician["id"]), sender, body, None, "unknown_job", "needs_review")
         return True
     appointment_id = int(appointment["id"])
+    if staff_command:
+        _supersede_mechanic_reference(int(technician['id']), sender)
+    if reference_context:
+        with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+            conn.execute("UPDATE scheduler_mechanic_messages SET status='processed',appointment_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                         (appointment_id, reference_context['id']))
     _log_mechanic_message_for_request(sender, body, appointment)
     label = f"{job_reference} • {appointment.get('registration') or appointment.get('vehicle') or 'mașină'}"
     if _looks_like_mechanic_delay(body):
@@ -10365,6 +10398,8 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
     if re.search(r"\b(gata|terminat|finalizat)\b", normalized):
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("UPDATE scheduler_appointments SET status='finalizat',completion_note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (body, appointment_id))
+            conn.execute("UPDATE scheduler_mechanic_messages SET status='resolved_completed',updated_at=CURRENT_TIMESTAMP WHERE appointment_id=? AND status='awaiting_duration'", (appointment_id,))
+            conn.execute("UPDATE scheduler_notifications SET status='superseded',auto_send_after=NULL WHERE appointment_id=? AND status IN ('pending_review','failed')", (appointment_id,))
             conn.commit()
         _record_mechanic_message(int(technician["id"]), sender, body, appointment_id, "completed", "processed")
         await send_whatsapp_text(

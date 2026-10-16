@@ -8,7 +8,7 @@ class MechanicPlateDelayTests(unittest.IsolatedAsyncioTestCase):
         technician = {'id': 2, 'name': 'ADELIN'}
         send = AsyncMock()
         claim = AsyncMock(side_effect=lambda tech,sender,body,row: {**row,'technician_id':tech['id']})
-        with patch.object(app, '_claim_mechanic_booking', claim), patch.object(app, '_technician_for_sender', return_value=technician), patch.object(app, '_is_beta_test_phone', return_value=False), patch.object(app, '_mechanic_plate_candidates', return_value=candidates), patch.object(app, '_pending_mechanic_delay', return_value=None), patch.object(app, '_record_mechanic_message') as record, patch.object(app, '_log_mechanic_message_for_request'), patch.object(app, 'send_whatsapp_text', send), patch.object(app, 'scheduler_mark_incomplete') as move, patch.object(app, '_route_new_vehicle_intake', AsyncMock()) as intake:
+        with patch.object(app, '_supersede_mechanic_reference'), patch.object(app, '_claim_mechanic_booking', claim), patch.object(app, '_technician_for_sender', return_value=technician), patch.object(app, '_is_beta_test_phone', return_value=False), patch.object(app, '_mechanic_plate_candidates', return_value=candidates), patch.object(app, '_pending_mechanic_delay', return_value=None), patch.object(app, '_record_mechanic_message') as record, patch.object(app, '_log_mechanic_message_for_request'), patch.object(app, 'send_whatsapp_text', send), patch.object(app, 'scheduler_mark_incomplete') as move, patch.object(app, '_route_new_vehicle_intake', AsyncMock()) as intake:
             await app._route_buffered_message('40700100004', 'B104TST intarziere lipsa piese')
             intake.assert_not_awaited()
             move.assert_not_called()

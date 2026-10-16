@@ -7231,7 +7231,14 @@ def scheduler_page():
     path = BASE / "static" / "scheduler.html"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Interfața programatorului lipsește.")
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+    return HTMLResponse(_with_dashboard_live_refresh(path.read_text(encoding="utf-8")))
+
+
+def _with_dashboard_live_refresh(html: str) -> str:
+    # Bundle the tiny controller into the page so a deployment/network error
+    # on a separate script request cannot leave automatic refresh disabled.
+    controller = (BASE / "static" / "live_refresh.js").read_text(encoding="utf-8")
+    return html.replace('<script src="/static/live_refresh.js"></script>', '<script>' + controller + '</script>')
 
 
 @app.get("/static/live_refresh.js")
@@ -8113,7 +8120,7 @@ def scheduler_cancel_waiting(request_id: int):
 
 @app.get("/cereri", response_class=HTMLResponse)
 def requests_dashboard():
-    return r"""
+    return _with_dashboard_live_refresh(r"""
 <!DOCTYPE html>
 <html lang="ro">
 <head>
@@ -9453,7 +9460,7 @@ setTimeout(syncStickyHorizontalScrollbar, 250);
 </script>
 </body>
 </html>
-    """
+    """)
 
 
 # ---------------------------------------------------------

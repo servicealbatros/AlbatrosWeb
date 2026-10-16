@@ -8638,7 +8638,7 @@ def requests_dashboard():
     <div class="topbar">
         <div>
             <div class="dashboard-brand">ALBATROS <span>A</span> <small>RECEPȚIE</small></div>
-            <h1>Cereri service</h1><div id="liveStatus" style="color:#86efac;font-size:12px">Conectare…</div>
+            <h1>Cereri service</h1>
             <div class="subtitle">
                 Toate solicitările, de la primul mesaj până la programare.
             </div>

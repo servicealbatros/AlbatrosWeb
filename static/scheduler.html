@@ -33,7 +33,7 @@ button,input,select,textarea{font:inherit}button{cursor:pointer;transition:trans
   <div class="toolbar"><button onclick="shiftWeek(-7)" title="Săptămâna anterioară">◀</button><button onclick="goToday()">Astăzi</button><button onclick="shiftWeek(7)" title="Săptămâna următoare">▶</button><div class="calendar-picker-wrap" onclick="event.stopPropagation()"><button class="calendar-picker-button" id="calendarButton" onclick="toggleCapacityCalendar()">📅 Alege ziua</button><div class="capacity-popover hidden" id="capacityPopover"><div class="capacity-calendar-head"><button onclick="changeCapacityMonth(-1)">◀</button><strong id="capacityMonthLabel"></strong><button onclick="changeCapacityMonth(1)">▶</button></div><div class="capacity-weekdays"><span>L</span><span>Ma</span><span>Mi</span><span>J</span><span>V</span><span>S</span><span>D</span></div><div class="capacity-days" id="capacityDays"></div><div class="capacity-legend"><span class="lg">0–70%</span><span class="ly">peste 70%</span><span class="lr">peste capacitate</span></div></div></div><div class="week-label" id="weekLabel"></div><button id="importDsmButton" class="compact-action" onclick="importDsmWeek(this)" style="background:#ea580c;color:#fff;border-color:#ea580c" title="Importă read-only programările DSM de astăzi până peste 7 zile inclusiv">↻ Importă programările DSM</button><button id="distributeDsmButton" class="compact-action" onclick="distributeDsmWeek(this)" style="background:#0f766e;color:#fff;border-color:#0f766e" title="Echilibrează local programările importate, după competențe și intervalele libere">⚖ Echilibrează după competențe</button><button class="compact-action" onclick="printSelectedDay()" title="Printează programările zilei afișate">🖨 Printează ziua</button><button class="compact-action" onclick="printDateRange()" style="background:#7c3aed;color:#fff;border-color:#7c3aed" title="Alege prima și ultima zi pentru printare">🖨 Printează interval</button><button class="compact-action schedule-action" onclick="sendAllTechnicianSchedules()" title="Trimite programul zilei tuturor mecanicilor">📨 Trimite programele</button><button class="compact-action primary" onclick="openTechnicianManager()">⚙ Fișa mecanicului</button></div>
   <div class="days" id="days"></div>
   <div class="grid-scroll"><div class="resource-head" id="resourceHead"></div><div class="schedule-grid" id="scheduleGrid"></div></div>
-  <div class="status" id="status">Programările sunt salvate numai în proiectul SAFE.</div>
+  <div id="liveStatus" style="padding:4px 10px;font-size:12px;color:#64748b">Conectare…</div><div class="status" id="status">Programările sunt salvate numai în proiectul SAFE.</div>
  </section>
 </main>
 
@@ -91,6 +91,7 @@ button,input,select,textarea{font:inherit}button{cursor:pointer;transition:trans
   <div class="dialog-actions"><button class="secondary" onclick="closeTechnicianManager()">Închide</button></div>
  </div>
 </div>
+<script src="/static/live_refresh.js"></script>
 <script>
 let data={technicians:[],appointments:[],accepted_requests:[],pending_notifications:[],skill_labels:{}};
 const initialDate=new Date();
@@ -100,8 +101,21 @@ const DAY_START_MIN=8*60+30,DAY_END_MIN=17*60,SLOT_MIN=30,SLOT_PX=38,SLOT_COUNT=
 const pad=n=>String(n).padStart(2,'0'),localDate=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 function monday(d){d=new Date(d);d.setHours(0,0,0,0);d.setDate(d.getDate()-((d.getDay()+6)%7));return d}
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function api(url,options={}){const r=await fetch(url,{headers:{'Content-Type':'application/json'},...options});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.detail||'Eroare');return j}
-async function loadData(){try{data=await api(`/api/scheduler/data?week_start=${localDate(weekStart)}`);render()}catch(e){status(e.message,true)}}
+async function api(url,options={}){const r=await fetch(url,{cache:'no-store',headers:{'Content-Type':'application/json'},...options});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.detail||'Eroare');return j}
+let schedulerReadSequence=0,schedulerLiveRenderPending=false,lastGridMinute='';
+async function loadData(options={}){
+ const sequence=++schedulerReadSequence,week=localDate(weekStart);
+ try{
+  const next=await api(`/api/scheduler/data?week_start=${week}`,{signal:options.signal});
+  if(sequence!==schedulerReadSequence||week!==localDate(weekStart))return;
+  const changed=JSON.stringify(next)!==JSON.stringify(data);data=next;
+  if(!options.background){render();schedulerLiveRenderPending=false;return}
+  if(changed){renderRequests();renderNotifications();schedulerLiveRenderPending=true}
+  const busy=document.querySelector('.appointment.moving,.selection-block,.appointment-drag-ghost,.modal:not(.hidden)');
+  const minute=new Date().toISOString().slice(0,16);
+  if(!busy&&(schedulerLiveRenderPending||minute!==lastGridMinute)){render();schedulerLiveRenderPending=false;lastGridMinute=minute}
+ }catch(e){if(options.background)throw e;status(e.message,true)}
+}
 function status(text,error=false){const el=document.getElementById('status');el.textContent=text;el.style.color=error?'#b91c1c':'#475569'}
 function selectedCalendarDate(){return new Date(+weekStart+selectedDay*86400000)}
 const inDepartment=item=>String(item?.department||'mecanica')===activeDepartment;
@@ -230,7 +244,6 @@ async function saveAppointment(){const start=new Date(`${appointmentDate.value}T
 document.addEventListener('pointerdown',event=>{const button=event.target.closest('button');if(button&&!button.disabled)button.classList.add('button-pressed')});
 for(const eventName of ['pointerup','pointercancel'])document.addEventListener(eventName,event=>document.querySelectorAll('button.button-pressed').forEach(button=>button.classList.remove('button-pressed')));
 document.addEventListener('click',event=>{const button=event.target.closest('button');if(!button||button.disabled)return;button.classList.remove('button-clicked');void button.offsetWidth;button.classList.add('button-clicked');setTimeout(()=>button.classList.remove('button-clicked'),420)});
-loadData();
-setInterval(()=>{if(!document.hidden&&!document.querySelector('.appointment.moving,.modal:not(.hidden)'))loadData().catch(()=>{});},10000);
+const schedulerLive=AlbatrosLive.start({refresh:signal=>loadData({background:true,signal})});
 </script>
 </body></html>

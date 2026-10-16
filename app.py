@@ -3460,8 +3460,8 @@ def archive_page(request: Request):
     html = html.replace('Centrala Cereri Albatros AI', 'Cereri arhivate')
     html = html.replace('<button class="primary-action" onclick="toggleNewRequest()">+ Cerere nouă</button>', '<a class="link-button" href="/cereri">Înapoi la dashboard</a>')
     html = html.replace('<a class="link-button" href="/arhiva">Arhivă / curăță cereri</a>', '<a class="link-button" href="/arhiva/curata">Arhivează după dată</a>')
-    html = html.replace('fetch("/api/requests", {cache:"no-store"})', 'fetch("/api/dashboard/archive", {cache:"no-store"})')
-    html = html.replace('const data = await response.json();\n        const yardData', 'const archiveData = await response.json();\n        const data = archiveData.rows.map(row=>({...row,desktop_status:row.status||"nou",request_datetime:row.created_at}));\n        const yardData')
+    html = html.replace('fetch("/api/requests",', 'fetch("/api/dashboard/archive",')
+    html = html.replace('const data = await response.json();', 'const archiveData = await response.json();\n        const data = archiveData.rows.map(row=>({...row,desktop_status:row.status||"nou",request_datetime:row.created_at}));')
     html = html.replace("/archive`,{method:'POST'", "/restore`,{method:'POST'")
     html = html.replace('Arhivezi cererea #${id}? O poți restaura din Arhivă.', 'Restaurezi cererea #${id} în dashboard?')
     html = html.replace('Se arhivează…', 'Se restaurează…').replace('Arhivarea a eșuat.', 'Restaurarea a eșuat.')
@@ -7234,6 +7234,12 @@ def scheduler_page():
     return HTMLResponse(path.read_text(encoding="utf-8"))
 
 
+@app.get("/static/live_refresh.js")
+def dashboard_live_refresh_script():
+    return FileResponse(BASE / "static" / "live_refresh.js", media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/scheduler/data")
 def scheduler_data(week_start: str = ""):
     try:
@@ -8625,7 +8631,7 @@ def requests_dashboard():
     <div class="topbar">
         <div>
             <div class="dashboard-brand">ALBATROS <span>A</span> <small>RECEPȚIE</small></div>
-            <h1>Cereri service</h1>
+            <h1>Cereri service</h1><div id="liveStatus" style="color:#86efac;font-size:12px">Conectare…</div>
             <div class="subtitle">
                 Toate solicitările, de la primul mesaj până la programare.
             </div>
@@ -8807,6 +8813,7 @@ def requests_dashboard():
     </div>
 </div>
 
+<script src="/static/live_refresh.js"></script>
 <script>
 let requests = [];
 let yardOrders = [];
@@ -9393,14 +9400,17 @@ function setupStickyHorizontalScrollbar() {
     window.addEventListener("resize", syncStickyHorizontalScrollbar);
 }
 
-async function loadRequests() {
+let lastDashboardSnapshot = '',dashboardReadSequence=0;
+async function loadRequests(signal) {
+    if (!(signal instanceof AbortSignal)) signal = undefined;
+    const sequence=++dashboardReadSequence;
     const errorBox = document.getElementById("errorBox");
     errorBox.style.display = "none";
 
     try {
         const [response, yardResponse] = await Promise.all([
-            fetch("/api/requests", {cache:"no-store"}),
-            fetch("/api/dashboard/yard-orders", {cache:"no-store"})
+            fetch("/api/requests", {cache:"no-store",signal}),
+            fetch("/api/dashboard/yard-orders", {cache:"no-store",signal})
         ]);
 
         if (!response.ok) {
@@ -9408,7 +9418,9 @@ async function loadRequests() {
         }
 
         const data = await response.json();
-        const yardData = yardResponse.ok ? await yardResponse.json() : {orders:[]};
+        if (!yardResponse.ok) throw new Error("HTTP " + yardResponse.status);
+        const yardData = await yardResponse.json();
+        if (sequence!==dashboardReadSequence) return;
         yardOrders = Array.isArray(yardData.orders) ? yardData.orders : [];
 
         if (Array.isArray(data)) {
@@ -9419,21 +9431,25 @@ async function loadRequests() {
             requests = [];
         }
 
-        renderStats();
-        renderYardOrders();
-        render();
+        if (JSON.stringify([requests,yardOrders]) !== lastDashboardSnapshot) {
+            lastDashboardSnapshot = JSON.stringify([requests,yardOrders]);
+            renderStats();
+            renderYardOrders();
+            render();
+        }
 
     } catch (error) {
         errorBox.textContent =
             "Nu am putut încărca cererile: " + error.message;
         errorBox.style.display = "block";
+        if (signal) throw error;
     }
 }
 
-loadRequests();
+const dashboardLive=AlbatrosLive.start({refresh:loadRequests});
 setupStickyHorizontalScrollbar();
 setTimeout(syncStickyHorizontalScrollbar, 250);
-setInterval(loadRequests, 15000);
+
 </script>
 </body>
 </html>

@@ -1523,7 +1523,7 @@ def claim_appointment(db_path: Path, appointment_id: int, technician_id: int, no
             audit += f" Interval anterior: {current['start_at']}–{current['end_at']}."
         notes = '\n'.join(filter(None,(str(current.get('notes') or ''),audit)))
         conn.execute("""UPDATE scheduler_appointments SET technician_id=?,department=?,start_at=?,end_at=?,
-            notes=?,source='local_schedule_override',updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            notes=?,source='mechanic_takeover',updated_at=CURRENT_TIMESTAMP WHERE id=?""",
             (technician_id,tech.get('department') or 'mecanica',start.isoformat(timespec='minutes'),end.isoformat(timespec='minutes'),notes,appointment_id))
         conn.commit()
         updated = dict(conn.execute('SELECT * FROM scheduler_appointments WHERE id=?',(appointment_id,)).fetchone())

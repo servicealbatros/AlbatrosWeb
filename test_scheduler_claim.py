@@ -35,7 +35,7 @@ class ClaimTests(unittest.TestCase):
         self.assertEqual(result['appointment']['id'],self.booking['id'])
         self.assertEqual(result['appointment']['technician_id'],self.reporter)
         self.assertIn('Notă păstrată',result['appointment']['notes'])
-        self.assertEqual(result['appointment']['source'],'local_schedule_override')
+        self.assertEqual(result['appointment']['source'],'mechanic_takeover')
         with sqlite3.connect(self.db) as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_appointments WHERE technician_id=?',(self.owner,)).fetchone()[0],0)
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_appointments').fetchone()[0],1)
@@ -56,6 +56,19 @@ class ClaimTests(unittest.TestCase):
         second=self.claim()
         self.assertFalse(second['changed'])
         self.assertEqual(first['appointment']['notes'],second['appointment']['notes'])
+
+    def test_next_dsm_import_does_not_reassign_car_to_old_owner(self):
+        from dsm_schedule_sync import sync_local_schedule
+        with sqlite3.connect(self.db) as conn:
+            conn.execute('UPDATE scheduler_appointments SET dsm_appointment_id=? WHERE id=?',('1887',self.booking['id']))
+        conn.close()
+        claimed=self.claim()['appointment']
+        sync_local_schedule(self.db,[{'dsm_appointment_id':'1887','mechanic':'ADRIAN','start_at':'2026-10-16T08:30','end_at':'2026-10-16T11:00','registration':'B104TST','operations':'placute fata spate'}])
+        with sqlite3.connect(self.db) as conn:
+            row=conn.execute('SELECT technician_id,start_at,notes,source FROM scheduler_appointments WHERE id=?',(self.booking['id'],)).fetchone()
+            self.assertEqual(row,(self.reporter,claimed['start_at'],claimed['notes'],'mechanic_takeover'))
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_appointments').fetchone()[0],1)
+        conn.close()
 
     def test_invalid_mechanic_does_not_remove_old_assignment(self):
         with self.assertRaises(ValueError):

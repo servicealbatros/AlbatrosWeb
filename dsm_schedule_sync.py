@@ -494,6 +494,15 @@ def sync_local_schedule(db_path: Path, rows: list[dict]) -> dict:
                 operations, start_text, end_text,
             )
             if existing:
+                if existing['source'] == 'mechanic_takeover':
+                    # A mechanic has explicitly taken responsibility locally.
+                    # Refresh DSM evidence/contact data without assigning the
+                    # car back to its old mechanic on the next import.
+                    conn.execute("""UPDATE scheduler_appointments SET customer_name=?,phone=?,vehicle=?,
+                        dsm_original_operations=?,dsm_original_start_at=?,dsm_original_end_at=?,updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?""", (customer_name,phone,vehicle,operations,start_text,end_text,int(existing['id'])))
+                    updated += 1
+                    continue
                 conn.execute("""
                     UPDATE scheduler_appointments SET technician_id=?,start_at=?,end_at=?,status=CASE WHEN status='finalizat' THEN status ELSE 'programat' END,
                       customer_name=?,phone=?,registration=?,vehicle=?,job_number=?,operations=?,estimated_hours=?,

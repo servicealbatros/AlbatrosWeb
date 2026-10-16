@@ -1495,6 +1495,46 @@ def update_appointment(db_path: Path, appointment_id: int, payload: dict) -> dic
         return dict(row)
 
 
+def claim_appointment(db_path: Path, appointment_id: int, technician_id: int, note: str = '') -> dict:
+    """Transfer the same local booking atomically; keep DSM and other jobs intact."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT * FROM scheduler_appointments WHERE id=?', (appointment_id,)).fetchone()
+        tech = conn.execute('SELECT * FROM scheduler_technicians WHERE id=? AND active=1', (technician_id,)).fetchone()
+        if not row or not tech:
+            raise ValueError('Programarea sau mecanicul activ nu a fost găsit.')
+        current, tech = dict(row), dict(tech)
+        if int(current.get('technician_id') or 0) == technician_id:
+            return {'appointment':current, 'changed':False, 'slot_changed':False}
+        if current['status'] in {'anulat','finalizat'}:
+            raise ValueError('Programarea este anulată sau finalizată.')
+        start, end = _parse_local(current['start_at']), _parse_local(current['end_at'])
+        old_start = start
+        duration = (end-start).total_seconds()/3600
+        if duration <= 0:
+            raise ValueError('Durata programării nu este validă.')
+        if start.date() < datetime.now().date() or _conflicts(db_path, technician_id, start, end, exclude_id=appointment_id):
+            cursor = max(start, datetime.now().replace(second=0,microsecond=0))
+            start, end = _first_slot_for_technician(db_path, tech, cursor, duration, max_jobs_per_day=0)
+        audit = f"Preluată de {tech['name']} de la mecanicul #{current.get('technician_id') or 'nerepartizat'}. {note}".strip()
+        if start != old_start:
+            audit += f" Interval anterior: {current['start_at']}–{current['end_at']}."
+        notes = '\n'.join(filter(None,(str(current.get('notes') or ''),audit)))
+        conn.execute("""UPDATE scheduler_appointments SET technician_id=?,department=?,start_at=?,end_at=?,
+            notes=?,source='local_schedule_override',updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (technician_id,tech.get('department') or 'mecanica',start.isoformat(timespec='minutes'),end.isoformat(timespec='minutes'),notes,appointment_id))
+        conn.commit()
+        updated = dict(conn.execute('SELECT * FROM scheduler_appointments WHERE id=?',(appointment_id,)).fetchone())
+        return {'appointment':updated,'changed':True,'slot_changed':start!=old_start,'from_technician_id':current.get('technician_id')}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def cancel_appointment(db_path: Path, appointment_id: int, return_to_waiting: bool = False) -> dict:
     """Cancel locally without deleting history; optionally return the linked request to scheduling."""
     with sqlite3.connect(db_path) as conn:

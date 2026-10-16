@@ -56,6 +56,7 @@ from scheduler import (
     auto_schedule_request as scheduler_auto_schedule_request,
     cancel_waiting_request as scheduler_cancel_waiting_request,
     cancel_appointment as scheduler_cancel_appointment,
+    claim_appointment as scheduler_claim_appointment,
     create_appointment as scheduler_create_appointment,
     init_scheduler_db,
     list_appointments as scheduler_list_appointments,
@@ -2801,6 +2802,11 @@ class SchedulerAppointmentUpdateInput(BaseModel):
     operations: str | None = None
     notes: str | None = None
     department: str | None = None
+
+
+class SchedulerClaimInput(BaseModel):
+    technician_id: int
+    notes: str = ''
 
 
 class SchedulerTechnicianWhatsAppInput(BaseModel):
@@ -8009,6 +8015,17 @@ def scheduler_incomplete(appointment_id: int, data: SchedulerIncompleteInput):
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@app.post('/api/scheduler/appointments/{appointment_id}/claim')
+def scheduler_claim(appointment_id: int, data: SchedulerClaimInput, request: Request):
+    _require_local_vehicle_action(request,request.headers.get('X-Human-Action'),'claim-mechanic-appointment')
+    if not data.technician_id:
+        raise HTTPException(400,'Alege mecanicul care preia mașina.')
+    try:
+        return scheduler_claim_appointment(DB_PATH,appointment_id,int(data.technician_id),str(data.notes or 'Preluare confirmată de consilier.'))
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
 @app.post("/api/scheduler/appointments/{appointment_id}/cancel")
 def scheduler_cancel(appointment_id: int, data: SchedulerCancelInput):
     try:
@@ -10145,13 +10162,29 @@ def _log_mechanic_message_for_request(sender: str, body: str, appointment: dict)
     _log_conversation(sender, direction, body, case_id)
 
 
+async def _claim_mechanic_booking(technician: dict, sender: str, body: str, appointment: dict) -> dict | None:
+    try:
+        result = scheduler_claim_appointment(DB_PATH,int(appointment['id']),int(technician['id']),f'Mesaj mecanic: {body}')
+    except ValueError as exc:
+        _record_mechanic_message(int(technician['id']),sender,body,int(appointment['id']),'takeover','needs_review')
+        await send_whatsapp_text(sender,f'Nu am putut prelua programarea: {exc} Mesajul este păstrat pentru verificarea consilierului.')
+        return None
+    current = result['appointment']
+    if result['changed']:
+        _record_mechanic_message(int(technician['id']),sender,body,int(current['id']),'takeover','processed')
+        interval = f"{str(current['start_at'])[:10]} {str(current['start_at'])[11:16]}–{str(current['end_at'])[11:16]}"
+        await send_whatsapp_text(sender,f"Am trecut {current.get('registration') or current.get('job_number')} la tine și am scos-o de la colegul anterior. Interval: {interval}.")
+    return current
+
+
 async def _route_mechanic_message(sender: str, body: str) -> bool:
     normalized = _normalize_text(body)
     job_reference = _extract_mechanic_job_reference(body)
     beta_test = _is_beta_test_phone(sender)
     technician = _technician_for_sender(sender)
     appointment = None
-    if technician and _looks_like_mechanic_delay(body) and not job_reference:
+    staff_command = _looks_like_mechanic_delay(body) or bool(re.search(r'\b(gata|terminat|finalizat|pornit|pornita|inceput|inceputa)\b', normalized))
+    if technician and staff_command and not job_reference:
         plate = _extract_plate(body)
         if plate:
             candidates = _mechanic_plate_candidates(plate)
@@ -10159,22 +10192,26 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
             if len(owned) == 1:
                 appointment = owned[0]
                 job_reference = str(appointment.get('job_number') or '#' + str(appointment['id']))
+            elif len(candidates) == 1:
+                appointment = await _claim_mechanic_booking(technician,sender,body,candidates[0])
+                if not appointment:
+                    return True
+                job_reference = str(appointment.get('job_number') or '#' + str(appointment['id']))
             else:
                 linked = candidates[0] if len(candidates) == 1 else None
                 _record_mechanic_message(int(technician['id']),sender,body,
                                          int(linked['id']) if linked else None,'delay_plate','needs_review')
                 await send_whatsapp_text(sender,
-                    f"Am înregistrat semnalarea pentru {plate}. Nu am găsit o singură programare repartizată ție. "
-                    "Mesajul apare în programator pentru verificarea consilierului; programările nu au fost mutate. "
-                    "Verifică repartizarea sau trimite codul APP/devizului.")
+                    f"Am înregistrat semnalarea pentru {plate}, dar nu am identificat o singură programare. "
+                    "Trimite codul APP/devizului ca să preiau mașina corect. Mesajul apare și în programator pentru verificare.")
                 return True
         elif not _pending_mechanic_delay(int(technician['id']), sender):
             _record_mechanic_message(int(technician['id']),sender,body,None,'delay_missing_reference','needs_review')
-            await send_whatsapp_text(sender,'Pentru ce mașină anunți întârzierea? Trimite numărul de înmatriculare sau codul APP/devizului.')
+            await send_whatsapp_text(sender,'Pentru ce mașină este mesajul? Trimite numărul de înmatriculare sau codul APP/devizului.')
             return True
     # Numărul de înmatriculare + GATA este o comandă de mecanic, nu un mesaj de client.
     ready_plate = _extract_plate(body) if re.search(r"\b(gata|terminat|finalizat)\b", normalized) else None
-    if ready_plate and (technician or beta_test):
+    if ready_plate and (technician or beta_test) and not appointment:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             candidates = [dict(r) for r in conn.execute(
@@ -10233,6 +10270,12 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
         return True
 
     appointment = appointment or _mechanic_appointment(int(technician["id"]), job_reference)
+    if not appointment and staff_command:
+        other = _mechanic_appointment_any(job_reference)
+        if other:
+            appointment = await _claim_mechanic_booking(technician,sender,body,other)
+            if not appointment:
+                return True
     if not appointment:
         await send_whatsapp_text(
             sender,

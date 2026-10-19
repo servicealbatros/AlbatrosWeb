@@ -462,8 +462,11 @@ async def pre_reception_retest(request: Request):
         raise HTTPException(status_code=409, detail='STOP SAFE activ.')
     from pre_reception import restart
     from dsm_pre_reception import seed
+    async def send_retest(target, text):
+        return await send_whatsapp_notification(target, text, kind='request',
+                                                subject='test pregătire recepție B101TST')
     try:
-        return await restart(DATA_DIR, send_whatsapp_text, seed)
+        return await restart(DATA_DIR, send_retest, seed)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

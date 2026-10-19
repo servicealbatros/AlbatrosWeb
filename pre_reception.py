@@ -150,7 +150,10 @@ async def restart(root, send, seed):
             os.chmod(backup_path, 0o600)
             conn.execute('DELETE FROM orders WHERE offer=?', (data['offer_id'],))
         for target in RECIPIENTS:
-            await request_document(root, target, dict(data), send)
+            try:
+                await request_document(root, target, dict(data), send)
+            except Exception:
+                save(root, target, 'invite_failed', dict(data))
         return status(root)
 
 

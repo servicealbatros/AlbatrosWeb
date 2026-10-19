@@ -93,7 +93,7 @@ class ProviderLoginTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(sessions,'authenticated',AsyncMock(side_effect=RuntimeError('unavailable'))):
                 result=await keeper.check(SimpleNamespace(pages=[page]))
             self.assertEqual(result['AutoTotal']['status'],'browser_unavailable')
-            self.assertEqual(result['Haynes']['status'],'tab_missing')
+            self.assertEqual(result['Haynes']['status'],'standby')
 
 
 class ProviderConfigurationTests(unittest.IsolatedAsyncioTestCase):

@@ -1253,7 +1253,8 @@ def _combine_labour_results(haynes: dict, tecrmi: dict) -> dict:
             "status": "running",
             "message": (
                 "O sursă a returnat timpi parțiali; cealaltă continuă pentru completare și comparație."
-                if progress else "HaynesPro și AutoTotal TecRMI caută timpii în paralel."
+                if progress else ("TecRMI caută timpii; Haynes rămâne în rezervă."
+                                  if haynes.get("status") == "standby" else "Se caută timpii operațiilor solicitate.")
             ),
             "source": "HaynesPro + AutoTotal TecRMI",
             "resolved_operations": progress.get("resolved_operations") or [],
@@ -3805,19 +3806,20 @@ def request_technician_start(request_id: int, live_catalogues: bool = False):
         }
     started_at = datetime.now().isoformat(timespec="seconds")
     running = {
-        "status": "running",
+        "status": "standby",
         "request_id": request_id,
         "vin": vin,
         "symptom": symptom,
         "started_at": started_at,
-        "message": "HaynesPro caută timpul în paralel cu AutoTotal TecRMI...",
+        "message": "Haynes rămâne în rezervă. Se caută întâi în TecRMI.",
     }
     output_path.write_text(
         json.dumps(running, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
     tecrmi_running = dict(running)
-    tecrmi_running["message"] = "AutoTotal TecRMI caută timpul în paralel cu HaynesPro..."
+    tecrmi_running["status"] = "running"
+    tecrmi_running["message"] = "TecRMI caută timpii. Haynes va fi folosit numai dacă este necesar."
     tecrmi_output_path.write_text(
         json.dumps(tecrmi_running, ensure_ascii=False, indent=2),
         encoding="utf-8"
@@ -3849,53 +3851,20 @@ def request_technician_start(request_id: int, live_catalogues: bool = False):
         raise HTTPException(status_code=403, detail="Worker path rejected")
     if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{11,20}", vin.upper()):
         raise HTTPException(status_code=400, detail="VIN invalid")
-    cmd = [
-        str(TECHNICIAN_PYTHON),
-        str(TECHNICIAN_WORKER),
-        str(request_id),
-        vin,
-        technical_symptom,
-        str(output_path),
-        str(_offer_result_file(request_id)),
-    ]
-    tecrmi_cmd = [
-        str(TECHNICIAN_PYTHON),
-        str(TECRMI_WORKER),
-        str(request_id),
-        vin,
-        technical_symptom,
-        str(tecrmi_output_path),
-        str(_offer_result_file(request_id)),
-    ]
-
     log_path = TECHNICIAN_LOG_DIR / f"request_{request_id}_worker.log"
     tecrmi_log_path = TECRMI_LOG_DIR / f"request_{request_id}_worker.log"
     labour_env = os.environ.copy()
     labour_env['ALBATROS_WORKER_RUN_ID'] = register_worker_run([output_path, tecrmi_output_path])
 
+    coordinator_cmd = [str(TECHNICIAN_PYTHON), str(BASE / 'labour_fallback_runner.py'),
+                       str(request_id), vin, technical_symptom, str(output_path),
+                       str(_offer_result_file(request_id)), str(tecrmi_output_path),
+                       str(log_path), str(tecrmi_log_path), str(TECHNICIAN_WORKER), str(TECRMI_WORKER)]
     try:
-        log_file = log_path.open("w", encoding="utf-8")
-        subprocess.Popen(
-            cmd,
-            cwd=str(OFFERING_DIR),
-            shell=False,
-            env=labour_env,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        log_file.close()
-        tecrmi_log_file = tecrmi_log_path.open("w", encoding="utf-8")
-        subprocess.Popen(
-            tecrmi_cmd,
-            cwd=str(OFFERING_DIR),
-            shell=False,
-            env=labour_env,
-            stdout=tecrmi_log_file,
-            stderr=subprocess.STDOUT,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        tecrmi_log_file.close()
+        with (TECHNICIAN_LOG_DIR / f"request_{request_id}_fallback.log").open('w', encoding='utf-8') as log_file:
+            subprocess.Popen(coordinator_cmd, cwd=str(OFFERING_DIR), shell=False, env=labour_env,
+                             stdout=log_file, stderr=subprocess.STDOUT,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception as exc:
         error = {
             "status": "error",
@@ -3917,7 +3886,7 @@ def request_technician_start(request_id: int, live_catalogues: bool = False):
         "worker_python": str(TECHNICIAN_PYTHON),
         "haynes_worker_log": str(log_path),
         "tecrmi_worker_log": str(tecrmi_log_path),
-        "message": "HaynesPro și AutoTotal TecRMI au pornit în paralel.",
+        "message": "TecRMI a pornit. Haynes este păstrat ca rezervă pentru timpii lipsă.",
     }
 
 

@@ -191,8 +191,6 @@ def probe_browser(keep_provider_tabs=False):
                          ('dsm', restored_dsm['landing'] if restored_dsm and restored_dsm['cookies'] else 'https://apps.dsmpro.ro/'),
                           ('autototal', 'https://www3.eoriginal.ro/'),
                           ('intercars', 'https://ro.e-cat.intercars.eu/')]
-        if keep_provider_tabs:
-            public_pages.append(('haynes', 'https://www.workshopdata.com/touch/site/layout/makesOverview'))
         for name, url in public_pages:
             page = context.new_page()
             try:

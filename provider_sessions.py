@@ -139,6 +139,10 @@ class ProviderSessionKeeper:
         for provider, vault in self.vaults.items():
             try:
                 state = {'auto_login_configured': vault.path.exists(), 'status': 'tab_missing', 'checked_at': time.time()}
+                if provider == 'Haynes':
+                    state['status'] = 'standby'
+                    result[provider] = state
+                    continue
                 pages = [p for p in context.pages if not p.is_closed() and provider_url(provider, p.url)]
                 connected = False
                 for page in pages:

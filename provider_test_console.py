@@ -449,7 +449,7 @@ async def prepare_offer(request: Request):
     same_origin(request)
     async with LOCK:
         ctx = await context()
-        for name in PROVIDERS:
+        for name in ('DSM', 'Inter Cars', 'AutoTotal'):
             url = PROVIDERS[name]
             if any(provider_page(page.url, name) for page in ctx.pages):
                 continue

@@ -33,6 +33,29 @@ def itp_date(value):
         return None
 
 
+def document_summary(data):
+    return (f'1/3 — Confirmăm mașina și titularul talonului.\nSeria de caroserie: {data["vin"]}\n'
+            f'Nume titular: {data.get("owner_name") or "nu s-a citit clar"}\n'
+            'Dacă sunt corecte, răspunde DA. Dacă numele lipsește sau este greșit, scrie numele corect. '
+            'Pentru o problemă la serie, scrie VIN: urmat de seria exactă. Nu trimite CNP.')
+
+
+def document_itp_question(data):
+    known = data.get('itp')
+    return ('2/3 — ' + (f'Data expirării ITP citită/notată este {known}. Confirmi? Răspunde DA sau scrie data corectă în format ZZ.LL.AAAA.' if known else
+            'Până la ce dată este valabil ITP-ul? Scrie data expirării în format ZZ.LL.AAAA (nu data efectuării inspecției).'))
+
+
+def document_year_question(data):
+    known = data.get('manufacture_year')
+    return ('3/3 — ' + (f'Anul fabricației citit/notat este {known}. Confirmi? Răspunde DA sau scrie anul corect.' if known else
+            'Care este anul fabricației? Scrie anul cu patru cifre; nu presupunem că este anul primei înmatriculări.'))
+
+
+def document_ready(data):
+    return bool(data.get('document_verified') and data.get('owner_name') and data.get('manufacture_year') and data.get('itp'))
+
+
 @contextmanager
 def db(root):
     root = Path(root) / 'pre_reception_private'
@@ -70,7 +93,7 @@ def status(root):
     with db(root) as conn:
         rows = conn.execute('SELECT phone,stage,updated FROM cases').fetchall()
         orders = conn.execute('SELECT state,result FROM orders').fetchall()
-    return {'production_enabled': False, 'reminder_hour': '17:00', 'registration': 'B101TST',
+    return {'production_enabled': False, 'flow_version': 2, 'reminder_hour': '17:00', 'registration': 'B101TST',
             'cases': [{'phone_suffix': r['phone'][-4:], 'stage': r['stage'], 'updated': r['updated']} for r in rows],
             'orders': [{'state': r['state'], 'result': json.loads(r['result']) if r['result'] else None} for r in orders]}
 
@@ -100,6 +123,7 @@ def summary(data):
             f'ITP până la: {data["itp"]} (' + ('declarat de client' if data.get('itp_source') == 'client' else 'citit din talon') + ')' + (' — EXPIRAT' if expired else '') + '\n'
             + (f'Înmatriculare în fotografia veche: {data["photo_registration"]}; înmatricularea curentă din ofertă: {data["registration"]}.\n' if data.get('photo_registration') else '') +
             f'Beneficiar și adresă: {data["client"]}\nTelefon: {data["phone"]}\n'
+            f'Titular talon: {data.get("owner_name", "—")}\nAn fabricație confirmat: {data.get("manufacture_year", "—")}\n'
             f'Lucrări din oferta semnată: {data["work"]}\nSuplimentar: {data["extra"]}\n'
             'Nu rezervăm un interval în programator. Dacă totul este corect și accepți crearea comenzii reale de TEST, răspunde exact CONFIRM DATELE. '
             'Pentru corectări răspunde CORECTEAZA.')
@@ -131,15 +155,50 @@ async def text(root, sender, body, send, writer):
                 await send(sender, 'Pentru testul B101TST răspunde DA sau NU.')
         elif stage == 'document':
             await send(sender, 'Aștept fotografiile talonului B101TST și ale rubricii ITP pentru verificare. Textul nu înlocuiește verificarea documentului în acest test.')
-        elif stage == 'itp':
-            expiry = itp_date(body)
+        elif stage == 'document_check':
+            if value in {'da', 'confirm talonul'} and data.get('owner_name'):
+                valid = True
+            elif norm(body).startswith('vin:'):
+                valid = re.sub(r'\W', '', body.partition(':')[2]).upper() == data['vin'] and bool(data.get('owner_name'))
+            elif value not in {'da', 'nu', 'confirm talonul'} and 2 <= len(body.strip()) <= 180:
+                data['owner_name'] = re.sub(r'^nume\s*:\s*', '', body.strip(), flags=re.I)
+                valid = len(data['owner_name']) >= 2
+            else:
+                valid = False
+            if not valid or not data.get('document_verified'):
+                await send(sender, 'Nu am putut confirma seria și numele.\n' + document_summary(data))
+            else:
+                data['identity_fields_confirmed'] = True
+                save(root, sender, 'document_itp', data)
+                await send(sender, document_itp_question(data))
+        elif stage in {'itp', 'document_itp'}:
+            expiry = data.get('itp') if value == 'da' else itp_date(body)
             if not expiry or not data.get('document_verified'):
-                await send(sender, 'Până la ce dată este valabil ITP-ul? Scrie data expirării în format ZZ.LL.AAAA (nu data efectuării inspecției). Poți trimite și fotografia rubricii ITP.')
+                await send(sender, document_itp_question(data))
             else:
                 data['itp'] = expiry
-                data['itp_source'] = 'client'
-                save(root, sender, 'client', data)
-                await send(sender, 'Am notat data ITP declarată: ' + body.strip() + '. Scrie numele beneficiarului și adresa completă de facturare (pentru firmă: denumire, CUI și adresă). Nu trimite CNP.')
+                if value != 'da':
+                    data['itp_source'] = 'client'
+                data['itp_confirmed'] = True
+                if not data.get('identity_fields_confirmed'):
+                    save(root, sender, 'document_check', data)
+                    await send(sender, document_summary(data))
+                else:
+                    save(root, sender, 'document_year', data)
+                    await send(sender, document_year_question(data))
+        elif stage == 'document_year':
+            year = str(data.get('manufacture_year') or '') if value == 'da' else body.strip()
+            if not re.fullmatch(r'\d{4}', year) or not 1886 <= int(year) <= date.today().year + 1:
+                await send(sender, document_year_question(data))
+            else:
+                data['manufacture_year'] = int(year)
+                if not document_ready(data) or not data.get('identity_fields_confirmed') or not data.get('itp_confirmed'):
+                    save(root, sender, 'document_check', data)
+                    await send(sender, document_summary(data))
+                else:
+                    data['document_fields_confirmed'] = True
+                    save(root, sender, 'requirements', data)
+                    await send(sender, f'Datele talonului sunt confirmate. În oferta semnată avem: {data["work"]}\nCe cerințe mai ai pentru lucrare? Scrie-le aici sau răspunde NU dacă nu ai completări. Le vom trece în comandă pentru verificare, fără acceptarea unor costuri noi.')
         elif stage == 'client':
             if len(body.strip()) < 8 or len(body) > 600:
                 await send(sender, 'Scrie numele beneficiarului și adresa completă de facturare; pentru firmă, denumire și CUI. Nu trimite CNP.')
@@ -153,15 +212,23 @@ async def text(root, sender, body, send, writer):
                 await send(sender, 'Scrie un număr mobil românesc valid sau DA pentru numărul acestei conversații.')
             else:
                 data['phone'] = target
-                save(root, sender, 'requirements', data)
-                await send(sender, f'Lucrări din oferta semnată: {data["work"]}\nMai ai cerințe suplimentare? Scrie-le aici sau răspunde NU. Acestea se notează pentru verificare, fără acceptarea unor costuri noi.')
+                if 'extra' in data:
+                    save(root, sender, 'confirm', data)
+                    await send(sender, summary(data))
+                else:
+                    save(root, sender, 'requirements', data)
+                    await send(sender, f'Lucrări din oferta semnată: {data["work"]}\nCe cerințe suplimentare ai? Scrie-le aici sau răspunde NU.')
         elif stage == 'requirements':
             if len(body) > 1800:
                 await send(sender, 'Trimite cerințele în cel mult 1.800 de caractere.')
             else:
                 data['extra'] = 'Nu' if value == 'nu' else body.strip()
-                save(root, sender, 'confirm', data)
-                await send(sender, summary(data))
+                if data.get('client') and data.get('phone'):
+                    save(root, sender, 'confirm', data)
+                    await send(sender, summary(data))
+                else:
+                    save(root, sender, 'client', data)
+                    await send(sender, 'Am notat cerințele pentru comandă. Scrie numele beneficiarului și adresa completă de facturare (pentru firmă: denumire, CUI și adresă). Beneficiarul poate fi diferit de titularul din talon. Nu trimite CNP.')
         elif stage in {'confirm', 'review'}:
             if value == 'corecteaza':
                 data.pop('final_confirmed', None)
@@ -197,14 +264,13 @@ async def image(root, sender, message, send, download, reader):
         return False
     async with LOCK:
         stage, data = get(root, sender)
-        if stage not in {'document', 'itp'}:
+        if stage not in {'document', 'itp', 'document_check', 'document_itp', 'document_year'}:
             await send(sender, 'Fotografia nu modifică datele deja verificate. Pentru reluarea verificării răspunde CORECTEAZA la confirmarea finală.')
             return True
         media_id = (message.get('image') or {}).get('id')
         if not media_id:
             await send(sender, 'Retrimite fotografia talonului, te rog.')
             return True
-        await send(sender, 'Verific fotografia pentru testul B101TST.')
         try:
             content, mime = await download(media_id)
             if mime not in {'image/jpeg', 'image/png', 'image/webp'} or len(content) > 15000000:
@@ -243,18 +309,27 @@ async def image(root, sender, message, send, download, reader):
                     data['photo_registration'] = plate
                 else:
                     data.pop('photo_registration', None)
+            if data.get('document_verified'):
+                owner = str(parsed.get('owner_name') or '').strip()
+                year = str(parsed.get('manufacture_year') or '')
+                if 2 <= len(owner) <= 180:
+                    data['owner_name'] = owner
+                if re.fullmatch(r'\d{4}', year) and 1886 <= int(year) <= date.today().year + 1:
+                    data['manufacture_year'] = int(year)
             # A reverse-side photo without identity is accepted only after matching front.
             itp = str(parsed.get('itp_expires') or '')
             if data.get('document_verified') and parsed.get('itp_evidence') and re.fullmatch(r'\d{4}-\d{2}-\d{2}', itp):
                 date.fromisoformat(itp)
                 data['itp'] = itp
                 data['itp_source'] = 'document'
-            if data.get('document_verified') and data.get('itp'):
-                save(root, sender, 'client', data)
-                await send(sender, 'Am verificat VIN-ul și înmatricularea. Scrie numele beneficiarului și adresa completă de facturare (pentru firmă: denumire, CUI și adresă). Beneficiarul poate fi diferit de proprietarul din talon. Nu trimite CNP.')
+            if data.get('document_verified'):
+                for key in ('document_fields_confirmed', 'identity_fields_confirmed', 'itp_confirmed'):
+                    data.pop(key, None)
+                save(root, sender, 'document_check', data)
+                await send(sender, document_summary(data))
             else:
-                save(root, sender, 'itp' if data.get('document_verified') else 'document', data)
-                await send(sender, 'Mai am nevoie de fotografia clară cu VIN și înmatriculare.' if not data.get('document_verified') else 'Am identificat mașina din talon. Până la ce dată este valabil ITP-ul? Scrie data expirării în format ZZ.LL.AAAA sau trimite fotografia rubricii ITP.')
+                save(root, sender, 'document', data)
+                await send(sender, 'Mai am nevoie de fotografia clară cu VIN și înmatriculare.')
         except Exception:
             await send(sender, 'Nu am putut verifica fotografia. Trimite o imagine mai clară; nu am creat comanda.')
     return True

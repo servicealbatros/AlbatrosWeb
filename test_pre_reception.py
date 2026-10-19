@@ -50,11 +50,17 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         read = lambda *_: {'vin': d.VIN, 'registration': d.PLATE}
         download = AsyncMock(return_value=(b'image', 'image/jpeg'))
         await p.image(self.root, sender, {'image': {'id': '1'}}, self.send, download, read)
-        self.assertEqual(p.get(self.root, sender)[0], 'itp')
+        self.assertEqual(p.get(self.root, sender)[0], 'document_check')
         read = lambda *_: {'itp_expires': '2025-01-01', 'itp_evidence': 'ITP expira 01.01.2025'}
         await p.image(self.root, sender, {'image': {'id': '2'}}, self.send, download, read)
-        self.assertEqual(p.get(self.root, sender)[0], 'client')
-        for value in ['Client Test, Bucuresti, Str Test 1', 'DA', 'Plăcuțe față suplimentar']:
+        self.assertEqual(p.get(self.root, sender)[0], 'document_check')
+        await p.text(self.root, sender, 'Client Test', self.send, self.writer)
+        self.assertEqual(p.get(self.root, sender)[0], 'document_itp')
+        await p.text(self.root, sender, 'DA', self.send, self.writer)
+        self.assertEqual(p.get(self.root, sender)[0], 'document_year')
+        await p.text(self.root, sender, '2015', self.send, self.writer)
+        self.assertEqual(p.get(self.root, sender)[0], 'requirements')
+        for value in ['Plăcuțe față suplimentar', 'Client Test, Bucuresti, Str Test 1', 'DA']:
             await p.text(self.root, sender, value, self.send, self.writer)
         self.assertIn('EXPIRAT', self.send.await_args.args[1])
         self.assertIn('Ulei original BMW', self.send.await_args.args[1])
@@ -65,6 +71,27 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p.get(self.root, sender)[0], 'done')
         self.assertTrue(self.writer.await_args.args[1])
 
+    async def test_three_document_questions_in_order_then_requirements(self):
+        sender = p.RECIPIENTS[0]
+        p.save(self.root, sender, 'document', self.seed)
+        reader = lambda *_: {'vin': d.VIN, 'registration': d.PLATE, 'owner_name': 'Client Test', 'manufacture_year': 2015, 'itp_expires': '2024-07-01', 'itp_evidence': 'ITP 01.07.2024'}
+        await p.image(self.root, sender, {'image': {'id': 'full'}}, self.send, AsyncMock(return_value=(b'image', 'image/jpeg')), reader)
+        self.assertEqual(self.send.await_count, 1)
+        self.assertTrue(self.send.await_args.args[1].startswith('1/3'))
+        await p.text(self.root, sender, 'DA', self.send, self.writer)
+        self.assertEqual(self.send.await_count, 2)
+        self.assertTrue(self.send.await_args.args[1].startswith('2/3'))
+        await p.text(self.root, sender, 'DA', self.send, self.writer)
+        self.assertEqual(self.send.await_count, 3)
+        self.assertTrue(self.send.await_args.args[1].startswith('3/3'))
+        self.writer.assert_not_awaited()
+        await p.text(self.root, sender, 'DA', self.send, self.writer)
+        stage, data = p.get(self.root, sender)
+        self.assertEqual(stage, 'requirements')
+        self.assertTrue(data['document_fields_confirmed'])
+        self.assertIn('cerințe', self.send.await_args.args[1])
+        self.writer.assert_not_awaited()
+
     async def test_itp_by_message_is_declared_and_invalid_dates_rejected(self):
         sender = p.RECIPIENTS[0]
         p.save(self.root, sender, 'itp', {**self.seed, 'document_verified': True})
@@ -72,7 +99,7 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p.get(self.root, sender)[0], 'itp')
         await p.text(self.root, sender, '01.07.2024', self.send, self.writer)
         stage, data = p.get(self.root, sender)
-        self.assertEqual(stage, 'client')
+        self.assertEqual(stage, 'document_check')
         self.assertEqual(data['itp'], '2024-07-01')
         self.assertEqual(data['itp_source'], 'client')
         self.writer.assert_not_awaited()
@@ -83,7 +110,7 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         reader = lambda *_: {'vin': d.VIN, 'registration': 'B108TST', 'itp_expires': '2024-07-01', 'itp_evidence': 'Valabil ITP 01.07.2024'}
         await p.image(self.root, sender, {'image': {'id': 'old'}}, self.send, AsyncMock(return_value=(b'image', 'image/jpeg')), reader)
         stage, data = p.get(self.root, sender)
-        self.assertEqual(stage, 'client')
+        self.assertEqual(stage, 'document_check')
         self.assertEqual(data['itp'], '2024-07-01')
         self.assertEqual(data['registration'], d.PLATE)
         self.assertEqual(data['photo_registration'], 'B108TST')
@@ -123,7 +150,7 @@ class WriterTests(unittest.IsolatedAsyncioTestCase):
         order = {'transaction': {**head, 'transaction_head__id': '20000', 'transaction_head__parent': d.OFFER, 'transaction_head__type': '2', 'transaction_head__code': 'PHDEV-1', 'car_id': '10'}}
         marked = {'transaction': {**order['transaction'], 'transaction_head__description': '[ALBATROS PRE-RECEPTIE TEST OFERTA-3415]'}}
         call = AsyncMock(side_effect=[source, {'status': 1, 'new_transaction_id': '20000'}, order, {'status': 1}, marked])
-        data = {'vin': d.VIN, 'registration': d.PLATE, 'document_verified': True, 'final_confirmed': True, 'client': 'Test', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01'}
+        data = {'vin': d.VIN, 'registration': d.PLATE, 'document_verified': True, 'document_fields_confirmed': True, 'final_confirmed': True, 'client': 'Test', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01'}
         with patch.object(d, 'call', call):
             result = await d.create_or_find(data, True)
         self.assertEqual(result['code'], 'PHDEV-1')

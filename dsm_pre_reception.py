@@ -44,7 +44,7 @@ async def seed():
 
 
 async def create_or_find(data, allow_create):
-    if data.get('vin') != VIN or data.get('registration') != PLATE or not data.get('final_confirmed') or not data.get('document_verified'):
+    if data.get('vin') != VIN or data.get('registration') != PLATE or not data.get('final_confirmed') or not data.get('document_verified') or not data.get('document_fields_confirmed'):
         raise ValueError('Datele finale ale pilotului nu sunt confirmate.')
     p = await source()
     ids = children(p)
@@ -69,6 +69,8 @@ async def create_or_find(data, allow_create):
     if marker not in description:
         note = (f'\n{marker}\nSimulare fără rezervare în programator. Comandă reală pentru anulare ulterioară.\n'
                 f'Client confirmat: {data["client"]}\nTelefon confirmat: {data["phone"]}\n'
+                f'Titular talon confirmat: {data.get("owner_name", "")}\nAn fabricație confirmat: {data.get("manufacture_year", "")}\n'
+                f'Lucrări din oferta semnată: {data.get("work", "")}\n'
                 f'ITP ({"declarat de client" if data.get("itp_source") == "client" else "citit din talon"}): {data["itp"]}\nCerințe suplimentare: {data.get("extra", "Nu")}\n'
                 'Datele au fost confirmate pe WhatsApp. Piesele și manopera provin din oferta semnată.')
         result = await call('/special/transaction/update_transaction_details', {'transaction_id': command_id, 'car_id': str(h['car_id']), 'transaction_head__description': description + note})

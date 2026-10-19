@@ -172,6 +172,8 @@ Returnează exclusiv JSON: registration, vin, itp_expires, itp_evidence.
 VIN exact 17 caractere și înmatricularea numai dacă sunt lizibile. Nu ghici caractere.
 itp_expires: YYYY-MM-DD NUMAI data expirării inspecției tehnice periodice explicit vizibilă.
 itp_evidence: textul lizibil din rubrica ITP care justifică această dată.
+Documentul poate fi deschis: verifică și pagina din dreapta, unde se poate afla rubrica ITP.
+Fotografia poate fi veche: copiază data vizibilă chiar dacă este în trecut, fără să o actualizezi.
 Nu confunda ITP cu data primei înmatriculări, data emiterii, RCA sau fabricația.
 Dacă sunt mai multe ITP, folosește cea mai recentă valabilitate vizibilă. Fără dovezi sau neclar: null.
 Nu extrage CNP. Nu completa din cunoștințe sau presupuneri.'''.strip()},

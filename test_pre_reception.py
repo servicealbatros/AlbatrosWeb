@@ -65,6 +65,19 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p.get(self.root, sender)[0], 'done')
         self.assertTrue(self.writer.await_args.args[1])
 
+    async def test_same_vin_historic_plate_and_expired_itp_do_not_block(self):
+        sender = p.RECIPIENTS[0]
+        p.save(self.root, sender, 'document', self.seed)
+        reader = lambda *_: {'vin': d.VIN, 'registration': 'B108TST', 'itp_expires': '2024-07-01', 'itp_evidence': 'Valabil ITP 01.07.2024'}
+        await p.image(self.root, sender, {'image': {'id': 'old'}}, self.send, AsyncMock(return_value=(b'image', 'image/jpeg')), reader)
+        stage, data = p.get(self.root, sender)
+        self.assertEqual(stage, 'client')
+        self.assertEqual(data['itp'], '2024-07-01')
+        self.assertEqual(data['registration'], d.PLATE)
+        self.assertEqual(data['photo_registration'], 'B108TST')
+        self.assertTrue(data['document_verified'])
+        self.writer.assert_not_awaited()
+
     async def test_two_phones_one_order_restart_safe(self):
         data = {**self.seed, 'client': 'Test', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01', 'extra': 'Nu', 'document_verified': True}
         for sender in p.RECIPIENTS:

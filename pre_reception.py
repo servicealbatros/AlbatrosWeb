@@ -88,6 +88,7 @@ def summary(data):
     expired = date.fromisoformat(data['itp']) < date.today()
     return (f'TEST B101TST — verifică datele înainte de crearea comenzii REALE:\nVIN: {data["vin"]}\n'
             f'ITP până la: {data["itp"]}' + (' — EXPIRAT' if expired else '') + '\n'
+            + (f'Înmatriculare în fotografia veche: {data["photo_registration"]}; înmatricularea curentă din ofertă: {data["registration"]}.\n' if data.get('photo_registration') else '') +
             f'Beneficiar și adresă: {data["client"]}\nTelefon: {data["phone"]}\n'
             f'Lucrări din oferta semnată: {data["work"]}\nSuplimentar: {data["extra"]}\n'
             'Nu rezervăm un interval în programator. Dacă totul este corect și accepți crearea comenzii reale de TEST, răspunde exact CONFIRM DATELE. '
@@ -207,7 +208,7 @@ async def image(root, sender, message, send, download, reader):
             differences = []
             if vin and vin != data['vin']:
                 differences.append(f'VIN citit: {vin}; VIN din oferta semnată: {data["vin"]}')
-            if plate and plate != data['registration']:
+            if plate and plate != data['registration'] and vin != data['vin']:
                 differences.append(f'înmatriculare citită: {plate}; în oferta semnată: {data["registration"]}')
             if differences:
                 data['document_difference'] = differences
@@ -215,8 +216,14 @@ async def image(root, sender, message, send, download, reader):
                 await send(sender, 'Verificarea fotografiei a găsit: ' + '; '.join(differences) + '. Poate fi o eroare de citire. Vechimea pozei nu este motivul blocării. Trimite o fotografie mai clară pentru verificare; nu deschid încă o comandă.')
                 return True
             data.pop('document_difference', None)
-            if vin == data['vin'] and plate == data['registration']:
+            if vin == data['vin']:
                 data['document_verified'] = True
+                if plate and plate != data['registration']:
+                    # VIN identifies the car. A historical plate is disclosed in
+                    # the final summary, never used to overwrite today's plate.
+                    data['photo_registration'] = plate
+                else:
+                    data.pop('photo_registration', None)
             # A reverse-side photo without identity is accepted only after matching front.
             itp = str(parsed.get('itp_expires') or '')
             if data.get('document_verified') and parsed.get('itp_evidence') and re.fullmatch(r'\d{4}-\d{2}-\d{2}', itp):

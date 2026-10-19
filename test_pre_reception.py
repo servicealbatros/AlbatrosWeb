@@ -1,0 +1,108 @@
+import asyncio
+import tempfile
+import unittest
+from unittest.mock import AsyncMock, patch
+from pathlib import Path
+import pre_reception as p
+import dsm_pre_reception as d
+
+
+class PilotTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.seed = {'offer_id': d.OFFER, 'vin': d.VIN, 'registration': d.PLATE, 'work': 'Ulei original BMW + filtre'}
+        self.send = AsyncMock()
+        self.writer = AsyncMock(return_value={'id': '20000', 'code': 'PHDEV-TEST'})
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    async def test_start_idempotent_only_two_numbers(self):
+        seed = AsyncMock(return_value=self.seed)
+        await p.start(self.root, self.send, seed)
+        await p.start(self.root, self.send, seed)
+        self.assertEqual(self.send.await_count, 2)
+        self.assertEqual({x.args[0] for x in self.send.await_args_list}, set(p.RECIPIENTS))
+        self.assertFalse(p.status(self.root)['production_enabled'])
+
+    async def test_unknown_phone_and_decline(self):
+        self.assertFalse(await p.text(self.root, '40700100007', 'DA', self.send, self.writer))
+        p.save(self.root, p.RECIPIENTS[0], 'attendance', self.seed)
+        await p.text(self.root, p.RECIPIENTS[0], 'NU', self.send, self.writer)
+        self.assertEqual(p.get(self.root, p.RECIPIENTS[0])[0], 'stopped')
+        self.writer.assert_not_awaited()
+
+    async def test_document_mismatch_blocks(self):
+        sender = p.RECIPIENTS[0]
+        p.save(self.root, sender, 'document', self.seed)
+        reader = lambda *_: {'vin': 'WBA00000000000003', 'registration': d.PLATE, 'itp_expires': '2028-12-01', 'itp_evidence': 'ITP'}
+        await p.image(self.root, sender, {'image': {'id': '1'}}, self.send, AsyncMock(return_value=(b'image', 'image/jpeg')), reader)
+        self.assertEqual(p.get(self.root, sender)[0], 'document')
+        self.writer.assert_not_awaited()
+
+    async def test_front_then_itp_and_final_gate(self):
+        sender = p.RECIPIENTS[0]
+        p.save(self.root, sender, 'document', self.seed)
+        read = lambda *_: {'vin': d.VIN, 'registration': d.PLATE}
+        download = AsyncMock(return_value=(b'image', 'image/jpeg'))
+        await p.image(self.root, sender, {'image': {'id': '1'}}, self.send, download, read)
+        self.assertEqual(p.get(self.root, sender)[0], 'document')
+        read = lambda *_: {'itp_expires': '2025-01-01', 'itp_evidence': 'ITP expira 01.01.2025'}
+        await p.image(self.root, sender, {'image': {'id': '2'}}, self.send, download, read)
+        self.assertEqual(p.get(self.root, sender)[0], 'client')
+        for value in ['Client Test, Bucuresti, Str Test 1', 'DA', 'Plăcuțe față suplimentar']:
+            await p.text(self.root, sender, value, self.send, self.writer)
+        self.assertIn('EXPIRAT', self.send.await_args.args[1])
+        self.assertIn('Ulei original BMW', self.send.await_args.args[1])
+        self.writer.assert_not_awaited()
+        await p.text(self.root, sender, 'DA', self.send, self.writer)
+        self.writer.assert_not_awaited()
+        await p.text(self.root, sender, 'CONFIRM DATELE', self.send, self.writer)
+        self.assertEqual(p.get(self.root, sender)[0], 'done')
+        self.assertTrue(self.writer.await_args.args[1])
+
+    async def test_two_phones_one_order_restart_safe(self):
+        data = {**self.seed, 'client': 'Test', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01', 'extra': 'Nu', 'document_verified': True}
+        for sender in p.RECIPIENTS:
+            p.save(self.root, sender, 'confirm', data)
+        await asyncio.gather(*(p.text(self.root, sender, 'CONFIRM DATELE', self.send, self.writer) for sender in p.RECIPIENTS))
+        self.assertEqual(self.writer.await_count, 1)
+        self.assertEqual(len(p.status(self.root)['orders']), 1)
+        await p.text(self.root, p.RECIPIENTS[0], 'CONFIRM DATELE', self.send, self.writer)
+        self.assertEqual(self.writer.await_count, 1)
+
+    async def test_uncertain_write_is_reconciled_not_recreated(self):
+        data = {**self.seed, 'client': 'Test', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01', 'extra': 'Nu', 'document_verified': True}
+        p.save(self.root, p.RECIPIENTS[0], 'confirm', data)
+        self.writer.side_effect = RuntimeError('timeout after POST')
+        await p.text(self.root, p.RECIPIENTS[0], 'CONFIRM DATELE', self.send, self.writer)
+        await p.text(self.root, p.RECIPIENTS[0], 'CONFIRM DATELE', self.send, self.writer)
+        self.assertTrue(self.writer.await_args_list[0].args[1])
+        self.assertFalse(self.writer.await_args_list[1].args[1])
+
+
+class WriterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_no_confirmation_no_write(self):
+        with patch.object(d, 'call', new_callable=AsyncMock) as call:
+            with self.assertRaises(ValueError):
+                await d.create_or_find({'vin': d.VIN, 'registration': d.PLATE}, True)
+            call.assert_not_awaited()
+
+    async def test_signed_source_transforms_once_and_marks_test(self):
+        head = {'transaction_head__id': d.OFFER, 'transaction_head__type': '1', 'transaction_head__status': 'working', 'car_body_series': d.VIN, 'car_auto_number': d.PLATE}
+        source = {'transaction': head, 'sms_or_qrcode_sended': {'service_offer': 'complete'}, 'transaction_head_childs': []}
+        order = {'transaction': {**head, 'transaction_head__id': '20000', 'transaction_head__parent': d.OFFER, 'transaction_head__type': '2', 'transaction_head__code': 'PHDEV-1', 'car_id': '10'}}
+        marked = {'transaction': {**order['transaction'], 'transaction_head__description': '[ALBATROS PRE-RECEPTIE TEST OFERTA-3415]'}}
+        call = AsyncMock(side_effect=[source, {'status': 1, 'new_transaction_id': '20000'}, order, {'status': 1}, marked])
+        data = {'vin': d.VIN, 'registration': d.PLATE, 'document_verified': True, 'final_confirmed': True, 'client': 'Test', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01'}
+        with patch.object(d, 'call', call):
+            result = await d.create_or_find(data, True)
+        self.assertEqual(result['code'], 'PHDEV-1')
+        self.assertEqual(call.await_args_list[1].args[1]['transform_type'], 'estimate')
+        self.assertEqual(call.await_args_list[1].args[1]['payment_advance'], 'false')
+        self.assertIn('TEST', call.await_args_list[3].args[1]['transaction_head__description'])
+
+
+if __name__ == '__main__':
+    unittest.main()

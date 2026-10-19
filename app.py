@@ -438,6 +438,30 @@ def master_page(request: Request):
     return HTMLResponse((BASE / 'static/master.html').read_text(encoding='utf-8'))
 
 
+@app.get('/api/dashboard/master/pre-reception')
+def pre_reception_status(request: Request):
+    _master_access(request)
+    from pre_reception import status
+    return status(DATA_DIR)
+
+
+@app.post('/api/dashboard/master/pre-reception/pilot')
+async def pre_reception_pilot(request: Request):
+    _master_access(request)
+    if not POLICY.robot_enabled:
+        raise HTTPException(status_code=409, detail='STOP SAFE activ.')
+    from pre_reception import start
+    from dsm_pre_reception import seed
+    return await start(DATA_DIR, send_whatsapp_notification, seed)
+
+
+async def _pre_reception_write(data, allow_create):
+    if not POLICY.robot_enabled:
+        raise RuntimeError('STOP SAFE activ.')
+    from dsm_pre_reception import create_or_find
+    return await create_or_find(data, allow_create)
+
+
 @app.get('/api/dashboard/master/status')
 def master_status(request: Request):
     _master_access(request)
@@ -12013,6 +12037,9 @@ async def _route_buffered_message(
     )
     if await _route_mechanic_message(sender, body):
         return
+    from pre_reception import text as pre_reception_text
+    if await pre_reception_text(DATA_DIR, sender, body, send_whatsapp_text, _pre_reception_write):
+        return
     if _is_beta_test_phone(sender) and _starts_beta_test_conversation(body):
         _reset_beta_test_conversation(sender)
     current_case_id = _get_or_create_case(sender)
@@ -12555,6 +12582,10 @@ async def process_whatsapp_image(
     sender: str,
     message: dict
 ):
+    from pre_reception import image as pre_reception_image
+    from vision import read_pre_reception_document
+    if await pre_reception_image(DATA_DIR, sender, message, send_whatsapp_text, download_whatsapp_media, read_pre_reception_document):
+        return
     image_info = message.get("image", {})
     media_id = image_info.get("id")
 

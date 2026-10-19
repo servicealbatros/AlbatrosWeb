@@ -12,32 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dsm_session_vault import DsmSessionVault, DsmLoginVault, trusted_landing, trusted_login
 
 async def reconnect(page, credentials):
-    if not credentials or not trusted_login(page.url):
-        return 'login_required'
-    if await page.locator('iframe[src*="recaptcha"],iframe[src*="hcaptcha"],[name="g-recaptcha-response"]').count():
-        return 'human_verification_required'
-    password = page.locator('input[type=password]:visible')
-    username = page.locator('input[type=email]:visible,input[type=text]:visible')
-    if await password.count() != 1 or await username.count() != 1:
-        return 'unsupported_login_form'
-    # Do not overwrite a person who is currently completing the login form.
-    if await password.input_value():
-        return 'human_login_in_progress'
-    form = password.locator('xpath=ancestor::form')
-    button = form.get_by_role('button', name=re.compile(r'^(Autentificare|Login|Log in|Conectare)$', re.I))
-    if await button.count() != 1:
-        return 'unsupported_login_form'
-    await username.fill(credentials['username'], timeout=10000)
-    await password.fill(credentials['password'], timeout=10000)
-    await button.click(timeout=15000)
-    for _ in range(10):
-        if trusted_landing(page.url) and not await page.locator('input[type=password]:visible').count():
-            if await page.locator('a[href*="logout"],a[href*="logoff"],form[action*="logout"]').count():
-                return 'connected'
-        await asyncio.sleep(1)
-    if trusted_login(page.url):
-        await password.fill('', timeout=3000)
-    return 'login_failed'
+    from provider_sessions import reconnect as reconnect_provider
+    return await reconnect_provider(page, credentials, 'DSM')
 
 async def main():
     from playwright.async_api import async_playwright
@@ -45,6 +21,9 @@ async def main():
     login_vault = DsmLoginVault(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], os.environ['ALBATROS_PROVIDER_STATE_KEY'])
     status_path = Path(os.environ['ALBATROS_DATA_DIR']) / 'dsm_session_health.json'
     last_read, last_login, failures = 0, 0, 0
+    last_error_reload, login_version = 0, 0
+    from provider_sessions import ProviderSessionKeeper, upstream_error
+    supplier_keeper = ProviderSessionKeeper(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], os.environ['ALBATROS_PROVIDER_STATE_KEY'])
     stopping = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stopping.set)
     async with async_playwright() as playwright:
@@ -53,9 +32,21 @@ async def main():
         while True:
             try:
                 connected = False
+                unavailable = False
+                version = login_vault.path.stat().st_mtime_ns if login_vault.path.exists() else 0
+                if version != login_version:
+                    login_version, last_login, failures = version, 0, 0
                 for page in context.pages:
                     landing = trusted_landing(page.url)
-                    if not landing or await page.locator('input[type=password]:visible').count():
+                    if not landing:
+                        continue
+                    if await upstream_error(page):
+                        unavailable = True
+                        if time.monotonic() - last_error_reload > 60:
+                            last_error_reload = time.monotonic()
+                            await page.reload(wait_until='domcontentloaded', timeout=15000)
+                        continue
+                    if await page.locator('input[type=password]:visible').count():
                         continue
                     if not await page.locator('a[href*="logout"],a[href*="logoff"],form[action*="logout"]').count():
                         continue
@@ -70,8 +61,8 @@ async def main():
                             await page.reload(wait_until='domcontentloaded', timeout=15000)
                             connected = False
                     break
-                result = 'connected' if connected else 'login_required'
-                if not connected and time.monotonic() - last_login > 900 and failures < 3:
+                result = 'connected' if connected else 'upstream_unavailable' if unavailable else 'login_required'
+                if not connected and not unavailable and time.monotonic() - last_login > (1800 if failures >= 3 else 60 * 2 ** failures):
                     credentials = login_vault.load()
                     if credentials:
                         for page in context.pages:
@@ -86,6 +77,9 @@ async def main():
                                 break
                 status_path.write_text(json.dumps({'status': result, 'checked_at': time.time(),
                     'auto_login_configured': login_vault.path.exists(), 'failed_attempts': failures}), encoding='utf-8')
+                provider_health = await supplier_keeper.check(context)
+                provider_health['DSM'] = {'status': result, 'auto_login_configured': login_vault.path.exists(), 'checked_at': time.time()}
+                (status_path.parent / 'provider_session_health.json').write_text(json.dumps(provider_health), encoding='utf-8')
             except Exception as error:
                 print('DSM session snapshot: ' + type(error).__name__, flush=True)
             if stopping.is_set():

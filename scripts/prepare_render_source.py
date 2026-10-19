@@ -12,7 +12,7 @@ FILES = (
     'agent.py', 'security.py', 'database.py', 'labour.py',
     'vision.py', 'dashboard_devices.py', 'scheduler.py', 'schedule_import_control.py', 'mechanic_schedule_clock.py', 'dsm_session_vault.py', 'automotive_vocabulary.py',
     'oe_english_vocabulary.py', 'part_accuracy.py', 'worker_run_guard.py',
-    'catalogue_probe.py', 'catalogue_crawler.py', 'original_oil_policy.py', 'dsm_readonly.py', 'dsm_schedule_sync.py',
+    'catalogue_probe.py', 'catalogue_crawler.py', 'original_oil_policy.py', 'provider_sessions.py', 'dsm_readonly.py', 'dsm_schedule_sync.py',
     'dsm_open_orders_readonly.py', 'dsm_history_import.py', 'dsm_history_cache.py',
     'autototal_request_worker.py', 'technician_request_worker_v6_time_parse_fix.py',
     'tecrmi_request_worker.py', 'robot_cdp_health.py', 'runtime_control.py',

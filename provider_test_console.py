@@ -271,7 +271,8 @@ async def open_provider(body: Provider, request: Request):
                     await _page.goto(PROVIDERS[body.provider], wait_until='domcontentloaded', timeout=45000)
                 except Exception:
                     pass  # A loaded login form can still be usable after a navigation timeout.
-        if await _page.get_by_text('503 Service Unavailable', exact=True).is_visible():
+        from provider_sessions import upstream_error
+        if await upstream_error(_page):
             try:
                 await _page.reload(wait_until='domcontentloaded', timeout=30000)
             except Exception:
@@ -286,12 +287,32 @@ async def state(request: Request):
         return await snapshot()
 
 
+@router.get('/api/provider-auth/reconnection-status')
+async def reconnection_status(request: Request):
+    session(request)
+    import json
+    from provider_sessions import ProviderLoginVault
+    from dsm_session_vault import DsmLoginVault
+    profile, key = os.getenv('ALBATROS_BROWSER_PROFILE_DIR'), os.getenv('ALBATROS_PROVIDER_STATE_KEY')
+    if not profile or not key:
+        return {'providers': {p: {'configured': False, 'status': 'storage_unavailable'} for p in PROVIDERS}}
+    path = Path(os.environ['ALBATROS_DATA_DIR']) / 'provider_session_health.json'
+    try:
+        health = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    except (OSError, ValueError):
+        health = {}
+    return {'providers': {p: {'configured': (DsmLoginVault(profile, key) if p == 'DSM' else ProviderLoginVault(profile, key, p)).path.exists(),
+                             'status': str(health.get(p, {}).get('status') or 'unverified')}
+                          for p in PROVIDERS}}
+
+
 class Submit(PageAction):
     form: int = Field(ge=-1)
     button: int = Field(ge=0)
     fields: dict[str, str]
     prepare_only: bool = False
     remember_dsm: bool = False
+    remember_provider: bool = False
 
 
 @router.post('/api/provider-auth/submit')
@@ -321,6 +342,21 @@ async def submit(body: Submit, request: Request):
             captcha_present = await captcha.count() > 0
             captcha_pending = (captcha_present and not
                 await captcha.evaluate_all('nodes=>nodes.some(e=>!!e.value.trim())'))
+            if body.remember_provider and not body.prepare_only:
+                from provider_sessions import ProviderLoginVault, DOMAINS, provider_url
+                provider = next((p for p in DOMAINS if provider_url(p, _page.url)), None)
+                password_field = next((str(f['index']) for f in form['fields'] if f['type'] == 'password'), None)
+                username_fields = [str(f['index']) for f in form['fields'] if f['type'] in {'text', 'email'}]
+                if provider and password_field is not None and len(username_fields) == 1:
+                    username, password = body.fields.get(username_fields[0]), body.fields.get(password_field)
+                    if username and password:
+                        key = os.environ['ALBATROS_PROVIDER_STATE_KEY']
+                        profile = os.environ['ALBATROS_BROWSER_PROFILE_DIR']
+                        if provider == 'DSM':
+                            from dsm_session_vault import DsmLoginVault
+                            DsmLoginVault(profile, key).save(username, password)
+                        else:
+                            ProviderLoginVault(profile, key, provider).save(username, password, _page.url)
             if body.prepare_only or captcha_pending or (captcha_present and fields_changed):
                 state = await snapshot()
                 state['captcha_pending'] = captcha_pending
@@ -358,6 +394,31 @@ async def configure_dsm_login(body: DsmCredentials, request: Request):
         raise HTTPException(503, 'Stocarea criptată nu este configurată.')
     DsmLoginVault(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], key).save(body.username, body.password)
     return {'ok': True}
+
+
+class SupplierCredentials(DsmCredentials):
+    provider: str
+
+
+@router.post('/api/provider-auth/auto-login')
+async def configure_supplier_login(body: SupplierCredentials, request: Request):
+    session(request)
+    same_origin(request)
+    if body.provider not in PROVIDERS:
+        raise HTTPException(422, 'Furnizor necunoscut.')
+    key, profile = os.getenv('ALBATROS_PROVIDER_STATE_KEY'), os.getenv('ALBATROS_BROWSER_PROFILE_DIR')
+    if not key or not profile:
+        raise HTTPException(503, 'Stocarea criptată nu este configurată.')
+    if body.provider == 'DSM':
+        from dsm_session_vault import DsmLoginVault
+        DsmLoginVault(profile, key).save(body.username, body.password)
+    else:
+        from provider_sessions import ProviderLoginVault
+        # Explicit supplier-level authorization. The keeper still requires an
+        # owned HTTPS domain and a single, visible sign-in form before filling.
+        ProviderLoginVault(profile, key, body.provider).save(body.username, body.password,
+            PROVIDERS[body.provider], strict_location=False)
+    return {'ok': True, 'provider': body.provider}
 
 
 class LoginLink(PageAction):

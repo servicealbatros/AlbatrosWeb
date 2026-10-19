@@ -71,6 +71,7 @@ async def active_verification(page):
         const token=body.querySelector('[name="g-recaptcha-response"]');
         if(token?.value.trim())return false;
         return [...body.querySelectorAll('iframe')].some(e=>shown(e)&&
+            !e.closest('.grecaptcha-badge')&&!/[?&]size=invisible(?:&|$)/i.test(e.src)&&
             /recaptcha.*(?:anchor|bframe)|hcaptcha|challenges.cloudflare.com/i.test(e.src)) ||
             [...body.querySelectorAll('input')].some(e=>shown(e)&&/otp|one-time|verification.?code|captcha/i.test(e.name+' '+e.autocomplete));
     }"""))

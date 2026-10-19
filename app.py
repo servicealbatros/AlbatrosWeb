@@ -519,6 +519,13 @@ def master_provider_login(request: Request):
     return {'url': origin + '/provider-auth#' + token, 'expires_in': 120}
 
 
+@app.get('/api/dashboard/master/dsm-accepted-offers/inspect')
+async def inspect_dsm_accepted_offers(request: Request):
+    _master_access(request)
+    from dsm_accepted_offers import inspect_acceptance
+    return await inspect_acceptance()
+
+
 @app.get('/api/dashboard/master/provider-tabs')
 async def master_provider_tabs(request: Request):
     """Read the owned worker browser without navigating or closing any tab."""

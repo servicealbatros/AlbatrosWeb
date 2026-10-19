@@ -132,7 +132,7 @@ async def save_vehicle_details(data, head, command_id):
 
 async def call(path, data=None):
     # No arbitrary hosts/routes from messages or OCR.
-    if not re.fullmatch(r'/special/(transaction/(get_transaction/\d+|offer_accepted/19527|update_transaction_details|start_transaction)|car/(get_car|update_car_detail)|contact/(get_client|update_contact_detail))', path):
+    if not re.fullmatch(r'/special/(transaction/(get_transaction/\d+|offer_accepted/19527|update_transaction_details|start_transaction|transaction_car)|car/(get_car|update_car_detail)|contact/(get_client|update_contact_detail))', path):
         raise ValueError('Operație DSM nepermisă în pilot.')
     if path.endswith('/update_car_detail') and (not data or data.get('input') not in {'car_manufacture_year', 'car_itp_expires_date'}):
         raise ValueError('Rubrică mașină nepermisă în pilot.')
@@ -140,6 +140,8 @@ async def call(path, data=None):
         raise ValueError('Rubrică client nepermisă în pilot.')
     if path.endswith('/start_transaction') and (not data or str(data.get('transaction_type')) != '2' or data.get('transaction_id')):
         raise ValueError('Doar o comandă nouă de test este permisă.')
+    if path.endswith('/transaction_car') and (not data or set(data) != {'car_id', 'transaction_id', 'contact_id'} or not all(str(v).isdigit() and int(v) > 1 for v in data.values())):
+        raise ValueError('Identificatori nevalizi pentru legarea mașinii de test.')
     return await _evaluate('''(async()=>{
       if(location.protocol!=='https:'||!['s.servicemanager.q-service.ro','apps.dsmpro.ro','appm.dsmpro.ro'].includes(location.hostname))throw Error('Domeniu DSM nepermis');
       const data=__DATA__; const r=await fetch(__PATH__,{method:data?'POST':'GET',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||''},...(data?{body:new URLSearchParams(data)}:{}),signal:AbortSignal.timeout(12000)});
@@ -239,6 +241,34 @@ def check_new_test_head(head, ident, *, allow_canceled=False, receipt=False):
         raise ValueError('Comanda nu corespunde acestui test B101TST.')
 
 
+async def bind_empty_test_order(order, command_id):
+    """DSM's native creation is two steps: start_transaction, transaction_car."""
+    h = order.get('transaction') or {}
+    if h.get('car_id'):
+        return order
+    if (str(h.get('transaction_head__id')) != str(command_id)
+            or str(h.get('transaction_head__type')) != '2'
+            or h.get('transaction_head__status') != 'working'
+            or order.get('transaction_rows')):
+        raise ValueError('Comanda incompletă nu poate fi legată automat.')
+    previous = await call('/special/transaction/get_transaction/' + RETEST_COMMAND)
+    source_head = previous.get('transaction') or {}
+    check_retest_order({**source_head, 'transaction_head__status': 'working'})
+    if str(h.get('contact_id')) != str(source_head.get('contact_id')):
+        raise ValueError('Clientul comenzii incomplete nu corespunde testului.')
+    car = await call('/special/car/get_car', {'car_id': str(source_head['car_id'])})
+    if str(car.get('car_body_series', '')).upper() != VIN:
+        raise ValueError('Mașina de legat nu corespunde VIN-ului confirmat.')
+    result = await call('/special/transaction/transaction_car', {
+        'car_id': str(source_head['car_id']), 'transaction_id': str(command_id),
+        'contact_id': str(source_head['contact_id'])})
+    if str(result.get('transaction_id')) != str(command_id):
+        raise ValueError('DSM nu a confirmat legarea mașinii; nu creez altă comandă.')
+    linked = await call('/special/transaction/get_transaction/' + str(command_id))
+    check_new_test_head(linked.get('transaction') or {}, command_id, receipt=True)
+    return linked
+
+
 async def create_or_find(data, allow_create, *, record_created=None):
     if data.get('vin') != VIN or data.get('registration') != PLATE or not data.get('final_confirmed') or not data.get('document_verified') or not data.get('document_current') or not data.get('document_fields_confirmed'):
         raise ValueError('Datele finale ale pilotului nu sunt confirmate.')
@@ -285,6 +315,8 @@ async def create_or_find(data, allow_create, *, record_created=None):
             if not command_id.isdigit():
                 raise ValueError('DSM nu a confirmat ID-ul comenzii; nu repet automat crearea.')
     order = await call('/special/transaction/get_transaction/' + command_id)
+    if data.get('new_test_order') and not retest_id:
+        order = await bind_empty_test_order(order, command_id)
     h = order.get('transaction') or {}
     if data.get('new_test_order'):
         check_new_test_head(h, command_id, receipt=not retest_id)

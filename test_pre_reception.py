@@ -228,6 +228,17 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WriterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blank_command_binds_verified_car_without_creating_again(self):
+        old = {'transaction_head__id': d.RETEST_COMMAND, 'transaction_head__code': 'PHDEV-10296', 'transaction_head__status': 'canceled', 'transaction_head__type': '2', 'car_body_series': d.VIN, 'car_auto_number': d.PLATE, 'car_id': '10', 'contact_id': '22'}
+        blank = {'transaction': {'transaction_head__id': '20001', 'transaction_head__type': '2', 'transaction_head__status': 'working', 'contact_id': '22', 'car_id': None}, 'transaction_rows': []}
+        linked = {'transaction': {**old, 'transaction_head__id': '20001', 'transaction_head__code': 'PHDEV-TEST', 'transaction_head__status': 'working'}}
+        call = AsyncMock(side_effect=[{'transaction': old}, {'car_body_series': d.VIN}, {'transaction_id': '20001'}, linked])
+        with patch.object(d, 'call', call):
+            result = await d.bind_empty_test_order(blank, '20001')
+        self.assertEqual(result['transaction']['car_id'], '10')
+        self.assertEqual(call.await_args_list[2].args, ('/special/transaction/transaction_car', {'car_id': '10', 'transaction_id': '20001', 'contact_id': '22'}))
+        self.assertFalse(any(c.args[0].endswith('/start_transaction') for c in call.await_args_list))
+
     async def test_canceled_retest_seeds_new_run_without_writes(self):
         head = {'transaction_head__id': d.RETEST_COMMAND, 'transaction_head__code': 'PHDEV-10296', 'transaction_head__status': 'canceled', 'transaction_head__type': '2', 'car_body_series': d.VIN, 'car_auto_number': d.PLATE, 'car_id': '10', 'contact_id': '22', 'transaction_head__description': 'Încărcare freon'}
         call = AsyncMock(side_effect=[{'transaction': head}, {'contact_name': 'Client Test'}, {'car_body_series': d.VIN}])

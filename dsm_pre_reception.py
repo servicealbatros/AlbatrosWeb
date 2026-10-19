@@ -72,6 +72,7 @@ async def create_or_find(data, allow_create):
                 f'Titular talon confirmat: {data.get("owner_name", "")}\nAn fabricație confirmat: {data.get("manufacture_year", "")}\n'
                 f'Lucrări din oferta semnată: {data.get("work", "")}\n'
                 f'ITP ({"declarat de client" if data.get("itp_source") == "client" else "citit din talon"}): {data["itp"]}\nCerințe suplimentare: {data.get("extra", "Nu")}\n'
+                'DATELE ȘI CERINȚELE CLIENTULUI TREBUIE REVERIFICATE ȘI CONFIRMATE LA SEMNAREA COMENZII.\n'
                 'Datele au fost confirmate pe WhatsApp. Piesele și manopera provin din oferta semnată.')
         result = await call('/special/transaction/update_transaction_details', {'transaction_id': command_id, 'car_id': str(h['car_id']), 'transaction_head__description': description + note})
         if str(result.get('status')) not in {'1', 'True', 'true'}:

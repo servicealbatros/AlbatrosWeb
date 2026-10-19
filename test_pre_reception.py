@@ -64,6 +64,7 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
             await p.text(self.root, sender, value, self.send, self.writer)
         self.assertIn('EXPIRAT', self.send.await_args.args[1])
         self.assertIn('Ulei original BMW', self.send.await_args.args[1])
+        self.assertIn('reverificate și confirmate la semnarea comenzii', self.send.await_args.args[1])
         self.writer.assert_not_awaited()
         await p.text(self.root, sender, 'DA', self.send, self.writer)
         self.writer.assert_not_awaited()
@@ -157,6 +158,7 @@ class WriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.await_args_list[1].args[1]['transform_type'], 'estimate')
         self.assertEqual(call.await_args_list[1].args[1]['payment_advance'], 'false')
         self.assertIn('TEST', call.await_args_list[3].args[1]['transaction_head__description'])
+        self.assertIn('REVERIFICATE ȘI CONFIRMATE LA SEMNAREA COMENZII', call.await_args_list[3].args[1]['transaction_head__description'])
 
 
 if __name__ == '__main__':

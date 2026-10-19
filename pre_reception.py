@@ -125,6 +125,7 @@ def summary(data):
             f'Beneficiar și adresă: {data["client"]}\nTelefon: {data["phone"]}\n'
             f'Titular talon: {data.get("owner_name", "—")}\nAn fabricație confirmat: {data.get("manufacture_year", "—")}\n'
             f'Lucrări din oferta semnată: {data["work"]}\nSuplimentar: {data["extra"]}\n'
+            'Datele și cerințele clientului trebuie reverificate și confirmate la semnarea comenzii.\n'
             'Nu rezervăm un interval în programator. Dacă totul este corect și accepți crearea comenzii reale de TEST, răspunde exact CONFIRM DATELE. '
             'Pentru corectări răspunde CORECTEAZA.')
 
@@ -198,7 +199,7 @@ async def text(root, sender, body, send, writer):
                 else:
                     data['document_fields_confirmed'] = True
                     save(root, sender, 'requirements', data)
-                    await send(sender, f'Datele talonului sunt confirmate. În oferta semnată avem: {data["work"]}\nCe cerințe mai ai pentru lucrare? Scrie-le aici sau răspunde NU dacă nu ai completări. Le vom trece în comandă pentru verificare, fără acceptarea unor costuri noi.')
+                    await send(sender, f'Datele talonului sunt confirmate. În oferta semnată avem: {data["work"]}\nCe cerințe mai ai pentru lucrare? Scrie-le aici sau răspunde NU dacă nu ai completări. Datele și cerințele vor fi reverificate și confirmate la semnarea comenzii, fără acceptarea unor costuri noi prin acest mesaj.')
         elif stage == 'client':
             if len(body.strip()) < 8 or len(body) > 600:
                 await send(sender, 'Scrie numele beneficiarului și adresa completă de facturare; pentru firmă, denumire și CUI. Nu trimite CNP.')

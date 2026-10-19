@@ -455,6 +455,19 @@ async def pre_reception_pilot(request: Request):
     return await start(DATA_DIR, send_whatsapp_notification, seed)
 
 
+@app.post('/api/dashboard/master/pre-reception/retest')
+async def pre_reception_retest(request: Request):
+    _master_access(request)
+    if not POLICY.robot_enabled:
+        raise HTTPException(status_code=409, detail='STOP SAFE activ.')
+    from pre_reception import restart
+    from dsm_pre_reception import seed
+    try:
+        return await restart(DATA_DIR, send_whatsapp_text, seed)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 async def _pre_reception_write(data, allow_create):
     if not POLICY.robot_enabled:
         raise RuntimeError('STOP SAFE activ.')

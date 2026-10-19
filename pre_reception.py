@@ -23,6 +23,16 @@ def norm(value):
     return ''.join(c for c in unicodedata.normalize('NFKD', value.lower()) if not unicodedata.combining(c)).strip(' .!')
 
 
+def itp_date(value):
+    match = re.fullmatch(r'\s*(\d{2})[./-](\d{2})[./-](\d{4})\s*', value)
+    if not match:
+        return None
+    try:
+        return date(int(match[3]), int(match[2]), int(match[1])).isoformat()
+    except ValueError:
+        return None
+
+
 @contextmanager
 def db(root):
     root = Path(root) / 'pre_reception_private'
@@ -87,7 +97,7 @@ async def start(root, notify, seed):
 def summary(data):
     expired = date.fromisoformat(data['itp']) < date.today()
     return (f'TEST B101TST — verifică datele înainte de crearea comenzii REALE:\nVIN: {data["vin"]}\n'
-            f'ITP până la: {data["itp"]}' + (' — EXPIRAT' if expired else '') + '\n'
+            f'ITP până la: {data["itp"]} (' + ('declarat de client' if data.get('itp_source') == 'client' else 'citit din talon') + ')' + (' — EXPIRAT' if expired else '') + '\n'
             + (f'Înmatriculare în fotografia veche: {data["photo_registration"]}; înmatricularea curentă din ofertă: {data["registration"]}.\n' if data.get('photo_registration') else '') +
             f'Beneficiar și adresă: {data["client"]}\nTelefon: {data["phone"]}\n'
             f'Lucrări din oferta semnată: {data["work"]}\nSuplimentar: {data["extra"]}\n'
@@ -121,6 +131,15 @@ async def text(root, sender, body, send, writer):
                 await send(sender, 'Pentru testul B101TST răspunde DA sau NU.')
         elif stage == 'document':
             await send(sender, 'Aștept fotografiile talonului B101TST și ale rubricii ITP pentru verificare. Textul nu înlocuiește verificarea documentului în acest test.')
+        elif stage == 'itp':
+            expiry = itp_date(body)
+            if not expiry or not data.get('document_verified'):
+                await send(sender, 'Până la ce dată este valabil ITP-ul? Scrie data expirării în format ZZ.LL.AAAA (nu data efectuării inspecției). Poți trimite și fotografia rubricii ITP.')
+            else:
+                data['itp'] = expiry
+                data['itp_source'] = 'client'
+                save(root, sender, 'client', data)
+                await send(sender, 'Am notat data ITP declarată: ' + body.strip() + '. Scrie numele beneficiarului și adresa completă de facturare (pentru firmă: denumire, CUI și adresă). Nu trimite CNP.')
         elif stage == 'client':
             if len(body.strip()) < 8 or len(body) > 600:
                 await send(sender, 'Scrie numele beneficiarului și adresa completă de facturare; pentru firmă, denumire și CUI. Nu trimite CNP.')
@@ -178,7 +197,7 @@ async def image(root, sender, message, send, download, reader):
         return False
     async with LOCK:
         stage, data = get(root, sender)
-        if stage != 'document':
+        if stage not in {'document', 'itp'}:
             await send(sender, 'Fotografia nu modifică datele deja verificate. Pentru reluarea verificării răspunde CORECTEAZA la confirmarea finală.')
             return True
         media_id = (message.get('image') or {}).get('id')
@@ -229,12 +248,13 @@ async def image(root, sender, message, send, download, reader):
             if data.get('document_verified') and parsed.get('itp_evidence') and re.fullmatch(r'\d{4}-\d{2}-\d{2}', itp):
                 date.fromisoformat(itp)
                 data['itp'] = itp
+                data['itp_source'] = 'document'
             if data.get('document_verified') and data.get('itp'):
                 save(root, sender, 'client', data)
                 await send(sender, 'Am verificat VIN-ul și înmatricularea. Scrie numele beneficiarului și adresa completă de facturare (pentru firmă: denumire, CUI și adresă). Beneficiarul poate fi diferit de proprietarul din talon. Nu trimite CNP.')
             else:
-                save(root, sender, 'document', data)
-                await send(sender, 'Mai am nevoie de ' + ('fotografia clară cu VIN și înmatriculare.' if not data.get('document_verified') else 'fotografia rubricii cu data expirării ITP. Nu folosesc data primei înmatriculări drept ITP.'))
+                save(root, sender, 'itp' if data.get('document_verified') else 'document', data)
+                await send(sender, 'Mai am nevoie de fotografia clară cu VIN și înmatriculare.' if not data.get('document_verified') else 'Am identificat mașina din talon. Până la ce dată este valabil ITP-ul? Scrie data expirării în format ZZ.LL.AAAA sau trimite fotografia rubricii ITP.')
         except Exception:
             await send(sender, 'Nu am putut verifica fotografia. Trimite o imagine mai clară; nu am creat comanda.')
     return True

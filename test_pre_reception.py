@@ -50,7 +50,7 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         read = lambda *_: {'vin': d.VIN, 'registration': d.PLATE}
         download = AsyncMock(return_value=(b'image', 'image/jpeg'))
         await p.image(self.root, sender, {'image': {'id': '1'}}, self.send, download, read)
-        self.assertEqual(p.get(self.root, sender)[0], 'document')
+        self.assertEqual(p.get(self.root, sender)[0], 'itp')
         read = lambda *_: {'itp_expires': '2025-01-01', 'itp_evidence': 'ITP expira 01.01.2025'}
         await p.image(self.root, sender, {'image': {'id': '2'}}, self.send, download, read)
         self.assertEqual(p.get(self.root, sender)[0], 'client')
@@ -64,6 +64,18 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         await p.text(self.root, sender, 'CONFIRM DATELE', self.send, self.writer)
         self.assertEqual(p.get(self.root, sender)[0], 'done')
         self.assertTrue(self.writer.await_args.args[1])
+
+    async def test_itp_by_message_is_declared_and_invalid_dates_rejected(self):
+        sender = p.RECIPIENTS[0]
+        p.save(self.root, sender, 'itp', {**self.seed, 'document_verified': True})
+        await p.text(self.root, sender, '31.02.2024', self.send, self.writer)
+        self.assertEqual(p.get(self.root, sender)[0], 'itp')
+        await p.text(self.root, sender, '01.07.2024', self.send, self.writer)
+        stage, data = p.get(self.root, sender)
+        self.assertEqual(stage, 'client')
+        self.assertEqual(data['itp'], '2024-07-01')
+        self.assertEqual(data['itp_source'], 'client')
+        self.writer.assert_not_awaited()
 
     async def test_same_vin_historic_plate_and_expired_itp_do_not_block(self):
         sender = p.RECIPIENTS[0]

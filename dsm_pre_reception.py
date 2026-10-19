@@ -1,7 +1,8 @@
 """Narrow DSM writer for the explicitly authorised B101TST pilot only."""
 import json
 import re
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from dsm_open_orders_readonly import _evaluate
 from dsm_accepted_offers import eligibility
 
@@ -9,6 +10,7 @@ OFFER = '19527'
 VIN = 'WBA00000000000002'
 PLATE = 'B101TST'
 RETEST_COMMAND = '19529'
+NEW_TEST_MARKER = '[TEST PRE-RECEPTIE B101TST]'
 LEGACY_MARKER = '[ALBATROS PRE-RECEPTIE TEST OFERTA-3415]'
 RECHECK_NOTICE = 'CERINȚELE CLIENTULUI TREBUIE REVERIFICATE ȘI CONFIRMATE ÎMPREUNĂ CU CONSILIERUL LA SEMNAREA COMENZII.'
 
@@ -130,12 +132,14 @@ async def save_vehicle_details(data, head, command_id):
 
 async def call(path, data=None):
     # No arbitrary hosts/routes from messages or OCR.
-    if not re.fullmatch(r'/special/(transaction/(get_transaction/\d+|offer_accepted/19527|update_transaction_details)|car/(get_car|update_car_detail)|contact/(get_client|update_contact_detail))', path):
+    if not re.fullmatch(r'/special/(transaction/(get_transaction/\d+|offer_accepted/19527|update_transaction_details|start_transaction)|car/(get_car|update_car_detail)|contact/(get_client|update_contact_detail))', path):
         raise ValueError('Operație DSM nepermisă în pilot.')
     if path.endswith('/update_car_detail') and (not data or data.get('input') not in {'car_manufacture_year', 'car_itp_expires_date'}):
         raise ValueError('Rubrică mașină nepermisă în pilot.')
     if path.endswith('/update_contact_detail') and (not data or data.get('input') not in {'client_name', 'client_phone', 'client_address_street'}):
         raise ValueError('Rubrică client nepermisă în pilot.')
+    if path.endswith('/start_transaction') and (not data or str(data.get('transaction_type')) != '2' or data.get('transaction_id')):
+        raise ValueError('Doar o comandă nouă de test este permisă.')
     return await _evaluate('''(async()=>{
       if(location.protocol!=='https:'||!['s.servicemanager.q-service.ro','apps.dsmpro.ro','appm.dsmpro.ro'].includes(location.hostname))throw Error('Domeniu DSM nepermis');
       const data=__DATA__; const r=await fetch(__PATH__,{method:data?'POST':'GET',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||''},...(data?{body:new URLSearchParams(data)}:{}),signal:AbortSignal.timeout(12000)});
@@ -166,10 +170,23 @@ def check_retest_order(head):
         raise ValueError('Comanda de test PHDEV-10296 nu mai corespunde sau nu este în lucru.')
 
 
-async def seed(*, retest=False):
+async def seed(*, retest=False, existing_command_id=None):
+    fresh = False
     if retest:
-        p = await call('/special/transaction/get_transaction/' + RETEST_COMMAND)
-        check_retest_order(p.get('transaction') or {})
+        ident = str(existing_command_id or RETEST_COMMAND)
+        if not ident.isdigit():
+            raise ValueError('ID comandă de test nevalid.')
+        p = await call('/special/transaction/get_transaction/' + ident)
+        head = p.get('transaction') or {}
+        if ident == RETEST_COMMAND:
+            if head.get('transaction_head__status') == 'canceled':
+                check_retest_order({**head, 'transaction_head__status': 'working'})
+                fresh = True
+            else:
+                check_retest_order(head)
+        else:
+            check_new_test_head(head, ident, allow_canceled=True)
+            fresh = head.get('transaction_head__status') == 'canceled'
     else:
         p = await source()
         if eligibility(p) != 'accepted':
@@ -200,21 +217,58 @@ async def seed(*, retest=False):
         # The existing command already contains the approved work and recheck
         # notice. Keep those customer requirements separate from intake data.
         data['work'] = str(h.get('transaction_head__description') or '').replace(RECHECK_NOTICE, '').strip()
-        data['retest_command_id'] = RETEST_COMMAND
-        data['retest_command_code'] = 'PHDEV-10296'
+        data['work'] = data['work'].replace(NEW_TEST_MARKER, '').strip()
+        data['retest_run'] = True
+        if fresh:
+            data['new_test_order'] = True
+        else:
+            data['retest_command_id'] = str(h['transaction_head__id'])
+            data['retest_command_code'] = str(h['transaction_head__code'])
+            data['new_test_order'] = ident != RETEST_COMMAND
     return data
 
 
-async def create_or_find(data, allow_create):
+def check_new_test_head(head, ident, *, allow_canceled=False, receipt=False):
+    statuses = {'working', 'canceled'} if allow_canceled else {'working'}
+    if (str(head.get('transaction_head__id')) != str(ident)
+            or str(head.get('transaction_head__type')) != '2'
+            or head.get('transaction_head__status') not in statuses
+            or str(head.get('car_body_series', '')).upper() != VIN
+            or re.sub(r'\W', '', str(head.get('car_auto_number') or '')).upper() != PLATE
+            or (not receipt and NEW_TEST_MARKER not in str(head.get('transaction_head__description') or ''))):
+        raise ValueError('Comanda nu corespunde acestui test B101TST.')
+
+
+async def create_or_find(data, allow_create, *, record_created=None):
     if data.get('vin') != VIN or data.get('registration') != PLATE or not data.get('final_confirmed') or not data.get('document_verified') or not data.get('document_current') or not data.get('document_fields_confirmed'):
         raise ValueError('Datele finale ale pilotului nu sunt confirmate.')
     vehicle_fields(data)  # Validate before creating a real order.
     client_fields(data)
     retest_id = data.get('retest_command_id')
     if retest_id:
-        if str(retest_id) != RETEST_COMMAND:
+        if str(retest_id) != RETEST_COMMAND and not data.get('new_test_order'):
             raise ValueError('Comandă nepermisă pentru reluarea testului.')
-        command_id = RETEST_COMMAND
+        command_id = str(retest_id)
+    elif data.get('new_test_order'):
+        command_id = str(data.get('_created_command_id') or '')
+        if not command_id:
+            if not allow_create or record_created is None:
+                raise ValueError('Crearea este incertă; nu se repetă automat.')
+            previous = await call('/special/transaction/get_transaction/' + RETEST_COMMAND)
+            previous_head = previous.get('transaction') or {}
+            check_retest_order({**previous_head, 'transaction_head__status': 'working'})
+            if previous_head.get('transaction_head__status') != 'canceled':
+                raise ValueError('Comanda anterioară nu mai este anulată; verificare necesară.')
+            moment = datetime.now(ZoneInfo('Europe/Bucharest')).strftime('%Y-%m-%d %H:%M')
+            result = await call('/special/transaction/start_transaction', {
+                'contact_id': str(previous_head['contact_id']), 'car_id': str(previous_head['car_id']),
+                'transaction_type': '2', 'change_insurance': '0', 'reset_client': '0', 'reset_car': '0',
+                'recalculate_row': '0', 'reset_center': '0', 'transaction_start': moment,
+                'transaction_duration': '0:00', 'transaction_agreed_period': moment})
+            command_id = str(result.get('transaction_id') or '')
+            if not command_id.isdigit() or command_id in {OFFER, '19528', RETEST_COMMAND}:
+                raise ValueError('DSM nu a confirmat o comandă nouă; nu repet crearea.')
+            record_created(command_id)
     else:
         p = await source()
         ids = children(p)
@@ -232,7 +286,9 @@ async def create_or_find(data, allow_create):
                 raise ValueError('DSM nu a confirmat ID-ul comenzii; nu repet automat crearea.')
     order = await call('/special/transaction/get_transaction/' + command_id)
     h = order.get('transaction') or {}
-    if retest_id:
+    if data.get('new_test_order'):
+        check_new_test_head(h, command_id, receipt=not retest_id)
+    elif retest_id:
         check_retest_order(h)
     elif str(h.get('transaction_head__type')) != '2' or str(h.get('car_body_series', '')).upper() != VIN or str(h.get('transaction_head__parent')) != OFFER:
         raise ValueError('Verificarea comenzii DSM a eșuat; nu se creează alta.')
@@ -240,6 +296,8 @@ async def create_or_find(data, allow_create):
     await save_client_details(data, h, command_id)
     description = str(h.get('transaction_head__description') or '')
     desired = requirements_description(data, description)
+    if data.get('new_test_order') and NEW_TEST_MARKER not in desired:
+        desired += '\n' + NEW_TEST_MARKER
     if description != desired:
         result = await call('/special/transaction/update_transaction_details', {'transaction_id': command_id, 'car_id': str(h['car_id']), 'transaction_head__description': desired})
         if str(result.get('status')) not in {'1', 'True', 'true'}:

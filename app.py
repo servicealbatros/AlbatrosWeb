@@ -472,7 +472,12 @@ async def _pre_reception_write(data, allow_create):
     if not POLICY.robot_enabled:
         raise RuntimeError('STOP SAFE activ.')
     from dsm_pre_reception import create_or_find
-    return await create_or_find(data, allow_create)
+    def record_created(command_id):
+        from pre_reception import db
+        with db(DATA_DIR) as conn:
+            conn.execute('UPDATE orders SET result=? WHERE offer=? AND state=?',
+                         (json.dumps({'id': command_id}), data['offer_id'], 'creating'))
+    return await create_or_find(data, allow_create, record_created=record_created)
 
 
 @app.get('/api/dashboard/master/status')

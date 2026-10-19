@@ -1,7 +1,7 @@
 import asyncio
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from pathlib import Path
 import pre_reception as p
 import dsm_pre_reception as d
@@ -228,6 +228,36 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WriterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_canceled_retest_seeds_new_run_without_writes(self):
+        head = {'transaction_head__id': d.RETEST_COMMAND, 'transaction_head__code': 'PHDEV-10296', 'transaction_head__status': 'canceled', 'transaction_head__type': '2', 'car_body_series': d.VIN, 'car_auto_number': d.PLATE, 'car_id': '10', 'contact_id': '22', 'transaction_head__description': 'Încărcare freon'}
+        call = AsyncMock(side_effect=[{'transaction': head}, {'contact_name': 'Client Test'}, {'car_body_series': d.VIN}])
+        with patch.object(d, 'call', call):
+            data = await d.seed(retest=True)
+        self.assertTrue(data['new_test_order'])
+        self.assertNotIn('retest_command_id', data)
+        self.assertEqual(data['work'], 'Încărcare freon')
+        self.assertTrue(all('/get_' in c.args[0] for c in call.await_args_list))
+
+    async def test_new_order_only_after_confirmation_and_durable_receipt(self):
+        data = {'vin': d.VIN, 'registration': d.PLATE, 'final_confirmed': True, 'document_verified': True, 'document_current': True, 'document_fields_confirmed': True, 'client_name': 'Client Test', 'client_address': 'Blejoi, Prahova, România', 'phone': p.RECIPIENTS[0], 'itp': '2028-12-10', 'itp_source': 'client', 'new_test_order': True, 'work': 'Încărcare freon', 'extra': 'Nu'}
+        old = {'transaction_head__id': d.RETEST_COMMAND, 'transaction_head__code': 'PHDEV-10296', 'transaction_head__status': 'canceled', 'transaction_head__type': '2', 'car_body_series': d.VIN, 'car_auto_number': d.PLATE, 'car_id': '10', 'contact_id': '22'}
+        new = {**old, 'transaction_head__id': '20001', 'transaction_head__code': 'PHDEV-TEST', 'transaction_head__status': 'working', 'transaction_head__description': ''}
+        desired = d.requirements_description(data) + '\n' + d.NEW_TEST_MARKER
+        call = AsyncMock(side_effect=[{'transaction': old}, {'transaction_id': '20001'}, {'transaction': new}, {'status': 1}, {'transaction': {**new, 'transaction_head__description': desired}}])
+        receipt = Mock()
+        with patch.object(d, 'call', call), patch.object(d, 'save_vehicle_details', AsyncMock()), patch.object(d, 'save_client_details', AsyncMock()):
+            result = await d.create_or_find(data, True, record_created=receipt)
+        receipt.assert_called_once_with('20001')
+        self.assertEqual(result['id'], '20001')
+        self.assertEqual(call.await_args_list[1].args[0], '/special/transaction/start_transaction')
+        self.assertEqual(call.await_args_list[1].args[1]['transaction_type'], '2')
+        self.assertIn(d.NEW_TEST_MARKER, call.await_args_list[3].args[1]['transaction_head__description'])
+        blocked = AsyncMock()
+        with patch.object(d, 'call', blocked):
+            with self.assertRaises(ValueError):
+                await d.create_or_find(data, False, record_created=receipt)
+        blocked.assert_not_awaited()
+
     async def test_retest_updates_existing_command_and_returns_verified_itp(self):
         data = {'vin': d.VIN, 'registration': d.PLATE, 'final_confirmed': True, 'document_verified': True, 'document_current': True, 'document_fields_confirmed': True, 'client_name': 'Client Test', 'client_address': 'Blejoi, Prahova, România', 'phone': p.RECIPIENTS[0], 'itp': '2028-12-10', 'itp_source': 'client', 'retest_command_id': d.RETEST_COMMAND, 'work': 'Încărcare freon', 'extra': 'Nu'}
         head = {'transaction_head__id': d.RETEST_COMMAND, 'transaction_head__code': 'PHDEV-10296', 'transaction_head__status': 'working', 'transaction_head__type': '2', 'car_body_series': d.VIN, 'car_auto_number': d.PLATE, 'car_id': '10', 'contact_id': '22', 'transaction_head__description': d.requirements_description(data)}

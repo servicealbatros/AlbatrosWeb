@@ -134,13 +134,15 @@ async def restart(root, send, seed):
     """Replay only this pilot against its verified existing command."""
     async with LOCK:
         existing = [get(root, target) for target in RECIPIENTS]
-        active = [case for case in existing if case and case[1].get('retest_command_id')
+        active = [case for case in existing if case and (case[1].get('retest_command_id') or case[1].get('retest_run'))
                   and case[0] not in {'done', 'stopped', 'invite_failed'}]
         if active:
             return status(root)  # A repeated click cannot reset replies or resend.
-        data = await seed(retest=True)
-        if not data.get('retest_command_id'):
+        prior_new = next((case[1].get('order', {}).get('id') for case in existing if case and case[1].get('new_test_order') and case[1].get('order', {}).get('id')), None)
+        data = await seed(retest=True, existing_command_id=prior_new) if prior_new else await seed(retest=True)
+        if not data.get('retest_command_id') and not data.get('new_test_order'):
             raise ValueError('Reluarea testului necesită o comandă verificată.')
+        data['retest_run'] = True
         with db(root) as conn:
             backup_path = Path(root) / 'pre_reception_private' / ('before-retest-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.sqlite3')
             with closing(sqlite3.connect(backup_path)) as backup:
@@ -292,7 +294,7 @@ async def text(root, sender, body, send, writer):
             else:
                 data['extra'] = 'Nu' if value == 'nu' else body.strip()
                 await request_missing_client(root, sender, data, send)
-        elif stage in {'confirm', 'review'}:
+        elif stage in {'confirm', 'review', 'creating'}:
             if value == 'corecteaza client':
                 data.pop('final_confirmed', None)
                 data['editing_client'] = True
@@ -315,6 +317,8 @@ async def text(root, sender, body, send, writer):
                     allow_create = conn.execute('SELECT changes()').fetchone()[0] == 1
                     prior = conn.execute('SELECT state,result FROM orders WHERE offer=?', (data['offer_id'],)).fetchone()
                 try:
+                    if prior['state'] != 'done' and prior['result']:
+                        data['_created_command_id'] = json.loads(prior['result']).get('id')
                     result = json.loads(prior['result']) if prior['state'] == 'done' else await writer(data, allow_create)
                     if result.get('itp') and result['itp'] != data['itp']:
                         raise ValueError('Un alt participant a confirmat deja o dată ITP diferită; verificare consilier necesară.')

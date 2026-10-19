@@ -39,6 +39,9 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         reader = lambda *_: {'vin': 'WBA00000000000003', 'registration': d.PLATE, 'itp_expires': '2028-12-01', 'itp_evidence': 'ITP'}
         await p.image(self.root, sender, {'image': {'id': '1'}}, self.send, AsyncMock(return_value=(b'image', 'image/jpeg')), reader)
         self.assertEqual(p.get(self.root, sender)[0], 'document')
+        self.assertEqual(len(list((self.root / 'pre_reception_private' / 'documents').glob('*.img'))), 1)
+        self.assertIn('VIN citit:', self.send.await_args.args[1])
+        self.assertIn('WBA00000000000003', self.send.await_args.args[1])
         self.writer.assert_not_awaited()
 
     async def test_front_then_itp_and_final_gate(self):

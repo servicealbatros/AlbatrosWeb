@@ -189,12 +189,32 @@ async def image(root, sender, message, send, download, reader):
             content, mime = await download(media_id)
             if mime not in {'image/jpeg', 'image/png', 'image/webp'} or len(content) > 15000000:
                 raise ValueError('Tip sau dimensiune imagine neacceptată')
+            # Preserve the received document before OCR, including rejected reads,
+            # so an adviser can distinguish a wrong photo from an OCR mistake.
+            directory = Path(root) / 'pre_reception_private' / 'documents'
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            destination = directory / (hashlib.sha256((phone(sender) + media_id).encode()).hexdigest() + '.img')
+            destination.write_bytes(content)
+            os.chmod(destination, 0o600)
             parsed = await asyncio.to_thread(reader, content, mime)
             vin = re.sub(r'\W', '', str(parsed.get('vin') or '')).upper()
             plate = re.sub(r'\W', '', str(parsed.get('registration') or '')).upper()
-            if (vin and vin != data['vin']) or (plate and plate != data['registration']):
-                await send(sender, 'Datele din fotografie diferă de B101TST. Nu deschid comanda. Verifică fotografia sau contactează consilierul.')
+            evidence = {'sender': phone(sender), 'image': str(destination), 'mime': mime,
+                        'parsed': parsed, 'received': datetime.now(timezone.utc).isoformat()}
+            evidence_path = destination.with_suffix('.json')
+            evidence_path.write_text(json.dumps(evidence, ensure_ascii=False), encoding='utf-8')
+            os.chmod(evidence_path, 0o600)
+            differences = []
+            if vin and vin != data['vin']:
+                differences.append(f'VIN citit: {vin}; VIN din oferta semnată: {data["vin"]}')
+            if plate and plate != data['registration']:
+                differences.append(f'înmatriculare citită: {plate}; în oferta semnată: {data["registration"]}')
+            if differences:
+                data['document_difference'] = differences
+                save(root, sender, 'document', data)
+                await send(sender, 'Verificarea fotografiei a găsit: ' + '; '.join(differences) + '. Poate fi o eroare de citire. Vechimea pozei nu este motivul blocării. Trimite o fotografie mai clară pentru verificare; nu deschid încă o comandă.')
                 return True
+            data.pop('document_difference', None)
             if vin == data['vin'] and plate == data['registration']:
                 data['document_verified'] = True
             # A reverse-side photo without identity is accepted only after matching front.
@@ -202,11 +222,6 @@ async def image(root, sender, message, send, download, reader):
             if data.get('document_verified') and parsed.get('itp_evidence') and re.fullmatch(r'\d{4}-\d{2}-\d{2}', itp):
                 date.fromisoformat(itp)
                 data['itp'] = itp
-            directory = Path(root) / 'pre_reception_private' / 'documents'
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            destination = directory / (hashlib.sha256((phone(sender) + media_id).encode()).hexdigest() + '.img')
-            destination.write_bytes(content)
-            os.chmod(destination, 0o600)
             if data.get('document_verified') and data.get('itp'):
                 save(root, sender, 'client', data)
                 await send(sender, 'Am verificat VIN-ul și înmatricularea. Scrie numele beneficiarului și adresa completă de facturare (pentru firmă: denumire, CUI și adresă). Beneficiarul poate fi diferit de proprietarul din talon. Nu trimite CNP.')

@@ -56,7 +56,7 @@ async def request_document(root, sender, data, send):
                 'photo_registration', 'document_difference'):
         data.pop(key, None)
     save(root, sender, 'document', data)
-    await send(sender, f'Pentru actualizarea datelor înainte de primirea în service, trimite, te rog, fotografii clare ale talonului {data["registration"]}, inclusiv partea cu VIN și rubrica cu valabilitatea ITP. Solicităm talonul la fiecare recepție, chiar dacă mașina este deja înregistrată. Nu este nevoie de CNP.')
+    await send(sender, f'Vă rugăm să ne trimiteți o fotografie clară a talonului mașinii {data["registration"]}, pentru a ne ajuta să actualizăm datele și să scurtăm timpul de așteptare la intrarea mașinii în service. Vă rugăm să includeți seria de șasiu (VIN) și rubrica privind valabilitatea ITP. Dacă sunt pe fețe diferite, trimiteți fotografii cu ambele fețe. Nu este nevoie de CNP.')
 
 
 def document_year_question(data):
@@ -208,7 +208,7 @@ async def text(root, sender, body, send, writer):
             else:
                 await send(sender, 'Pentru testul B101TST răspunde DA sau NU.')
         elif stage == 'document':
-            await send(sender, 'Aștept fotografiile talonului B101TST și ale rubricii ITP pentru verificare. Textul nu înlocuiește verificarea documentului în acest test.')
+            await send(sender, f'Vă rugăm să ne trimiteți fotografiile clare ale talonului mașinii {data["registration"]}, inclusiv seria de șasiu (VIN) și rubrica privind valabilitatea ITP, pentru actualizarea datelor și scurtarea timpului de așteptare la intrarea în service.')
         elif stage == 'document_check':
             if value in {'da', 'confirm talonul'} and data.get('owner_name'):
                 valid = True

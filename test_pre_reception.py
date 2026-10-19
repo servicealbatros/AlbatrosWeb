@@ -62,8 +62,8 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data['previous_dsm']['car_itp_expires_date'], '2026-12-10')
                 for field in ('document_verified', 'document_current', 'itp', 'itp_confirmed', 'document_fields_confirmed', 'final_confirmed'):
                     self.assertNotIn(field, data)
-                self.assertIn('Pentru actualizarea datelor', self.send.await_args.args[1])
-                self.assertIn('la fiecare recepție', self.send.await_args.args[1])
+                self.assertIn('să actualizăm datele', self.send.await_args.args[1])
+                self.assertIn('să scurtăm timpul de așteptare', self.send.await_args.args[1])
         self.writer.assert_not_awaited()
 
     async def test_front_photo_does_not_reuse_previous_itp(self):

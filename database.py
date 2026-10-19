@@ -199,10 +199,14 @@ def create_request(data):
     print(f"ALBATROS MANUAL MODE - CERERE SALVATA #{request_id}; robotul NU a pornit automat.")
     return request_id
 
-def list_requests(limit=50):
+def list_requests(limit=50, include_dsm_accepted=False):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory=sqlite3.Row
-        return [dict(r) for r in conn.execute("SELECT * FROM service_requests ORDER BY id DESC LIMIT ?",(limit,)).fetchall()]
+        if include_dsm_accepted:
+            rows = conn.execute("SELECT * FROM service_requests WHERE source='dsm_accepted_offer' OR id IN (SELECT id FROM service_requests ORDER BY id DESC LIMIT ?) ORDER BY id DESC", (limit,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM service_requests ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
 def save_labour_time(data):
     with sqlite3.connect(DB_PATH) as conn:

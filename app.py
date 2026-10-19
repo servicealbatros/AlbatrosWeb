@@ -449,7 +449,8 @@ def master_status(request: Request):
         dsm_session = json.loads(session_path.read_text()) if session_path.exists() else {}
     except (OSError, ValueError):
         dsm_session = {}
-    return {'robot_enabled': POLICY.robot_enabled, 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
+    from dsm_accepted_offers import state as accepted_offer_state
+    return {'robot_enabled': POLICY.robot_enabled, 'dsm_accepted_offers': accepted_offer_state(DATA_DIR), 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
             'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR), 'dsm_session': dsm_session,
             'mechanic_send': _mechanic_send_readiness(),
             'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True)}
@@ -519,11 +520,18 @@ def master_provider_login(request: Request):
     return {'url': origin + '/provider-auth#' + token, 'expires_in': 120}
 
 
-@app.get('/api/dashboard/master/dsm-accepted-offers/inspect')
-async def inspect_dsm_accepted_offers(request: Request):
+@app.get('/api/dashboard/master/dsm-accepted-offers')
+def dsm_accepted_offers_status(request: Request):
     _master_access(request)
-    from dsm_accepted_offers import inspect_acceptance
-    return await inspect_acceptance()
+    from dsm_accepted_offers import state
+    return state(DATA_DIR)
+
+
+@app.post('/api/dashboard/master/dsm-accepted-offers/sync')
+async def sync_dsm_accepted_offers(request: Request):
+    _master_access(request)
+    from dsm_accepted_offers import synchronize
+    return await synchronize(DB_PATH, DATA_DIR)
 
 
 @app.get('/api/dashboard/master/provider-tabs')
@@ -2885,11 +2893,19 @@ async def startup():
     app.state.robot_reaper_task = asyncio.create_task(_robot_reaper_loop())
     app.state.delay_notification_task = asyncio.create_task(_delay_notification_loop())
     app.state.dsm_schedule_automation_task = asyncio.create_task(_dsm_schedule_automation_loop())
+    app.state.dsm_accepted_offers_task = asyncio.create_task(_dsm_accepted_offers_loop())
     app.state.mechanic_schedule_automation_task = asyncio.create_task(_mechanic_schedule_automation_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    accepted_task = getattr(app.state, 'dsm_accepted_offers_task', None)
+    if accepted_task:
+        accepted_task.cancel()
+        try:
+            await accepted_task
+        except asyncio.CancelledError:
+            pass
     for task in list(globals().get("_whatsapp_processing_tasks", set())):
         task.cancel()
     buffered = list(globals().get("_buffer_task_by_sender", {}).values())
@@ -3294,7 +3310,7 @@ def debug_latest_requests():
 
 @app.get("/api/requests")
 def requests():
-    rows = list_requests()
+    rows = list_requests(include_dsm_accepted=True)
     archived_ids = _archive_ids()
     rows = [row for row in rows if int(row["id"]) not in archived_ids]
 
@@ -3310,8 +3326,8 @@ def requests():
         # A scheduler appointment writes ``programat`` transactionally in the
         # database. That authoritative state must repair an older dashboard
         # map entry such as ``ofertat`` left by the offer workflow.
-        if database_status == "programat":
-            status = "programat"
+        if database_status == "programat" or item.get('source') == 'dsm_accepted_offer':
+            status = database_status
             if req_id and REQUEST_STATUS.get(int(req_id)) != status:
                 REQUEST_STATUS[int(req_id)] = status
                 status_map_changed = True
@@ -3323,6 +3339,10 @@ def requests():
             status = "nou"
 
         item["desktop_status"] = status
+        if item.get('source') == 'dsm_accepted_offer':
+            from dsm_accepted_offers import offer_record
+            imported_offer = offer_record(DB_PATH, req_id)
+            item['dsm_offer_code'] = imported_offer['document_code'] if imported_offer else ''
         item["request_datetime"] = (
             item.get("created_at")
             or item.get("created")
@@ -5934,6 +5954,12 @@ def request_unified_offer_page(request_id: int):
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost găsită.")
 
+    if request_row.get('source') == 'dsm_accepted_offer':
+        from dsm_accepted_offers import offer_record, offer_html
+        imported_offer = offer_record(DB_PATH, request_id)
+        if imported_offer:
+            return offer_html(imported_offer, request_row)
+
     offer = _load_request_offer_result(request_id)
     products = offer.get("products") or []
     selections = _load_offer_selections()
@@ -7617,6 +7643,20 @@ def _configured_clock(name: str, default: str) -> tuple[int, int]:
         return tuple(int(part) for part in default.split(":", 1))
 
 
+async def _dsm_accepted_offers_loop():
+    from dsm_accepted_offers import state, due, synchronize, ROMANIA
+    await asyncio.sleep(30)
+    while True:
+        try:
+            if POLICY.robot_enabled and due(state(DATA_DIR), datetime.now(ROMANIA)):
+                await synchronize(DB_PATH, DATA_DIR)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
 async def _dsm_schedule_automation_loop() -> None:
     """Import the rolling week periodically, independently of WhatsApp sending."""
     from schedule_import_control import read_state, write_state, finish_import
@@ -8705,7 +8745,7 @@ def requests_dashboard():
             <div class="value" id="offeredCount">0</div>
         </div>
         <div class="stat stat-clickable" onclick="setStatusFilter('acceptat')">
-            <div class="label">Acceptat / de programat</div>
+            <div class="label">Acceptate — în așteptarea programării</div>
             <div class="value" id="acceptedCount">0</div>
         </div>
     </div>
@@ -8722,7 +8762,7 @@ def requests_dashboard():
         <button class="status-filter" data-status-filter="" onclick="setStatusFilter('')" style="background:#111827;color:#fff;">Toate</button>
         <button class="status-filter" data-status-filter="nou" onclick="setStatusFilter('nou')" style="background:#f3f4f6;color:#111827;">Nou</button>
         <button class="status-filter" data-status-filter="ofertat" onclick="setStatusFilter('ofertat')" style="background:#93c5fd;color:#111827;">Ofertat</button>
-        <button class="status-filter" data-status-filter="acceptat" onclick="setStatusFilter('acceptat')" style="background:#fed7aa;color:#111827;">Acceptat / de programat</button>
+        <button class="status-filter" data-status-filter="acceptat" onclick="setStatusFilter('acceptat')" style="background:#fed7aa;color:#111827;">Acceptate — în așteptarea programării</button>
         <button class="status-filter" data-status-filter="programat" onclick="setStatusFilter('programat')" style="background:#86efac;color:#111827;">Programat</button>
         <button class="status-filter" data-status-filter="urgent" onclick="setStatusFilter('urgent')" style="background:#ff4d4f;color:#fff;">Urgent</button>
     </div>
@@ -8918,7 +8958,7 @@ function statusLabel(status) {
         "urgent": "Urgent",
         "asteptare": "În așteptare accept",
         "ofertat": "Ofertat",
-        "acceptat": "Acceptat / de programat",
+        "acceptat": "Acceptate — în așteptarea programării",
         "programat": "Programat",
         "rezolvat": "Rezolvat",
     };
@@ -9297,7 +9337,7 @@ function render() {
             }
         });
         tr.innerHTML = `
-            <td class="id">#${esc(id)}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
+            <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
             <td style="white-space:nowrap">${esc(formatRequestDate(row))}</td>
             <td>${esc(customer || "—")}</td>
             <td>${esc(phone || "—")}</td>
@@ -12008,7 +12048,7 @@ async def _route_buffered_message(
         await send_whatsapp_text(
             sender,
             "Mulțumesc, am înregistrat acceptul pentru oferta curentă. "
-            "Cererea a fost trecută în starea «Acceptat / de programat». "
+            "Cererea a fost trecută în starea «Acceptate — în așteptarea programării». "
             "Verificăm programatorul service-ului și vă comunicăm noi primul interval disponibil."
         )
         return
@@ -12034,7 +12074,7 @@ async def _route_buffered_message(
         await send_whatsapp_text(
             sender,
             "Mulțumesc, am înregistrat acceptul pentru oferta curentă. "
-            "Cererea a fost trecută în starea «Acceptat / de programat». "
+            "Cererea a fost trecută în starea «Acceptate — în așteptarea programării». "
             "Verificăm disponibilitatea service-ului și revenim cu primul interval disponibil."
         )
         return
@@ -12068,7 +12108,7 @@ async def _route_buffered_message(
 
         await send_whatsapp_text(
             sender,
-            "Cererea rămâne «Acceptat / de programat». "
+            "Cererea rămâne «Acceptate — în așteptarea programării». "
             "Verificăm programatorul service-ului și vă comunicăm noi primul interval disponibil."
         )
         return
@@ -12084,7 +12124,7 @@ async def _route_buffered_message(
             await send_whatsapp_text(
                 sender,
                 "Mulțumesc, am înregistrat acceptul pentru oferta curentă. "
-                "Cererea existentă a fost trecută în starea «Acceptat / de programat». "
+                "Cererea existentă a fost trecută în starea «Acceptate — în așteptarea programării». "
                 "Verificăm disponibilitatea service-ului și revenim cu primul interval disponibil."
             )
             return

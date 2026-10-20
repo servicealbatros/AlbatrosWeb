@@ -10938,6 +10938,8 @@ WORK_REQUEST_PATTERN = re.compile(
     r"constata|tronc|ambreiaj|distribu|itp|diagno|parbriz|anvelop|ro[țt]i|"
     r"pivot|cap(?:at)?\s+(?:de\s+)?bar[aă]|bielet|bilet(?:e)?\s+bar[aă]|"
     r"bar[aă]\s+stabiliz|buc[șs]|bascul|amortiz|arc|planetar|cardan|"
+    r"vops|revops|tinich|[iî]ndrept|retu[șs]|[șs]lefui|polish|polis|"
+    r"repar(?:at|a[țt]ie|are)?.*(?:bar[aă]|arip|portier|capot|prag|caroser)|"
     r"curea\s+(?:de\s+)?accesor|reglaj\s+(?:de\s+)?direc|geometr",
     re.IGNORECASE,
 )
@@ -11333,7 +11335,8 @@ async def _route_new_vehicle_intake(sender: str, body: str) -> bool:
             if line.strip() and not _looks_like_greeting_only(line.strip())
         ]
         symptom = " ".join(symptom_lines).strip() or body.strip()
-        category = "ÎNTREȚINERE" if re.search(r"revizie|filtr|ulei", _normalize_text(symptom)) else "MECANICĂ"
+        category = ("TINICHIGERIE–VOPSITORIE" if scheduler_department_for_operations(symptom) == 'tinichigerie_vopsitorie'
+                    else "ÎNTREȚINERE" if re.search(r"revizie|filtr|ulei", _normalize_text(symptom)) else "MECANICĂ")
         request_id = create_request({
             "session_id": case_id,
             "conversation_id": case_id,

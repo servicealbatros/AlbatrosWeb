@@ -46,13 +46,48 @@ def acceptance_datetime(payload):
     return dates.pop() if len(dates) == 1 else ''
 
 
+def offer_validity(record, now=None):
+    now = (now or datetime.now(ROMANIA)).astimezone(ROMANIA)
+    detail = json.loads(record['payload_json']) if record else {}
+    accepted = detail.get('accepted_at') or ''
+    unknown = {'offer_validity': 'unknown', 'offer_expires_at': '',
+               'offer_validity_message': 'Data acceptării trebuie verificată în DSM; valabilitatea de 10 zile nu poate fi confirmată.'}
+    if not isinstance(accepted, str) or not accepted:
+        return unknown
+    try:
+        parsed = datetime.fromisoformat(accepted.replace('Z', '+00:00'))
+        parsed = parsed.replace(tzinfo=ROMANIA) if parsed.tzinfo is None else parsed.astimezone(ROMANIA)
+    except (ValueError, TypeError):
+        return unknown
+    if parsed > now:
+        return unknown
+    expiry = parsed + timedelta(days=10)
+    date_only = len(accepted) == 10
+    expired = now.date() > expiry.date() if date_only else now >= expiry
+    return {'offer_validity': 'expired' if expired else 'valid',
+            'offer_expires_at': expiry.date().isoformat() if date_only else expiry.isoformat(),
+            'offer_validity_message': ('Ofertă expirată — trebuie actualizată înainte de programare.' if expired
+                                       else 'Valabilă până la ' + expiry.strftime('%d.%m.%Y' if date_only else '%d.%m.%Y %H:%M'))}
+
+
+def require_valid_for_booking(db_path, request_row, now=None):
+    if not request_row or request_row.get('source') != 'dsm_accepted_offer':
+        return
+    record = offer_record(db_path, request_row['id'])
+    if not has_signed_dashboard_offer(db_path, request_row):
+        raise ValueError('Semnătura ofertei DSM nu mai este confirmată pentru programare.')
+    validity = offer_validity(record, now)
+    if validity['offer_validity'] != 'valid':
+        raise ValueError(validity['offer_validity_message'])
+
+
 def dashboard_dates(record):
     """Keep the technical import time separate from the business event."""
     detail = json.loads(record['payload_json']) if record else {}
     accepted = detail.get('accepted_at') or ''
     return {'accepted_at': accepted, 'request_datetime': accepted,
             'request_date_kind': 'accepted',
-            'request_date_missing': not bool(accepted)}
+            'request_date_missing': not bool(accepted), **offer_validity(record)}
 
 
 def signature_status(payload):
@@ -368,6 +403,7 @@ async def rebuild_signed_offers(db_path, root, **options):
 
 def offer_html(record, request_row):
     detail = json.loads(record['payload_json'])
+    validity = offer_validity(record)
     escape = lambda x: html.escape(str('—' if x is None or x == '' else x))
     signed_label = 'Ofertă semnată în DSM' if record['signature_state'] in {'signed', 'complete', 'completed'} else 'Semnătura ofertei nu mai este confirmată în DSM'
     rows = []
@@ -380,6 +416,7 @@ def offer_html(record, request_row):
     <h1>{escape(record['document_code'])} · {escape(detail.get('registration'))}</h1>
     <div class="badge">{escape(signed_label)} · {escape('Acceptată — în așteptarea programării' if request_row.get('status') == 'acceptat' else request_row.get('status'))}</div>
     <p>Data acceptării: {escape(detail.get('accepted_at') or 'indisponibilă în DSM')}</p>
+    <p><strong>{escape(validity['offer_validity_message'])}</strong></p>
     <h2>{escape(detail.get('vehicle'))}</h2><p>{escape(detail.get('customer_name'))} · {escape(detail.get('customer_phone'))}\nVIN: {escape(detail.get('vin'))}</p>
     <p>{escape(detail.get('description'))}</p><div class="scroll"><table><thead><tr><th>Tip</th><th>Cod</th><th>Lucrare / piesă</th><th>Cantitate / ore</th><th>Preț unitar DSM (RON, cu TVA)</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
     <p>Oferta acceptată este preluată din DSM. Prețurile sunt cele citite din ofertă; nu sunt recalculate din catalog. Ultima sincronizare: {escape(record['updated_at'])}</p></main></html>'''

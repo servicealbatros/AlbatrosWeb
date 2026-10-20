@@ -3776,6 +3776,13 @@ def set_request_status(
         if not has_signed_dashboard_offer(DB_PATH, request_row):
             raise HTTPException(status_code=409, detail='Verifică și aprobă oferta, timpii și manopera înainte de acceptare sau programare.')
 
+    if status in {'acceptat', 'programat'} and not (status == 'programat' and request_row.get('status') == 'programat'):
+        from dsm_accepted_offers import require_valid_for_booking
+        try:
+            require_valid_for_booking(DB_PATH, request_row)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     _persist_request_status(request_id, status)
     if status == 'rezolvat':
         with sqlite3.connect(DB_PATH) as conn:
@@ -9420,7 +9427,7 @@ function render() {
         });
         tr.innerHTML = `
             <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
-            <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}</td>
+            <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}${row.source === 'dsm_accepted_offer' ? `<br><strong style="color:${row.offer_validity === 'expired' ? '#b91c1c' : row.offer_validity === 'valid' ? '#166534' : '#92400e'}">${esc(row.offer_validity_message || 'Valabilitate de verificat')}</strong>` : ''}</td>
             <td>${esc(customer || "—")}</td>
             <td>${esc(phone || "—")}</td>
             <td>${esc(vehicle || "—")}</td>

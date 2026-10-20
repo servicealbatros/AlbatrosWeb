@@ -2,7 +2,7 @@ import asyncio
 import ast
 from contextlib import closing
 import gc
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
@@ -44,7 +44,8 @@ class SignedOfferTests(unittest.TestCase):
   exec(compile(ast.fix_missing_locations(ast.Module(body=[future,*nodes],type_ignores=[])),'app.py','exec'),env)
   return env
  def test_signed_dsm_offer_can_be_marked_programmed_without_local_draft(self):
-  ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  data=item();data['detail']['accepted_at']=datetime.now(sync.ROMANIA).isoformat()
+  ident=sync.apply_snapshot(self.db,[data])['request_ids'][0]
   env=self.status_endpoint()
   result=env['set_request_status'](ident,SimpleNamespace(status='programat'),object(),'update-request-status')
   self.assertEqual(result,{'request_id':ident,'status':'programat'})
@@ -53,6 +54,41 @@ class SignedOfferTests(unittest.TestCase):
   with sync.connection(self.db) as conn:
    self.assertEqual(conn.execute('SELECT status FROM service_requests WHERE id=?',(ident,)).fetchone()[0],'programat')
    self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_appointments').fetchone()[0],0)
+ def test_ten_day_limit_unknown_future_and_calendar_dates(self):
+  now=datetime(2026,10,20,12,0,tzinfo=sync.ROMANIA)
+  def record(value):return {'payload_json':json.dumps({'accepted_at':value})}
+  self.assertEqual(sync.offer_validity(record('2026-10-10T12:00:01+03:00'),now)['offer_validity'],'valid')
+  self.assertEqual(sync.offer_validity(record('2026-10-10T12:00:00+03:00'),now)['offer_validity'],'expired')
+  self.assertEqual(sync.offer_validity(record('2026-10-10'),now)['offer_validity'],'valid')
+  self.assertEqual(sync.offer_validity(record('2026-10-09'),now)['offer_validity'],'expired')
+  for value in ('','not-a-date','2026-11-01',None):
+   self.assertEqual(sync.offer_validity(record(value),now)['offer_validity'],'unknown')
+ def test_expired_or_unknown_dsm_offer_cannot_be_marked_programmed_even_with_local_approval(self):
+  env=self.status_endpoint();env['_request_has_approved_offer'].return_value=True
+  for stamp in ('',(datetime.now(sync.ROMANIA)-timedelta(days=11)).isoformat()):
+   data=item();data['detail']['accepted_at']=stamp
+   ident=sync.apply_snapshot(self.db,[data])['request_ids'][0]
+   with self.subTest(stamp=stamp),self.assertRaises(HTTPException) as caught:
+    env['set_request_status'](ident,SimpleNamespace(status='programat'),object())
+   self.assertEqual(caught.exception.status_code,409)
+   self.assertIn('10 zile' if not stamp else 'expirată',caught.exception.detail)
+  env['save_request_status'].assert_not_called()
+ def test_expiry_does_not_cancel_existing_booking(self):
+  data=item();data['detail']['accepted_at']=(datetime.now(sync.ROMANIA)-timedelta(days=11)).isoformat()
+  ident=sync.apply_snapshot(self.db,[data])['request_ids'][0]
+  with sync.connection(self.db) as conn:conn.execute("UPDATE service_requests SET status='programat' WHERE id=?",(ident,))
+  env=self.status_endpoint()
+  self.assertEqual(env['set_request_status'](ident,SimpleNamespace(status='programat'),object())['status'],'programat')
+ def test_scheduler_blocks_invalid_offer_in_all_new_booking_paths(self):
+  import scheduler
+  ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  for action in (lambda:scheduler.suggest_appointment(self.db,ident),
+                 lambda:scheduler.plan_request_assignments(self.db,ident),
+                 lambda:scheduler.create_appointment(self.db,{'request_id':ident})):
+   with self.assertRaisesRegex(ValueError,'Data acceptării'):action()
+  with sync.connection(self.db) as conn:
+   self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_appointments').fetchone()[0],0)
+  gc.collect()
  def test_status_gate_still_blocks_unsigned_closed_missing_and_local_unapproved_offers(self):
   ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
   env=self.status_endpoint()

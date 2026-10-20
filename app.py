@@ -2667,7 +2667,7 @@ def _persist_request_status(request_id: int, status: str) -> None:
     status = str(status).strip().lower()
     REQUEST_STATUS[request_id] = status
     save_request_status()
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("UPDATE service_requests SET status=? WHERE id=?", (status, request_id))
         conn.commit()
 
@@ -3760,17 +3760,21 @@ def set_request_status(
     human_action: str | None = Header(None, alias="X-Human-Action"),
 ):
     _confirm_local_dashboard_click(request, Action.MODIFY_BOOKING, request_id, human_action, 'update-request-status')
-    if not _request_by_id(request_id):
+    request_row = _request_by_id(request_id)
+    if not request_row:
         raise HTTPException(status_code=404, detail='Cererea nu a fost găsită.')
     status = data.status.strip().lower()
-    if status in {'acceptat', 'programat'} and not _request_has_approved_offer(request_id):
-        raise HTTPException(status_code=409, detail='Verifică și aprobă oferta, timpii și manopera înainte de acceptare sau programare.')
 
     if status not in VALID_REQUEST_STATUSES:
         raise HTTPException(
             status_code=400,
             detail="Status invalid"
         )
+
+    if status in {'acceptat', 'programat'} and not _request_has_approved_offer(request_id):
+        from dsm_accepted_offers import has_signed_dashboard_offer
+        if not has_signed_dashboard_offer(DB_PATH, request_row):
+            raise HTTPException(status_code=409, detail='Verifică și aprobă oferta, timpii și manopera înainte de acceptare sau programare.')
 
     _persist_request_status(request_id, status)
     if status == 'rezolvat':
@@ -9070,6 +9074,7 @@ async function updateStatus(requestId, status) {
         const row = requests.find(r => String(requestId) === String(value(r, "id", "request_id", "req_id")));
         if (row) {
             row.desktop_status = status;
+            row.status = status;
         }
 
         renderStats();

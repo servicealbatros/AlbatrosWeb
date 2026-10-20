@@ -1,4 +1,6 @@
 import asyncio
+import ast
+from contextlib import closing
 import gc
 from datetime import datetime
 import json
@@ -7,6 +9,9 @@ import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch, AsyncMock
+from unittest.mock import Mock
+from types import SimpleNamespace
+from fastapi import HTTPException
 import database
 import dsm_accepted_offers as sync
 
@@ -20,6 +25,60 @@ def item(ident='1',code='OFERTA-1'):
 
 
 class SignedOfferTests(unittest.TestCase):
+ def status_endpoint(self):
+  # Exercise the actual endpoint and persistence functions without starting the robot.
+  tree=ast.parse(Path(__file__).with_name('app.py').read_text(encoding='utf-8-sig'))
+  nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'set_request_status','_persist_request_status'}]
+  for node in nodes:node.decorator_list=[]
+  future=ast.ImportFrom(module='__future__',names=[ast.alias(name='annotations')],level=0)
+  def lookup(ident):
+   with sync.connection(self.db) as conn:
+    conn.row_factory=sqlite3.Row
+    row=conn.execute('SELECT * FROM service_requests WHERE id=?',(ident,)).fetchone()
+    return dict(row) if row else None
+  env={'Header':lambda *a,**k:None,'Action':SimpleNamespace(MODIFY_BOOKING='booking'),
+       '_confirm_local_dashboard_click':Mock(),'_request_by_id':lookup,
+       '_request_has_approved_offer':Mock(return_value=False),'HTTPException':HTTPException,
+       'VALID_REQUEST_STATUSES':{'nou','acceptat','programat','rezolvat'},
+       'DB_PATH':self.db,'REQUEST_STATUS':{},'save_request_status':Mock(),'sqlite3':sqlite3,'closing':closing}
+  exec(compile(ast.fix_missing_locations(ast.Module(body=[future,*nodes],type_ignores=[])),'app.py','exec'),env)
+  return env
+ def test_signed_dsm_offer_can_be_marked_programmed_without_local_draft(self):
+  ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  env=self.status_endpoint()
+  result=env['set_request_status'](ident,SimpleNamespace(status='programat'),object(),'update-request-status')
+  self.assertEqual(result,{'request_id':ident,'status':'programat'})
+  self.assertEqual(env['REQUEST_STATUS'][ident],'programat')
+  sync.apply_snapshot(self.db,[item()])
+  with sync.connection(self.db) as conn:
+   self.assertEqual(conn.execute('SELECT status FROM service_requests WHERE id=?',(ident,)).fetchone()[0],'programat')
+   self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_appointments').fetchone()[0],0)
+ def test_status_gate_still_blocks_unsigned_closed_missing_and_local_unapproved_offers(self):
+  ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  env=self.status_endpoint()
+  for signature,eligibility in [('update','accepted'),('signed','closed'),('signed','unsigned'),('signed','converted')]:
+   with sync.connection(self.db) as conn:
+    conn.execute('UPDATE dsm_accepted_offer_links SET signature_state=?,eligibility=?',(signature,eligibility))
+   with self.subTest(signature=signature,eligibility=eligibility),self.assertRaises(HTTPException) as caught:
+    env['set_request_status'](ident,SimpleNamespace(status='programat'),object(),'update-request-status')
+   self.assertEqual(caught.exception.status_code,409)
+  with sync.connection(self.db) as conn:
+   conn.execute("UPDATE dsm_accepted_offer_links SET signature_state='signed',eligibility='accepted'")
+   conn.execute("UPDATE service_requests SET source='whatsapp' WHERE id=?",(ident,))
+  with self.assertRaises(HTTPException) as caught:
+   env['set_request_status'](ident,SimpleNamespace(status='acceptat'),object(),'update-request-status')
+  self.assertEqual(caught.exception.status_code,409)
+  with sync.connection(self.db) as conn:
+   conn.execute("UPDATE service_requests SET source='dsm_accepted_offer' WHERE id=?",(ident,))
+   conn.execute('DELETE FROM dsm_accepted_offer_links')
+  with self.assertRaises(HTTPException):
+   env['set_request_status'](ident,SimpleNamespace(status='programat'),object(),'update-request-status')
+  env['save_request_status'].assert_not_called()
+ def test_local_advisor_approved_offer_can_still_be_programmed(self):
+  ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  with sync.connection(self.db) as conn:conn.execute("UPDATE service_requests SET source='whatsapp' WHERE id=?",(ident,))
+  env=self.status_endpoint();env['_request_has_approved_offer'].return_value=True
+  self.assertEqual(env['set_request_status'](ident,SimpleNamespace(status='programat'),object())['status'],'programat')
  def test_acceptance_date_never_uses_creation_update_send_or_appointment_dates(self):
   p=payload({'status':'signed','record_insert__datetime':'2026-10-01 10:00:00','record_update__datetime':'2026-10-02 11:00:00','sms_sended_date':'2026-10-03 12:00:00'})
   p['transaction']['transaction_head__datetime_appointment']='2026-10-04 13:00:00'

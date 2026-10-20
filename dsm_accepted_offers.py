@@ -287,6 +287,16 @@ def offer_record(db_path, request_id):
         return dict(row) if row else None
 
 
+def has_signed_dashboard_offer(db_path, request_row):
+    """Imported DSM approval is separate from approval of a local offer draft."""
+    if request_row.get('source') != 'dsm_accepted_offer':
+        return False
+    record = offer_record(db_path, request_row['id'])
+    return bool(record
+                and record['signature_state'] in {'signed', 'complete', 'completed'}
+                and record['eligibility'] in {'accepted', 'scheduled'})
+
+
 def rebuild_dashboard(db_path, root, snapshot, *, quoted_ids=(), status_map=None, protected_ids=()):
     """Recoverable removal of old quote cards; never delete requests or bookings."""
     status_map = status_map or {}

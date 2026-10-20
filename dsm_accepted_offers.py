@@ -17,6 +17,44 @@ ROMANIA = ZoneInfo('Europe/Bucharest')
 LOCK = asyncio.Lock()
 
 
+def acceptance_datetime(payload):
+    """Only explicit signing timestamps count; document/import dates never do."""
+    states = payload.get('sms_or_qrcode_sended') or {}
+    if not isinstance(states, dict):
+        return ''
+    dates = set()
+    for document, evidence in states.items():
+        if re.sub(r'^\d+_', '', str(document)) != 'service_offer' or not isinstance(evidence, dict):
+            continue
+        status = signature_status({'sms_or_qrcode_sended': {document: evidence}})
+        if status not in {'signed', 'complete', 'completed'}:
+            continue
+        for key in ('signed_at', 'accepted_at', 'signature_datetime', 'acceptance_datetime'):
+            raw = evidence.get(key)
+            if not isinstance(raw, str):
+                continue
+            try:
+                if re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw):
+                    dates.add(datetime.strptime(raw, '%Y-%m-%d').date().isoformat())
+                elif re.fullmatch(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?', raw):
+                    parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=ROMANIA)
+                    dates.add(parsed.astimezone(ROMANIA).isoformat())
+            except ValueError:
+                continue
+    return dates.pop() if len(dates) == 1 else ''
+
+
+def dashboard_dates(record):
+    """Keep the technical import time separate from the business event."""
+    detail = json.loads(record['payload_json']) if record else {}
+    accepted = detail.get('accepted_at') or ''
+    return {'accepted_at': accepted, 'request_datetime': accepted,
+            'request_date_kind': 'accepted',
+            'request_date_missing': not bool(accepted)}
+
+
 def signature_status(payload):
     """The same document-state mapping used by DSM's green signed icon."""
     states = payload.get('sms_or_qrcode_sended') or {}
@@ -121,6 +159,7 @@ async def read_snapshot(previous_ids):
                 if len(details) != 1 or not details[0].get('detail'):
                     raise ValueError('Datele ofertei semnate sunt incomplete; importul este păstrat.')
                 detail = details[0]['detail']
+                detail['accepted_at'] = acceptance_datetime(value)
             snapshot.append({'id': ident, 'reason': reason, 'signature': signature_status(value),
                              'code': value['transaction'].get('transaction_head__code') or '', 'detail': detail})
     return snapshot
@@ -330,6 +369,7 @@ def offer_html(record, request_row):
     <main><nav><a href="/cereri">← Dashboard</a> · <a href="/programator">Deschide programatorul</a></nav>
     <h1>{escape(record['document_code'])} · {escape(detail.get('registration'))}</h1>
     <div class="badge">{escape(signed_label)} · {escape('Acceptată — în așteptarea programării' if request_row.get('status') == 'acceptat' else request_row.get('status'))}</div>
+    <p>Data acceptării: {escape(detail.get('accepted_at') or 'indisponibilă în DSM')}</p>
     <h2>{escape(detail.get('vehicle'))}</h2><p>{escape(detail.get('customer_name'))} · {escape(detail.get('customer_phone'))}\nVIN: {escape(detail.get('vin'))}</p>
     <p>{escape(detail.get('description'))}</p><div class="scroll"><table><thead><tr><th>Tip</th><th>Cod</th><th>Lucrare / piesă</th><th>Cantitate / ore</th><th>Preț unitar DSM (RON, cu TVA)</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
     <p>Oferta acceptată este preluată din DSM. Prețurile sunt cele citite din ofertă; nu sunt recalculate din catalog. Ultima sincronizare: {escape(record['updated_at'])}</p></main></html>'''

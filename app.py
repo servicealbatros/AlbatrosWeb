@@ -3416,6 +3416,9 @@ def requests():
             or item.get("date_created")
             or ""
         )
+        if item.get('source') == 'dsm_accepted_offer':
+            from dsm_accepted_offers import dashboard_dates
+            item.update(dashboard_dates(imported_offer))
         offer_result = _load_request_offer_result(int(req_id)) if req_id else {}
         offer_draft = _draft_for_request(int(req_id)) if req_id else {}
         offer_status = str(offer_result.get("status") or "").lower()
@@ -3481,6 +3484,10 @@ def dashboard_archive(request: Request, before: str | None = None):
         else:
             conn.row_factory=sqlite3.Row
             rows=[dict(r) for r in conn.execute('SELECT s.* FROM service_requests s JOIN request_archive a ON a.request_id=s.id ORDER BY s.id DESC')]
+    from dsm_accepted_offers import offer_record, dashboard_dates
+    for row in rows:
+        if row.get('source') == 'dsm_accepted_offer':
+            row.update(dashboard_dates(offer_record(DB_PATH, row['id'])))
     return {'rows':rows,'count':len(rows)}
 
 
@@ -8985,6 +8992,7 @@ function esc(value) {
 }
 
 function requestDateRaw(row) {
+    if (row.source === 'dsm_accepted_offer') return String(row.accepted_at || "");
     return String(value(row, "request_datetime", "created_at", "created", "timestamp", "date_created") || "");
 }
 function requestMonth(row) {
@@ -8998,7 +9006,9 @@ function requestMonth(row) {
 }
 function formatRequestDate(row) {
     const raw = requestDateRaw(row).trim();
+    if (row.source === 'dsm_accepted_offer' && !raw) return "Data acceptării indisponibilă în DSM";
     if (!raw) return "—";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw.split('-').reverse().join('.');
     const d = new Date(raw);
     if (!Number.isNaN(d.getTime())) {
         return d.toLocaleString("ro-RO", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
@@ -9251,7 +9261,8 @@ function detailHtml(row) {
         ["Sursă manoperă", value(row, "labour_source")],
         ["Operație manoperă", value(row, "labour_operation")],
         ["Sesiune / caz", value(row, "session_id")],
-        ["Creat la", value(row, "created_at", "created", "timestamp")],
+        [row.source === 'dsm_accepted_offer' ? "Acceptată la" : "Creat la", row.source === 'dsm_accepted_offer' ? formatRequestDate(row) : value(row, "created_at", "created", "timestamp")],
+        ["Importată în Dashboard la", row.source === 'dsm_accepted_offer' ? value(row, "created_at") : ""],
     ].filter(item => item[1] !== "");
 
     if (!fields.length) {
@@ -9404,7 +9415,7 @@ function render() {
         });
         tr.innerHTML = `
             <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
-            <td style="white-space:nowrap">${esc(formatRequestDate(row))}</td>
+            <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}</td>
             <td>${esc(customer || "—")}</td>
             <td>${esc(phone || "—")}</td>
             <td>${esc(vehicle || "—")}</td>

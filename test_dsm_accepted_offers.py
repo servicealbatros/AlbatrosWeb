@@ -20,6 +20,32 @@ def item(ident='1',code='OFERTA-1'):
 
 
 class SignedOfferTests(unittest.TestCase):
+ def test_acceptance_date_never_uses_creation_update_send_or_appointment_dates(self):
+  p=payload({'status':'signed','record_insert__datetime':'2026-10-01 10:00:00','record_update__datetime':'2026-10-02 11:00:00','sms_sended_date':'2026-10-03 12:00:00'})
+  p['transaction']['transaction_head__datetime_appointment']='2026-10-04 13:00:00'
+  self.assertEqual(sync.acceptance_datetime(p),'')
+  self.assertTrue(sync.dashboard_dates({'payload_json':json.dumps(p)})['request_date_missing'])
+ def test_only_service_offer_explicit_signed_date_is_used(self):
+  p=payload({'status':'signed','signed_at':'2026-10-02 11:00:00'})
+  p['sms_or_qrcode_sended']['statement_of_agreement']={'status':'signed','signed_at':'2026-01-01'}
+  self.assertEqual(sync.acceptance_datetime(p),'2026-10-02T11:00:00+03:00')
+  p['sms_or_qrcode_sended']['service_offer']['signed_at']='2026-10-26T10:00:00Z'
+  self.assertEqual(sync.acceptance_datetime(p),'2026-10-26T12:00:00+02:00')
+ def test_date_only_is_not_given_an_invented_time_and_conflicts_are_unknown(self):
+  p=payload({'status':'signed','accepted_at':'2026-10-02'})
+  self.assertEqual(sync.acceptance_datetime(p),'2026-10-02')
+  p['sms_or_qrcode_sended']['service_offer']['signed_at']='2026-10-03'
+  self.assertEqual(sync.acceptance_datetime(p),'')
+  p=payload({'status':'sent','signed_at':'2026-10-02'})
+  self.assertEqual(sync.acceptance_datetime(p),'')
+ def test_date_projection_keeps_import_time_out_of_acceptance(self):
+  data=item();data['detail']['accepted_at']='2026-10-02T11:00:00+03:00'
+  sync.apply_snapshot(self.db,[data]);record=sync.offer_record(self.db,1)
+  self.assertEqual(sync.dashboard_dates(record)['request_datetime'],data['detail']['accepted_at'])
+  self.assertIn('2026-10-02T11:00:00+03:00',sync.offer_html(record,{'status':'acceptat'}))
+  data=item();sync.apply_snapshot(self.db,[data]);record=sync.offer_record(self.db,1)
+  self.assertEqual(sync.dashboard_dates(record)['request_datetime'],'')
+  self.assertIn('indisponibilă în DSM',sync.offer_html(record,{'status':'acceptat'}))
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
   self.root=Path(self.temp.name);self.db=self.root/'requests.db'

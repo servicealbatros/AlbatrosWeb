@@ -96,8 +96,8 @@ class SignedOfferTests(unittest.TestCase):
  def test_rebuild_removes_old_quotes_but_preserves_new_request_and_calendar(self):
   signed=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
   with sync.connection(self.db) as conn:
-   duplicate=conn.execute("INSERT INTO service_requests(session_id,registration,status,source) VALUES ('old','B100TST','ofertat','dashboard')").lastrowid
-   new=conn.execute("INSERT INTO service_requests(session_id,registration,status,source) VALUES ('new','B110TST','nou','whatsapp')").lastrowid
+   duplicate=conn.execute("INSERT INTO service_requests(session_id,registration,status,source,symptom) VALUES ('old','B100TST','ofertat','dashboard','Plăcuțe')").lastrowid
+   new=conn.execute("INSERT INTO service_requests(session_id,registration,status,source,symptom) VALUES ('new','B110TST','nou','whatsapp','Cerere nouă')").lastrowid
    conn.execute("INSERT INTO scheduler_appointments VALUES (3,?,'EXISTING','programat')",(duplicate,))
    before=conn.execute('SELECT * FROM scheduler_appointments').fetchall()
   result=sync.rebuild_dashboard(self.db,self.root,[item()])

@@ -93,4 +93,32 @@ class SignedOfferTests(unittest.TestCase):
   self.assertFalse(result['ok']);self.assertNotIn('last_success_day',sync.state(self.root))
   with sync.connection(self.db) as conn:self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_requests').fetchone()[0],1)
 
+ def test_rebuild_removes_old_quotes_but_preserves_new_request_and_calendar(self):
+  signed=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  with sync.connection(self.db) as conn:
+   duplicate=conn.execute("INSERT INTO service_requests(session_id,registration,status,source) VALUES ('old','B100TST','ofertat','dashboard')").lastrowid
+   new=conn.execute("INSERT INTO service_requests(session_id,registration,status,source) VALUES ('new','B110TST','nou','whatsapp')").lastrowid
+   conn.execute("INSERT INTO scheduler_appointments VALUES (3,?,'EXISTING','programat')",(duplicate,))
+   before=conn.execute('SELECT * FROM scheduler_appointments').fetchall()
+  result=sync.rebuild_dashboard(self.db,self.root,[item()])
+  self.assertEqual(result['request_ids'],[signed]);self.assertEqual(result['archived_ids'],[duplicate])
+  self.assertIn(new,result['untouched_ids']);self.assertTrue((Path(result['backup'])/'requests.sqlite3').is_file())
+  with sync.connection(self.db) as conn:
+   self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_requests').fetchone()[0],3)
+   self.assertEqual(conn.execute('SELECT * FROM scheduler_appointments').fetchall(),before)
+
+ def test_rebuild_keeps_different_signed_offers_for_same_plate_and_restores_canonical(self):
+  initial=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  with sync.connection(self.db) as conn:conn.execute('INSERT INTO request_archive VALUES (?)',(initial,))
+  result=sync.rebuild_dashboard(self.db,self.root,[item(),item('2','OFERTA-2')])
+  self.assertEqual(result['accepted'],2);self.assertEqual(result['restored'],1)
+  again=sync.rebuild_dashboard(self.db,self.root,[item(),item('2','OFERTA-2')])
+  self.assertEqual(again['request_ids'],result['request_ids']);self.assertEqual(again['sync']['imported'],0)
+
+ def test_rebuild_dsm_read_failure_does_not_hide_existing_cards(self):
+  sync.apply_snapshot(self.db,[item()])
+  with patch.object(sync,'read_snapshot',AsyncMock(side_effect=RuntimeError('DSM login'))):
+   with self.assertRaises(RuntimeError):asyncio.run(sync.rebuild_signed_offers(self.db,self.root))
+  with sync.connection(self.db) as conn:self.assertEqual(conn.execute('SELECT COUNT(*) FROM request_archive').fetchone()[0],0)
+
 if __name__=='__main__':unittest.main()

@@ -579,6 +579,27 @@ async def sync_dsm_accepted_offers(request: Request):
     return await synchronize(DB_PATH, DATA_DIR)
 
 
+@app.post('/api/dashboard/master/dsm-accepted-offers/rebuild')
+async def rebuild_dsm_signed_dashboard(request: Request):
+    _master_access(request)
+    if request.headers.get('X-Human-Action') != 'rebuild-signed-offers':
+        raise HTTPException(status_code=409, detail='Acțiune explicită de curățare necesară.')
+    from dsm_accepted_offers import rebuild_signed_offers
+    rows = list_requests(include_dsm_accepted=True)
+    quoted = [int(r['id']) for r in rows if _draft_for_request(int(r['id']))
+              or str(_load_request_offer_result(int(r['id'])).get('status') or '').lower() in {'ready', 'partial'}]
+    protected = [int(j['request_id']) for j in _load_robot_jobs()
+                 if j.get('request_id') and j.get('status') in {'RUNNING', 'QUEUED'}]
+    try:
+        result = await rebuild_signed_offers(DB_PATH, DATA_DIR, quoted_ids=quoted,
+                                             status_map=dict(REQUEST_STATUS), protected_ids=protected)
+    except Exception:
+        raise HTTPException(status_code=502, detail='Citirea completă DSM sau curățarea nu a reușit. Verifică starea înainte de reluare.') from None
+    POLICY.logger.write(action='rebuild_signed_offers', result='success' if result.get('ok') else 'running',
+                        success=bool(result.get('ok')), website='dashboard')
+    return result
+
+
 @app.get('/api/dashboard/master/provider-tabs')
 async def master_provider_tabs(request: Request):
     """Read the owned worker browser without navigating or closing any tab."""

@@ -56,7 +56,9 @@ async def request_document(root, sender, data, send):
                 'photo_registration', 'document_difference'):
         data.pop(key, None)
     save(root, sender, 'document', data)
-    await send(sender, f'Vă rugăm să ne trimiteți o fotografie clară a talonului mașinii {data["registration"]}, pentru a ne ajuta să actualizăm datele și să scurtăm timpul de așteptare la intrarea mașinii în service. Vă rugăm să includeți seria de șasiu (VIN) și rubrica privind valabilitatea ITP. Dacă sunt pe fețe diferite, trimiteți fotografii cu ambele fețe. Nu este nevoie de CNP.')
+    context = (f'TEST ALBATROS A — reluăm verificarea pe comanda {data["retest_command_code"]}, fără o comandă duplicată.\n'
+               if data.get('test_run_id') and data.get('retest_command_code') else '')
+    await send(sender, context + f'Vă rugăm să ne trimiteți o fotografie clară a talonului mașinii {data["registration"]}, pentru a ne ajuta să actualizăm datele și să scurtăm timpul de așteptare la intrarea mașinii în service. Vă rugăm să includeți seria de șasiu (VIN) și rubrica privind valabilitatea ITP. Dacă sunt pe fețe diferite, trimiteți fotografii cu ambele fețe. Nu este nevoie de CNP.')
 
 
 def document_year_question(data):
@@ -130,19 +132,33 @@ async def start(root, notify, seed):
         return status(root)
 
 
-async def restart(root, send, seed):
+async def restart(root, send, seed, *, run_id=None, recipient=None):
     """Replay only this pilot against its verified existing command."""
     async with LOCK:
+        if run_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', str(run_id)):
+            raise ValueError('Identificator de probă invalid.')
+        if recipient is not None and phone(recipient) not in RECIPIENTS:
+            raise ValueError('Proba este permisă numai pe numerele de test.')
+        if recipient is not None and not run_id:
+            raise ValueError('Reluarea individuală necesită un identificator de probă.')
         existing = [get(root, target) for target in RECIPIENTS]
+        if run_id and any(case and case[1].get('test_run_id') == run_id for case in existing):
+            return status(root)
+        with db(root) as conn:
+            creating = conn.execute("SELECT 1 FROM orders WHERE state='creating' LIMIT 1").fetchone()
+        if creating or any(case and case[0] in {'creating', 'review'} for case in existing):
+            raise ValueError('Verifică rezultatul comenzii în curs înainte de o probă nouă.')
         active = [case for case in existing if case and (case[1].get('retest_command_id') or case[1].get('retest_run'))
                   and case[0] not in {'done', 'stopped', 'invite_failed'}]
-        if active:
+        if active and not run_id:
             return status(root)  # A repeated click cannot reset replies or resend.
         prior_new = next((case[1].get('order', {}).get('id') for case in existing if case and case[1].get('new_test_order') and case[1].get('order', {}).get('id')), None)
         data = await seed(retest=True, existing_command_id=prior_new) if prior_new else await seed(retest=True)
         if not data.get('retest_command_id') and not data.get('new_test_order'):
             raise ValueError('Reluarea testului necesită o comandă verificată.')
         data['retest_run'] = True
+        if run_id:
+            data['test_run_id'] = run_id
         with db(root) as conn:
             backup_path = Path(root) / 'pre_reception_private' / ('before-retest-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.sqlite3')
             with closing(sqlite3.connect(backup_path)) as backup:
@@ -150,6 +166,11 @@ async def restart(root, send, seed):
             os.chmod(backup_path, 0o600)
             conn.execute('DELETE FROM orders WHERE offer=?', (data['offer_id'],))
         for target in RECIPIENTS:
+            if recipient is not None and target != phone(recipient):
+                previous = get(root, target)
+                if previous and previous[0] not in {'done', 'stopped'}:
+                    save(root, target, 'stopped', previous[1])
+                continue
             try:
                 await request_document(root, target, dict(data), send)
             except Exception:

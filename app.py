@@ -462,11 +462,18 @@ async def pre_reception_retest(request: Request):
         raise HTTPException(status_code=409, detail='STOP SAFE activ.')
     from pre_reception import restart
     from dsm_pre_reception import seed
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail='Date de probă invalide.')
+    recipient = body.get('recipient')
+    if recipient in {'7032', '2878'}:
+        from pre_reception import RECIPIENTS
+        recipient = next(p for p in RECIPIENTS if p.endswith(recipient))
     async def send_retest(target, text):
         return await send_whatsapp_notification(target, text, kind='request',
                                                 subject='test pregătire recepție B101TST')
     try:
-        return await restart(DATA_DIR, send_retest, seed)
+        return await restart(DATA_DIR, send_retest, seed, run_id=body.get('run_id'), recipient=recipient)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

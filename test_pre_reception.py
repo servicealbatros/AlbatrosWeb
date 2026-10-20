@@ -18,6 +18,42 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    async def test_new_run_targets_one_phone_and_retry_does_not_reset_replies(self):
+        sender, other = p.RECIPIENTS
+        p.save(self.root, sender, 'stopped', {**self.seed, 'new_test_order': True, 'order': {'id': '19530'}})
+        p.save(self.root, other, 'document', {**self.seed, 'retest_run': True})
+        seed = AsyncMock(return_value={**self.seed, 'retest_command_id': '19530', 'retest_command_code': 'PHDEV-10297', 'new_test_order': True})
+        await p.restart(self.root, self.send, seed, run_id='round-1', recipient=sender)
+        seed.assert_awaited_once_with(retest=True, existing_command_id='19530')
+        self.send.assert_awaited_once()
+        self.assertEqual(self.send.await_args.args[0], sender)
+        self.assertIn('PHDEV-10297', self.send.await_args.args[1])
+        self.assertEqual(p.get(self.root, other)[0], 'stopped')
+        stage, data = p.get(self.root, sender)
+        data['client_reply_received'] = True
+        p.save(self.root, sender, 'document_check', data)
+        await p.restart(self.root, self.send, seed, run_id='round-1', recipient=sender)
+        self.assertEqual(p.get(self.root, sender)[0], 'document_check')
+        self.assertTrue(p.get(self.root, sender)[1]['client_reply_received'])
+        self.assertEqual(self.send.await_count, 1)
+        self.assertEqual(len(list((self.root/'pre_reception_private').glob('before-retest-*.sqlite3'))), 1)
+
+    async def test_new_round_never_resets_a_pending_or_uncertain_dsm_write(self):
+        seed = AsyncMock()
+        with p.db(self.root) as conn:
+            conn.execute('INSERT INTO orders VALUES(?,?,?)', (d.OFFER, 'creating', '{"id":"19530"}'))
+        with self.assertRaisesRegex(ValueError, 'comenzii în curs'):
+            await p.restart(self.root, self.send, seed, run_id='round-2', recipient=p.RECIPIENTS[0])
+        seed.assert_not_awaited();self.send.assert_not_awaited()
+        self.assertEqual(p.status(self.root)['orders'][0]['result']['id'], '19530')
+
+    async def test_individual_test_needs_allowed_phone_and_retry_key(self):
+        seed = AsyncMock()
+        for kwargs in ({'run_id':'x','recipient':'40700100003'}, {'recipient':p.RECIPIENTS[0]}, {'run_id':'../unsafe'}):
+            with self.assertRaises(ValueError):
+                await p.restart(self.root, self.send, seed, **kwargs)
+        seed.assert_not_awaited();self.send.assert_not_awaited()
+
     async def test_retest_backs_up_and_restarts_only_once_without_new_order(self):
         sender = p.RECIPIENTS[0]
         p.save(self.root, sender, 'done', {**self.seed, 'order': {'id': '19528'}})

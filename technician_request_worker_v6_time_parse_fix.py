@@ -1547,4 +1547,6 @@ def main():
         return
 
 if __name__ == "__main__":
-    main()
+    from browser_resources import browser_activity_sync
+    with browser_activity_sync():
+        main()

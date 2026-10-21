@@ -6,6 +6,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
+from contextlib import asynccontextmanager
+from browser_resources import browser_operation
 
 from autototal_request_worker import (_post_helper_js, _oe_vin_targets, _plain,
     _oe_option_allowed, _revision_product_kind, _required_product_kinds,
@@ -89,6 +91,18 @@ class Crawl:
         return cards
 
 
+@asynccontextmanager
+async def crawler_page(browser):
+    # Reuse the authenticated snapshot, but keep the comparison isolated.
+    state = await browser.contexts[0].storage_state()
+    context = await browser.new_context(storage_state=state)
+    try:
+        yield await context.new_page()
+    finally:
+        await context.close()
+
+
+@browser_operation
 async def run_crawler(request_id, vin, query, seeds, output, vehicle_make=''):
     started = time.monotonic()
     required = _required_product_kinds(query)
@@ -106,153 +120,148 @@ async def run_crawler(request_id, vin, query, seeds, output, vehicle_make=''):
     from playwright.async_api import async_playwright
     async with async_playwright() as playwright:
         browser = await playwright.chromium.connect_over_cdp('http://127.0.0.1:9222')
-        # Authentication stays in memory; existing worker pages are untouched.
-        state = await browser.contexts[0].storage_state()
-        context = await browser.new_context(storage_state=state)
-        page = await context.new_page()
-        crawler = Crawl(page)
-        candidates = list(seeds)
-        try:
-            async with asyncio.timeout(300):
-                try:
-                    await crawler.visit('https://www3.eoriginal.ro/#/', 'autototal')
-                    identification = (await crawler.post('/search/searchVin',{'vin':vin,'return_car':1})).get('result') or {}
-                    link = identification.get('car_link')
-                    if not link:
-                        raise RuntimeError('vin_not_identified')
-                    await crawler.visit(link,'autototal')
-                    for catalogue in list((identification.get('lx_catalog') or {}).values())[:1]:
-                        groups = {}
-                        for target in _oe_vin_targets(query):
-                            group_id = target['group_id']
-                            if group_id not in groups:
-                                data = await crawler.post('/car/get-lcar-categ',{'t_id':'0','c_id':catalogue['catalog'],'s_id':catalogue['ssd'],'g_id':group_id,'vin':vin})
-                                groups[group_id] = data.get('result') or {}
-                                report.setdefault('oe_diagrams', []).append({'group_id': group_id,
-                                    'units': [str(u.get('name') or '') for g in groups[group_id].get('groups') or [] for u in g.get('units') or []][:40]})
-                            for group in groups[group_id].get('groups') or []:
-                                for unit in group.get('units') or []:
-                                    position = _plain(str(group.get('name') or '')+' '+str(unit.get('name') or ''))
-                                    if target.get('require_position_context'):
-                                        if target.get('front') and not re.search(r'\b(front|fata|anterior)\b',position):
-                                            continue
-                                        if target.get('rear') and not re.search(r'\b(rear|spate|posterior)\b',position):
-                                            continue
-                                    if target.get('left') or target.get('right'):
-                                        continue  # Side-specific diagrams require a reviewed side match.
-                                    for part in unit.get('details') or []:
-                                        name = _plain(part.get('name'))
-                                        oil_pan_plug = (_revision_product_kind(target['requested_item']) == 'oil_drain_plug'
-                                            and re.match(r'^screw plug\b', name) and re.search(r'\boil (pan|sump)\b',position))
-                                        if part.get('oem') and (oil_pan_plug or any(term in name for term in target['terms'])):
-                                            candidates.append({'requested_item':target['requested_item'],'oe_code':part['oem'],'description':part['name']})
-                    seen = set()
-                    report['oe_candidates'] = candidates
-                    for candidate in candidates:
-                        code = re.sub(r'\s+','',str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or ''))
-                        if not code or code in seen:
-                            continue
-                        if len(seen) >= 12:
-                            break
-                        seen.add(code)
-                        for card in await crawler.auto_search(code):
-                            compact = re.sub(r'[^A-Z0-9]','',card['title'].upper())
-                            # Exact original reference must be printed on the card.
-                            if re.sub(r'[^A-Z0-9]','',code.upper()) not in compact:
+        async with crawler_page(browser) as page:
+            crawler = Crawl(page)
+            candidates = list(seeds)
+            try:
+                async with asyncio.timeout(300):
+                    try:
+                        await crawler.visit('https://www3.eoriginal.ro/#/', 'autototal')
+                        identification = (await crawler.post('/search/searchVin',{'vin':vin,'return_car':1})).get('result') or {}
+                        link = identification.get('car_link')
+                        if not link:
+                            raise RuntimeError('vin_not_identified')
+                        await crawler.visit(link,'autototal')
+                        for catalogue in list((identification.get('lx_catalog') or {}).values())[:1]:
+                            groups = {}
+                            for target in _oe_vin_targets(query):
+                                group_id = target['group_id']
+                                if group_id not in groups:
+                                    data = await crawler.post('/car/get-lcar-categ',{'t_id':'0','c_id':catalogue['catalog'],'s_id':catalogue['ssd'],'g_id':group_id,'vin':vin})
+                                    groups[group_id] = data.get('result') or {}
+                                    report.setdefault('oe_diagrams', []).append({'group_id': group_id,
+                                        'units': [str(u.get('name') or '') for g in groups[group_id].get('groups') or [] for u in g.get('units') or []][:40]})
+                                for group in groups[group_id].get('groups') or []:
+                                    for unit in group.get('units') or []:
+                                        position = _plain(str(group.get('name') or '')+' '+str(unit.get('name') or ''))
+                                        if target.get('require_position_context'):
+                                            if target.get('front') and not re.search(r'\b(front|fata|anterior)\b',position):
+                                                continue
+                                            if target.get('rear') and not re.search(r'\b(rear|spate|posterior)\b',position):
+                                                continue
+                                        if target.get('left') or target.get('right'):
+                                            continue  # Side-specific diagrams require a reviewed side match.
+                                        for part in unit.get('details') or []:
+                                            name = _plain(part.get('name'))
+                                            oil_pan_plug = (_revision_product_kind(target['requested_item']) == 'oil_drain_plug'
+                                                and re.match(r'^screw plug\b', name) and re.search(r'\boil (pan|sump)\b',position))
+                                            if part.get('oem') and (oil_pan_plug or any(term in name for term in target['terms'])):
+                                                candidates.append({'requested_item':target['requested_item'],'oe_code':part['oem'],'description':part['name']})
+                        seen = set()
+                        report['oe_candidates'] = candidates
+                        for candidate in candidates:
+                            code = re.sub(r'\s+','',str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or ''))
+                            if not code or code in seen:
                                 continue
-                            if not _oe_option_allowed(candidate,card['title'],'OE'):
-                                report['rejected_wrong_family'] = report.get('rejected_wrong_family', 0) + 1
-                                continue
-                            price = re.search(r'Pret vanzare \(cu TVA\)\s*([\d]+(?:[.,]\d{1,2})?)',card['text'])
-                            if not price:
-                                continue
-                            report['products'].append({**candidate,'manufacturer_ref':code,'brand':'OE',
-                                'price_ron':float(price.group(1).replace(',','.')),'description':card['title'],
-                                'source':'AutoTotal crawler','vin_exact_oe_cross_reference':True})
-                        save()
-                    requirements = _confirmed_oil_requirements(request_id,vin)
-                    make = str(identification.get('td_catalog') or '')
-                    # OEM name comes from the request evidence, never a guessed engine.
-                    from original_oil_policy import original_oil_brands
-                    brands = original_oil_brands(vehicle_make)
-                    oe_brand = brands[0] if brands else ''
-                    if requirements and oe_brand and 'engine_oil' in required:
-                        requirements.update(oe_brand=oe_brand,oe_only=True)
-                        grades = [r['value'] for option in requirements['engine_oil_options'] for r in option.get('grades') or []]
-                        approvals = [r['value'] for option in requirements['engine_oil_options'] for r in option.get('classifications') or []]
-                        for oil_query in (' '.join([oe_brand]+grades[:1]), oe_brand+' ULEI'):
-                            cards = await crawler.auto_search(oil_query)
-                            report.setdefault('oil_searches', []).append({'query': oil_query, 'card_count': len(cards),
-                                'headings': [str(c.get('title') or '') for c in cards][:12]})
-                            oil = _choose_engine_oil_card(cards,requirements)
-                            if oil:
-                                oil['source']='AutoTotal crawler — normă confirmată TecRMI'
-                                report['products'].append(oil)
+                            if len(seen) >= 12:
                                 break
-                        if not oil and grades:
-                            await crawler.visit('https://www3.eoriginal.ro/uleiuri/#/?filter_v='+re.sub(r'[^A-Z0-9]','',grades[0].upper()),'autototal')
-                            try:
-                                await page.locator('.article-card').first.wait_for(timeout=12000)
-                            except Exception:
-                                pass
-                            cards = await page.locator('.article-card').evaluate_all("nodes=>nodes.slice(0,100).map(c=>({title:c.querySelector('.card-title')?.innerText||'',text:c.innerText||'',url:location.href}))")
-                            report.setdefault('oil_searches', []).append({'query':'dedicated_oil_catalogue', 'card_count':len(cards), 'headings':[str(c.get('title') or '') for c in cards][:20]})
-                            oil = _choose_engine_oil_card(cards,requirements)
-                            if oil:
-                                oil['source']='AutoTotal crawler — normă confirmată TecRMI'
-                                report['products'].append(oil)
-                    report['sources']['autototal']={'status':'finished'}
-                except Exception as error:
-                    report['sources']['autototal']={'status':'error','error':str(error)[:300]}
-                save()
-                try:
-                    await crawler.visit('https://ro.e-cat.intercars.eu/ro/','intercars')
-                    if not candidates:
-                        raise RuntimeError('no_verified_oe_codes_available_for_search')
-                    for candidate in candidates[:12]:
-                        code = str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or '')
-                        if not code:
-                            continue
-                        field = None
-                        for node in await page.locator('input:visible').all():
-                            label = (await node.get_attribute('placeholder') or '')+' '+(await node.get_attribute('aria-label') or '')
-                            if re.search(r'c[aă]utare produse|search products|search by name|nume, index',label,re.I) and not re.search(r'vin|category|categorie',label,re.I):
-                                field = node
-                                break
-                        if field is None:
-                            raise RuntimeError('product_search_not_available')
-                        await field.fill(code)
-                        await field.press('Enter')
-                        await asyncio.sleep(2)
-                        links = await page.locator('a[href*="/ro/p/"]').evaluate_all("nodes=>[...new Set(nodes.map(a=>a.href))].slice(0,2)")
-                        for link in links:
-                            await crawler.visit(link,'intercars')
-                            text = await page.locator('body').inner_text()
-                            title = await page.locator('h1').first.inner_text() if await page.locator('h1').count() else ''
-                            if not title or not _oe_option_allowed(candidate,title,'OE'):
-                                continue
-                            compact = re.sub(r'[^A-Z0-9]','',text.upper())
-                            if re.sub(r'[^A-Z0-9]','',code.upper()) not in compact:
-                                continue
-                            price = re.search(r'(\d+(?:[.,]\d{2}))\s*RON',text)
-                            report['products'].append({**candidate,'manufacturer_ref':code,
-                                'price_ron':float(price.group(1).replace(',','.')) if price else None,
-                                'source':'Inter Cars crawler','vin_exact_oe_cross_reference':True,
-                                'description':title,
-                                'needs_price_review':True})
+                            seen.add(code)
+                            for card in await crawler.auto_search(code):
+                                compact = re.sub(r'[^A-Z0-9]','',card['title'].upper())
+                                # Exact original reference must be printed on the card.
+                                if re.sub(r'[^A-Z0-9]','',code.upper()) not in compact:
+                                    continue
+                                if not _oe_option_allowed(candidate,card['title'],'OE'):
+                                    report['rejected_wrong_family'] = report.get('rejected_wrong_family', 0) + 1
+                                    continue
+                                price = re.search(r'Pret vanzare \(cu TVA\)\s*([\d]+(?:[.,]\d{1,2})?)',card['text'])
+                                if not price:
+                                    continue
+                                report['products'].append({**candidate,'manufacturer_ref':code,'brand':'OE',
+                                    'price_ron':float(price.group(1).replace(',','.')),'description':card['title'],
+                                    'source':'AutoTotal crawler','vin_exact_oe_cross_reference':True})
+                            save()
+                        requirements = _confirmed_oil_requirements(request_id,vin)
+                        make = str(identification.get('td_catalog') or '')
+                        # OEM name comes from the request evidence, never a guessed engine.
+                        from original_oil_policy import original_oil_brands
+                        brands = original_oil_brands(vehicle_make)
+                        oe_brand = brands[0] if brands else ''
+                        if requirements and oe_brand and 'engine_oil' in required:
+                            requirements.update(oe_brand=oe_brand,oe_only=True)
+                            grades = [r['value'] for option in requirements['engine_oil_options'] for r in option.get('grades') or []]
+                            approvals = [r['value'] for option in requirements['engine_oil_options'] for r in option.get('classifications') or []]
+                            for oil_query in (' '.join([oe_brand]+grades[:1]), oe_brand+' ULEI'):
+                                cards = await crawler.auto_search(oil_query)
+                                report.setdefault('oil_searches', []).append({'query': oil_query, 'card_count': len(cards),
+                                    'headings': [str(c.get('title') or '') for c in cards][:12]})
+                                oil = _choose_engine_oil_card(cards,requirements)
+                                if oil:
+                                    oil['source']='AutoTotal crawler — normă confirmată TecRMI'
+                                    report['products'].append(oil)
+                                    break
+                            if not oil and grades:
+                                await crawler.visit('https://www3.eoriginal.ro/uleiuri/#/?filter_v='+re.sub(r'[^A-Z0-9]','',grades[0].upper()),'autototal')
+                                try:
+                                    await page.locator('.article-card').first.wait_for(timeout=12000)
+                                except Exception:
+                                    pass
+                                cards = await page.locator('.article-card').evaluate_all("nodes=>nodes.slice(0,100).map(c=>({title:c.querySelector('.card-title')?.innerText||'',text:c.innerText||'',url:location.href}))")
+                                report.setdefault('oil_searches', []).append({'query':'dedicated_oil_catalogue', 'card_count':len(cards), 'headings':[str(c.get('title') or '') for c in cards][:20]})
+                                oil = _choose_engine_oil_card(cards,requirements)
+                                if oil:
+                                    oil['source']='AutoTotal crawler — normă confirmată TecRMI'
+                                    report['products'].append(oil)
+                        report['sources']['autototal']={'status':'finished'}
+                    except Exception as error:
+                        report['sources']['autototal']={'status':'error','error':str(error)[:300]}
+                    save()
+                    try:
                         await crawler.visit('https://ro.e-cat.intercars.eu/ro/','intercars')
-                        save()
-                    report['sources']['intercars']={'status':'finished'}
-                except Exception as error:
-                    report['sources']['intercars']={'status':'error','error':str(error)[:300]}
-        except TimeoutError:
-            report['sources']['timeout']={'status':'error','error':'Crawler stopped at 300 seconds'}
-        finally:
-            report['pages']=crawler.pages
-            report['searches']=crawler.searches
-            report['explicit_catalogue_requests']=crawler.requests
-            report['status']='partial' if report['products'] else 'error'
-            report['finished_at']=datetime.now().isoformat(timespec='seconds')
-            save()
-            # Only the context created by this crawler is closed.
-            await context.close()
+                        if not candidates:
+                            raise RuntimeError('no_verified_oe_codes_available_for_search')
+                        for candidate in candidates[:12]:
+                            code = str(candidate.get('oe_code') or candidate.get('manufacturer_ref') or '')
+                            if not code:
+                                continue
+                            field = None
+                            for node in await page.locator('input:visible').all():
+                                label = (await node.get_attribute('placeholder') or '')+' '+(await node.get_attribute('aria-label') or '')
+                                if re.search(r'c[aă]utare produse|search products|search by name|nume, index',label,re.I) and not re.search(r'vin|category|categorie',label,re.I):
+                                    field = node
+                                    break
+                            if field is None:
+                                raise RuntimeError('product_search_not_available')
+                            await field.fill(code)
+                            await field.press('Enter')
+                            await asyncio.sleep(2)
+                            links = await page.locator('a[href*="/ro/p/"]').evaluate_all("nodes=>[...new Set(nodes.map(a=>a.href))].slice(0,2)")
+                            for link in links:
+                                await crawler.visit(link,'intercars')
+                                text = await page.locator('body').inner_text()
+                                title = await page.locator('h1').first.inner_text() if await page.locator('h1').count() else ''
+                                if not title or not _oe_option_allowed(candidate,title,'OE'):
+                                    continue
+                                compact = re.sub(r'[^A-Z0-9]','',text.upper())
+                                if re.sub(r'[^A-Z0-9]','',code.upper()) not in compact:
+                                    continue
+                                price = re.search(r'(\d+(?:[.,]\d{2}))\s*RON',text)
+                                report['products'].append({**candidate,'manufacturer_ref':code,
+                                    'price_ron':float(price.group(1).replace(',','.')) if price else None,
+                                    'source':'Inter Cars crawler','vin_exact_oe_cross_reference':True,
+                                    'description':title,
+                                    'needs_price_review':True})
+                            await crawler.visit('https://ro.e-cat.intercars.eu/ro/','intercars')
+                            save()
+                        report['sources']['intercars']={'status':'finished'}
+                    except Exception as error:
+                        report['sources']['intercars']={'status':'error','error':str(error)[:300]}
+            except TimeoutError:
+                report['sources']['timeout']={'status':'error','error':'Crawler stopped at 300 seconds'}
+            finally:
+                report['pages']=crawler.pages
+                report['searches']=crawler.searches
+                report['explicit_catalogue_requests']=crawler.requests
+                report['status']='partial' if report['products'] else 'error'
+                report['finished_at']=datetime.now().isoformat(timespec='seconds')
+                save()

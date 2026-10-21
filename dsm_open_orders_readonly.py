@@ -10,6 +10,9 @@ from dsm_history_import import READ_DETAIL_JS
 class DsmOpenOrdersError(RuntimeError):
     pass
 
+from browser_resources import browser_operation
+
+@browser_operation
 async def _evaluate(expression):
     try:
         target=_home_target()

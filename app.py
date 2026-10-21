@@ -84,6 +84,8 @@ DATA_DIR = Path(os.getenv("ALBATROS_DATA_DIR", BASE)).expanduser().resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ACCURACY_EVALUATIONS_FILE = DATA_DIR / "accuracy_evaluations.json"
 app = FastAPI(title="Albatros AI v1.0.9 - Oferta editabilă")
+from browser_resources import BrowserActivityMiddleware, memory_health
+app.add_middleware(BrowserActivityMiddleware)
 from provider_test_console import router as provider_test_router
 app.include_router(provider_test_router)
 app.add_middleware(
@@ -505,7 +507,7 @@ def master_status(request: Request):
     return {'robot_enabled': POLICY.robot_enabled, 'dsm_accepted_offers': accepted_offer_state(DATA_DIR), 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
             'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR), 'dsm_session': dsm_session,
             'mechanic_send': _mechanic_send_readiness(),
-            'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True)}
+            'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True), 'browser_memory': memory_health(DATA_DIR)}
 
 
 class MasterControlInput(BaseModel):

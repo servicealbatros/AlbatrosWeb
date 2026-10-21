@@ -1971,5 +1971,7 @@ async def run(request_id: int, vin: str, query: str, output: Path,
 
 
 if __name__ == "__main__":
-    hints_arg = Path(sys.argv[5]) if len(sys.argv) > 5 else None
-    asyncio.run(run(int(sys.argv[1]), sys.argv[2].upper(), sys.argv[3], Path(sys.argv[4]), hints_arg))
+    from browser_resources import browser_activity_sync
+    with browser_activity_sync():
+        hints_arg = Path(sys.argv[5]) if len(sys.argv) > 5 else None
+        asyncio.run(run(int(sys.argv[1]), sys.argv[2].upper(), sys.argv[3], Path(sys.argv[4]), hints_arg))

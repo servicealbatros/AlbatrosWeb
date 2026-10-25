@@ -1448,6 +1448,33 @@ def _oe_option_allowed(candidate: dict, title: str, brand: str) -> bool:
     return True
 
 
+def _autototal_oe_card_identity(title: str) -> dict | None:
+    """Read the explicit OE maker and part number, not the retailer's name.
+
+    Observed: AUTOTOTAL OE 11318570649 (AUTOTOTAL) | ... - O.E. BMW.
+    Aftermarket cards that merely mention a BMW approval are not OE cards.
+    """
+    makers = (r'BMW|MINI|VOLKSWAGEN|VW|AUDI|SKODA|SEAT|CUPRA|MERCEDES(?:-BENZ)?|'
+              r'FORD|RENAULT|DACIA|PEUGEOT|CITROEN|OPEL|FIAT|VOLVO|TOYOTA|LEXUS|'
+              r'HONDA|MAZDA|NISSAN|HYUNDAI|KIA|SUZUKI|MITSUBISHI|SUBARU|PORSCHE')
+    title = str(title or '').strip().upper()
+    header = re.match(r'^AUTOTOTAL\s+OE\s+([A-Z0-9][A-Z0-9 .-]*?)'
+                      r'(?:\s*\(AUTOTOTAL\))?\s*\|', title)
+    if header:
+        maker = re.search(r'\bO\.?\s*E\.?\s+(' + makers + r')(?=$|[\s|,;(])',
+                          title.split('|', 1)[1])
+        if not maker:
+            return None
+        manufacturer, reference = maker.group(1), header.group(1)
+    else:
+        header = re.match(r'^OE\s+(' + makers + r')\s+([A-Z0-9][A-Z0-9 .-]*?)\s*\|', title)
+        if not header:
+            return None
+        manufacturer, reference = header.group(1), header.group(2)
+    return {'brand': 'OE ' + manufacturer, 'manufacturer': manufacturer,
+            'manufacturer_ref': re.sub(r'[^A-Z0-9]', '', reference)}
+
+
 def _keep_one_oil_drain_plug(products: list[dict]) -> list[dict]:
     """Offer one VIN/OE-confirmed drain plug, preferring the actual OE item."""
     plugs = [row for row in products if _revision_product_kind(
@@ -1459,7 +1486,7 @@ def _keep_one_oil_drain_plug(products: list[dict]) -> list[dict]:
         brand = _canonical_offer_brand(row.get("brand") or "")
         reference = re.sub(r"[^A-Z0-9]", "", str(row.get("manufacturer_ref") or "").upper())
         oe_code = re.sub(r"[^A-Z0-9]", "", str(row.get("oe_code") or "").upper())
-        exact_oe = brand == "OE" and reference and reference == oe_code
+        exact_oe = (brand == "OE" or brand.startswith("OE ")) and reference and reference == oe_code
         available = bool(str(row.get("availability") or "").strip())
         trusted = {"ELRING": 0, "FEBI": 1, "FA1": 2, "METZGER": 3, "TRISCAN": 4, "TOPRAN": 5}
         return (
@@ -1547,10 +1574,14 @@ async def _search_oe_code_options_once(ws, candidate: dict, call_id: int) -> lis
         if not _oe_option_allowed(candidate, title, brand):
             continue
         display_brand = _canonical_offer_brand(brand)
-        if "OE BMW" in upper_title or (brand == "AUTOTOTAL" and " OE " in f" {upper_title} "):
-            display_brand = "OE BMW"
         left = re.split(r"\s+\(|\s+\|", title, maxsplit=1)[0]
         reference = left[len(brand):].strip() if left.upper().startswith(brand) else left
+        oe_identity = _autototal_oe_card_identity(title)
+        if oe_identity:
+            if oe_identity['manufacturer_ref'] != re.sub(r'[^A-Z0-9]', '', code.upper()):
+                continue  # A related kit or a different OE number is not this confirmed code.
+            display_brand = oe_identity['brand']
+            reference = oe_identity['manufacturer_ref']
         delivery = (re.search(r"(Comanda (?:ajunge|express)[^\n]+|Termen mediu[^\n]+)", text, re.I) or [None, ""])[1]
         price = float(price_match.group(1).replace(",", "."))
         options.append({
@@ -1971,5 +2002,7 @@ async def run(request_id: int, vin: str, query: str, output: Path,
 
 
 if __name__ == "__main__":
-    hints_arg = Path(sys.argv[5]) if len(sys.argv) > 5 else None
-    asyncio.run(run(int(sys.argv[1]), sys.argv[2].upper(), sys.argv[3], Path(sys.argv[4]), hints_arg))
+    from browser_resources import browser_activity_sync
+    with browser_activity_sync():
+        hints_arg = Path(sys.argv[5]) if len(sys.argv) > 5 else None
+        asyncio.run(run(int(sys.argv[1]), sys.argv[2].upper(), sys.argv[3], Path(sys.argv[4]), hints_arg))

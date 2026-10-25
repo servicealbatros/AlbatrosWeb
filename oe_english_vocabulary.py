@@ -42,6 +42,7 @@ OE_ENGLISH_PARTS = {
     "bucșă suport diferențial": {"group_id": 10515, "terms": ("differential mount", "differential mounting bush", "rubber mounting, differential")},
     "kit ambreiaj": {"group_id": 10151, "terms": ("clutch kit", "repair kit clutch", "clutch set")},
     "volantă cu masă dublă": {"group_id": 10157, "terms": ("dual mass flywheel", "flywheel")},
+    "kit distribuție pe lanț": {"group_id": 10503, "terms": ("repair kit for timing chain", "timing chain kit")},
     "kit distribuție": {"group_id": 10116, "terms": ("timing belt kit", "timing chain kit", "repair kit, timing belt")},
     "curea accesorii": {"group_id": 10531, "terms": ("ribbed v-belt", "serpentine belt", "drive belt")},
     "rolă întinzătoare": {"group_id": 10534, "terms": ("tensioner pulley", "belt tensioner")},

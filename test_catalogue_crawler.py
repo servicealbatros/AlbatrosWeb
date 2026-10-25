@@ -4,11 +4,20 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from catalogue_crawler import safe_url, metrics, run_crawler
+from catalogue_crawler import safe_url, metrics, run_crawler, crawler_page
 from autototal_request_worker import _oe_option_allowed
 
 
 class CrawlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_page_allocation_failure_still_closes_temporary_context(self):
+        original = SimpleNamespace(storage_state=AsyncMock(return_value={}))
+        temporary = SimpleNamespace(new_page=AsyncMock(side_effect=RuntimeError('out of memory')), close=AsyncMock())
+        browser = SimpleNamespace(contexts=[original], new_context=AsyncMock(return_value=temporary))
+        with self.assertRaises(RuntimeError):
+            async with crawler_page(browser):
+                self.fail('Allocation should fail before yielding')
+        temporary.close.assert_awaited_once()
+
     def test_filter_search_rejects_housing_and_cover(self):
         candidate = {'requested_item': 'filtru ulei'}
         for title in ('BMW 11428507685 CAPAC CORP FILTRU ULEI',

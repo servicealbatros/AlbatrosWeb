@@ -143,6 +143,9 @@ async def _wait_ready(ws, call_id: int) -> None:
 _schedule_read_lock = asyncio.Lock()
 
 
+from browser_resources import browser_operation
+
+@browser_operation
 async def read_dsm_schedule(target_date: date) -> list[dict]:
     async with _schedule_read_lock:
         return await _read_dsm_schedule_existing_tab(target_date)

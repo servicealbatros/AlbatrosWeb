@@ -32,7 +32,7 @@ class ProviderVaultTests(unittest.TestCase):
 
 
 def login_page(url='https://www3.eoriginal.ro/login'):
-    password=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value=''),fill=AsyncMock())
+    password=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value=''),fill=AsyncMock(),evaluate=AsyncMock(return_value=False))
     username=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value=''),fill=AsyncMock())
     button=SimpleNamespace(count=AsyncMock(return_value=1),click=AsyncMock())
     form=SimpleNamespace(count=AsyncMock(return_value=1),locator=lambda _:username,get_by_role=lambda *a,**kw:button)
@@ -42,6 +42,88 @@ def login_page(url='https://www3.eoriginal.ro/login'):
 
 
 class ProviderLoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_autototal_icon_menu_is_positive_evidence_but_login_is_not(self):
+        from playwright.async_api import async_playwright, Error
+        async with async_playwright() as playwright:
+            try:
+                browser = await playwright.chromium.launch(headless=True)
+            except Error as exc:
+                if "Executable doesn't exist" in str(exc):
+                    self.skipTest('Playwright Chromium is not installed')
+                raise
+            try:
+                page = await browser.new_page()
+                markup = '<a href="" class="dropdown-item"><i>exit_to_app</i><span>Deconectare</span></a>'
+                await page.route('**/*', lambda route: route.fulfill(body=markup, content_type='text/html'))
+                await page.goto('https://www3.eoriginal.ro/')
+                self.assertTrue(await sessions.authenticated(page, 'AutoTotal'))
+                await page.set_content(markup + '<input type="password">')
+                self.assertFalse(await sessions.authenticated(page, 'AutoTotal'))
+                await page.set_content('<div>Catalog auto</div>')
+                self.assertFalse(await sessions.authenticated(page, 'AutoTotal'))
+                await page.goto('https://untrusted.example/')
+                self.assertFalse(await sessions.authenticated(page, 'AutoTotal'))
+            finally:
+                await browser.close()
+
+    async def test_completed_captcha_does_not_get_reset_by_identical_credentials(self):
+        page,password,username,button=login_page()
+        password.input_value.return_value='test-secret'
+        username.input_value.return_value='test-user'
+        credentials={'username':'test-user','password':'test-secret','login_url':page.url}
+        with patch.object(sessions,'active_verification',AsyncMock(return_value=False)),patch.object(sessions,'authenticated',AsyncMock(return_value=True)):
+            self.assertEqual(await sessions.reconnect(page,credentials,'AutoTotal'),'connected')
+        username.fill.assert_not_awaited();password.fill.assert_not_awaited()
+        button.click.assert_awaited_once()
+
+    async def test_expired_form_is_refreshed_with_get_not_post_resubmission(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keeper=sessions.ProviderSessionKeeper(Path(folder)/'profile',Fernet.generate_key().decode())
+            p,_,_,button=login_page();p.goto=AsyncMock();p.reload=AsyncMock()
+            with patch.object(sessions,'authenticated',AsyncMock(return_value=False)), \
+                    patch.object(sessions,'expired_autototal_form',AsyncMock(return_value=True)), \
+                    patch.object(keeper,'idle',return_value=True):
+                first=await keeper.check(SimpleNamespace(pages=[p]));second=await keeper.check(SimpleNamespace(pages=[p]))
+            self.assertEqual(first['AutoTotal']['status'],'login_form_refreshed')
+            self.assertEqual(second['AutoTotal']['status'],'login_form_expired')
+            p.goto.assert_awaited_once_with(sessions.AUTOTOTAL_LOGIN,wait_until='domcontentloaded',timeout=15000)
+            p.reload.assert_not_awaited();button.click.assert_not_awaited()
+
+    async def test_connected_autototal_session_is_kept_alive_without_navigation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keeper=sessions.ProviderSessionKeeper(Path(folder)/'profile',Fernet.generate_key().decode())
+            p,_,_,_=login_page(sessions.AUTOTOTAL_HOME);p.goto=AsyncMock();p.reload=AsyncMock()
+            p.request=SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(url=sessions.AUTOTOTAL_HOME,status=200,ok=True)))
+            with patch.object(sessions,'authenticated',AsyncMock(return_value=True)),patch.object(keeper,'idle',return_value=True):
+                first=await keeper.check(SimpleNamespace(pages=[p]));await keeper.check(SimpleNamespace(pages=[p]))
+            self.assertEqual(first['AutoTotal']['status'],'connected')
+            p.request.get.assert_awaited_once_with(sessions.AUTOTOTAL_HOME,timeout=10000)
+            p.goto.assert_not_awaited();p.reload.assert_not_awaited()
+
+    async def test_missing_autototal_tab_is_restored_once_in_same_context(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keeper=sessions.ProviderSessionKeeper(Path(folder)/'profile',Fernet.generate_key().decode())
+            keeper.vaults['AutoTotal'].save('user','secret',sessions.AUTOTOTAL_HOME,strict_location=False)
+            p,_,_,_=login_page();p.goto=AsyncMock()
+            context=SimpleNamespace(pages=[],new_page=AsyncMock(return_value=p))
+            with patch.object(sessions,'authenticated',AsyncMock(return_value=False)), \
+                    patch.object(sessions,'upstream_error',AsyncMock(return_value=False)), \
+                    patch.object(sessions,'expired_autototal_form',AsyncMock(return_value=False)), \
+                    patch.object(sessions,'reconnect',AsyncMock(return_value='human_verification_required')), \
+                    patch.object(keeper,'idle',return_value=True):
+                first=await keeper.check(context);await keeper.check(context)
+            self.assertTrue(first['AutoTotal']['tab_restored'])
+            context.new_page.assert_awaited_once()
+
+    async def test_busy_offer_prevents_expired_form_navigation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            keeper=sessions.ProviderSessionKeeper(Path(folder)/'profile',Fernet.generate_key().decode())
+            p,_,_,_=login_page();p.goto=AsyncMock()
+            with patch.object(sessions,'authenticated',AsyncMock(return_value=False)), \
+                    patch.object(sessions,'expired_autototal_form',AsyncMock(return_value=True)),patch.object(keeper,'idle',return_value=False):
+                await keeper.check(SimpleNamespace(pages=[p]))
+            p.goto.assert_not_awaited()
+
     async def test_saved_password_only_submitted_to_pinned_trusted_form(self):
         page,password,username,button=login_page()
         creds={'username':'test-user','password':'test-secret','login_url':page.url}

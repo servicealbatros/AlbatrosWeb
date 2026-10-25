@@ -84,6 +84,8 @@ DATA_DIR = Path(os.getenv("ALBATROS_DATA_DIR", BASE)).expanduser().resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ACCURACY_EVALUATIONS_FILE = DATA_DIR / "accuracy_evaluations.json"
 app = FastAPI(title="Albatros AI v1.0.9 - Oferta editabilă")
+from browser_resources import BrowserActivityMiddleware, memory_health
+app.add_middleware(BrowserActivityMiddleware)
 from provider_test_console import router as provider_test_router
 app.include_router(provider_test_router)
 from dsm_advisor_packages import router as advisor_packages_router
@@ -457,11 +459,39 @@ async def pre_reception_pilot(request: Request):
     return await start(DATA_DIR, send_whatsapp_notification, seed)
 
 
+@app.post('/api/dashboard/master/pre-reception/retest')
+async def pre_reception_retest(request: Request):
+    _master_access(request)
+    if not POLICY.robot_enabled:
+        raise HTTPException(status_code=409, detail='STOP SAFE activ.')
+    from pre_reception import restart
+    from dsm_pre_reception import seed
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail='Date de probă invalide.')
+    recipient = body.get('recipient')
+    if recipient in {'7032', '2878'}:
+        from pre_reception import RECIPIENTS
+        recipient = next(p for p in RECIPIENTS if p.endswith(recipient))
+    async def send_retest(target, text):
+        return await send_whatsapp_notification(target, text, kind='request',
+                                                subject='test pregătire recepție B101TST')
+    try:
+        return await restart(DATA_DIR, send_retest, seed, run_id=body.get('run_id'), recipient=recipient)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 async def _pre_reception_write(data, allow_create):
     if not POLICY.robot_enabled:
         raise RuntimeError('STOP SAFE activ.')
     from dsm_pre_reception import create_or_find
-    return await create_or_find(data, allow_create)
+    def record_created(command_id):
+        from pre_reception import db
+        with db(DATA_DIR) as conn:
+            conn.execute('UPDATE orders SET result=? WHERE offer=? AND state=?',
+                         (json.dumps({'id': command_id}), data['offer_id'], 'creating'))
+    return await create_or_find(data, allow_create, record_created=record_created)
 
 
 @app.get('/api/dashboard/master/status')
@@ -479,7 +509,7 @@ def master_status(request: Request):
     return {'robot_enabled': POLICY.robot_enabled, 'dsm_accepted_offers': accepted_offer_state(DATA_DIR), 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
             'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR), 'dsm_session': dsm_session,
             'mechanic_send': _mechanic_send_readiness(),
-            'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True)}
+            'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True), 'browser_memory': memory_health(DATA_DIR)}
 
 
 class MasterControlInput(BaseModel):
@@ -558,6 +588,27 @@ async def sync_dsm_accepted_offers(request: Request):
     _master_access(request)
     from dsm_accepted_offers import synchronize
     return await synchronize(DB_PATH, DATA_DIR)
+
+
+@app.post('/api/dashboard/master/dsm-accepted-offers/rebuild')
+async def rebuild_dsm_signed_dashboard(request: Request):
+    _master_access(request)
+    if request.headers.get('X-Human-Action') != 'rebuild-signed-offers':
+        raise HTTPException(status_code=409, detail='Acțiune explicită de curățare necesară.')
+    from dsm_accepted_offers import rebuild_signed_offers
+    rows = list_requests(include_dsm_accepted=True)
+    quoted = [int(r['id']) for r in rows if _draft_for_request(int(r['id']))
+              or str(_load_request_offer_result(int(r['id'])).get('status') or '').lower() in {'ready', 'partial'}]
+    protected = [int(j['request_id']) for j in _load_robot_jobs()
+                 if j.get('request_id') and j.get('status') in {'RUNNING', 'QUEUED'}]
+    try:
+        result = await rebuild_signed_offers(DB_PATH, DATA_DIR, quoted_ids=quoted,
+                                             status_map=dict(REQUEST_STATUS), protected_ids=protected)
+    except Exception:
+        raise HTTPException(status_code=502, detail='Citirea completă DSM sau curățarea nu a reușit. Verifică starea înainte de reluare.') from None
+    POLICY.logger.write(action='rebuild_signed_offers', result='success' if result.get('ok') else 'running',
+                        success=bool(result.get('ok')), website='dashboard')
+    return result
 
 
 @app.get('/api/dashboard/master/provider-tabs')
@@ -2294,7 +2345,15 @@ def _clear_offer_work_state(request_id: int) -> None:
         _save_offer_selections(selections)
     drafts = _load_offer_drafts()
     if key in drafts:
-        drafts.pop(key, None)
+        # Retain the researched scope, but invalidate prices and approvals from
+        # the previous search. New supplier results must be reviewed again.
+        checklist = drafts[key].get('parts_checklist') or []
+        internal = drafts[key].get('internal_consumables') or []
+        if checklist or internal:
+            drafts[key] = {'parts_checklist': [dict(row, unit_price_ron=None, confirmed=False)
+                                               for row in checklist], 'internal_consumables': internal}
+        else:
+            drafts.pop(key, None)
         _save_offer_drafts(drafts)
 
 
@@ -2627,7 +2686,7 @@ def _persist_request_status(request_id: int, status: str) -> None:
     status = str(status).strip().lower()
     REQUEST_STATUS[request_id] = status
     save_request_status()
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("UPDATE service_requests SET status=? WHERE id=?", (status, request_id))
         conn.commit()
 
@@ -2754,6 +2813,8 @@ class WhatsAppDestinationInput(BaseModel):
 
 
 class OfferDraftInput(BaseModel):
+    parts_checklist: list[dict] = Field(default_factory=list)
+    internal_consumables: list[dict] = Field(default_factory=list)
     operation: str = ""
     labour_operations: list[dict] = Field(default_factory=list)
     additional_operation: str = ""
@@ -2784,6 +2845,14 @@ class OfferDraftInput(BaseModel):
     drain_plug_price_ron: float = 0.0
     drain_plug_availability: str = ""
     notes: str = ""
+
+
+class WorkshopStockRequestInput(BaseModel):
+    item_key: str = Field(min_length=20, max_length=20)
+    technician: str = Field(min_length=1, max_length=120)
+    quantity: float = Field(gt=0, le=999, allow_inf_nan=False)
+    unit_price_ron: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    reference: str = Field(default="", max_length=160)
 
 
 class SchedulerTechnicianInput(BaseModel):
@@ -3376,6 +3445,9 @@ def requests():
             or item.get("date_created")
             or ""
         )
+        if item.get('source') == 'dsm_accepted_offer':
+            from dsm_accepted_offers import dashboard_dates
+            item.update(dashboard_dates(imported_offer))
         offer_result = _load_request_offer_result(int(req_id)) if req_id else {}
         offer_draft = _draft_for_request(int(req_id)) if req_id else {}
         offer_status = str(offer_result.get("status") or "").lower()
@@ -3441,6 +3513,10 @@ def dashboard_archive(request: Request, before: str | None = None):
         else:
             conn.row_factory=sqlite3.Row
             rows=[dict(r) for r in conn.execute('SELECT s.* FROM service_requests s JOIN request_archive a ON a.request_id=s.id ORDER BY s.id DESC')]
+    from dsm_accepted_offers import offer_record, dashboard_dates
+    for row in rows:
+        if row.get('source') == 'dsm_accepted_offer':
+            row.update(dashboard_dates(offer_record(DB_PATH, row['id'])))
     return {'rows':rows,'count':len(rows)}
 
 
@@ -3713,17 +3789,28 @@ def set_request_status(
     human_action: str | None = Header(None, alias="X-Human-Action"),
 ):
     _confirm_local_dashboard_click(request, Action.MODIFY_BOOKING, request_id, human_action, 'update-request-status')
-    if not _request_by_id(request_id):
+    request_row = _request_by_id(request_id)
+    if not request_row:
         raise HTTPException(status_code=404, detail='Cererea nu a fost găsită.')
     status = data.status.strip().lower()
-    if status in {'acceptat', 'programat'} and not _request_has_approved_offer(request_id):
-        raise HTTPException(status_code=409, detail='Verifică și aprobă oferta, timpii și manopera înainte de acceptare sau programare.')
 
     if status not in VALID_REQUEST_STATUSES:
         raise HTTPException(
             status_code=400,
             detail="Status invalid"
         )
+
+    if status in {'acceptat', 'programat'} and not _request_has_approved_offer(request_id):
+        from dsm_accepted_offers import has_signed_dashboard_offer
+        if not has_signed_dashboard_offer(DB_PATH, request_row):
+            raise HTTPException(status_code=409, detail='Verifică și aprobă oferta, timpii și manopera înainte de acceptare sau programare.')
+
+    if status in {'acceptat', 'programat'} and not (status == 'programat' and request_row.get('status') == 'programat'):
+        from dsm_accepted_offers import require_valid_for_booking
+        try:
+            require_valid_for_booking(DB_PATH, request_row)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     _persist_request_status(request_id, status)
     if status == 'rezolvat':
@@ -3955,12 +4042,59 @@ def request_technician_result(request_id: int):
 
 @app.post("/api/requests/{request_id}/offer-draft")
 def save_offer_draft(request_id: int, data: OfferDraftInput, confirmation_token: str | None = Header(None, alias="X-Confirmation-Token")):
+    return _persist_offer_draft(request_id, data)
+
+
+@app.post("/api/requests/{request_id}/workshop-stock-request")
+def record_workshop_stock_request(request_id: int, data: WorkshopStockRequestInput):
+    from offer_parts_checklist import material_key
+    old = _draft_for_request(request_id)
+    internal = old.get('internal_consumables') or []
+    item = next((row for row in internal if material_key(row) == data.item_key), None)
+    if not item:
+        raise HTTPException(409, 'Consumabilul nu mai este în necesarul intern. Reîncarcă oferta.')
+    if not data.technician.strip():
+        raise HTTPException(400, 'Completează mecanicul care a solicitat consumabilul.')
+    if not item.get('code'):
+        raise HTTPException(400, 'Confirmă mai întâi codul consumabilului.')
+    stock_request = dict(item_key=data.item_key, technician=data.technician.strip(),
+                         quantity=data.quantity, reference=data.reference.strip(),
+                         requested_at=datetime.now().isoformat(timespec='seconds'))
+    draft = dict(old)
+    draft['internal_consumables'] = [row for row in internal if material_key(row) != data.item_key]
+    draft['parts_checklist'] = list(old.get('parts_checklist') or []) + [dict(
+        item, quantity=data.quantity, unit_price_ron=data.unit_price_ron, confirmed=False)]
+    # Adding an actual charge requires advisor review again; it never sends a message.
+    draft['labour_reviewed'] = False
+    return _persist_offer_draft(request_id, OfferDraftInput(**draft), stock_request=stock_request)
+
+
+def _persist_offer_draft(request_id: int, data: OfferDraftInput, *, stock_request=None):
     # Salvarea schiței este internă și reversibilă; nu transmite oferta.
     request_row = _request_by_id(request_id)
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost găsită.")
 
     draft = data.model_dump()
+    from offer_parts_checklist import split_workshop_materials, subtotal
+    from timing_chain_policy import default_checklist, chain_replacement
+    old = _draft_for_request(request_id)
+    if 'parts_checklist' not in data.model_fields_set:
+        draft['parts_checklist'] = old.get('parts_checklist') or []
+    if 'internal_consumables' not in data.model_fields_set:
+        draft['internal_consumables'] = old.get('internal_consumables') or []
+    if not draft['parts_checklist']:
+        draft['parts_checklist'] = default_checklist(request_row.get('symptom'))
+    had_checklist = bool(draft['parts_checklist'])
+    try:
+        draft['parts_checklist'], draft['internal_consumables'] = split_workshop_materials(
+            draft['parts_checklist'], draft['internal_consumables'], old.get('parts_checklist') or [], stock_request)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if had_checklist:
+        draft['parts_price_ron'] = subtotal(draft['parts_checklist'])
+    from offer_parts_checklist import pending_lines
+    draft['parts_prices_pending'] = bool(pending_lines(draft['parts_checklist']))
     normalized_operations = []
     for index, row in enumerate((draft.get("labour_operations") or [])[:50]):
         if not isinstance(row, dict):
@@ -3986,7 +4120,8 @@ def save_offer_draft(request_id: int, data: OfferDraftInput, confirmation_token:
             or draft["drain_plug_price_ron"] < 0):
         raise HTTPException(status_code=400, detail="Prețurile și cantitatea uleiului trebuie să fie pozitive.")
     request_text = str(request_row.get("symptom") or "").lower()
-    is_service = "revizie" in request_text or ("ulei" in request_text and "filtr" in request_text)
+    from transmission_service_policy import engine_service_requested
+    is_service = engine_service_requested(request_text) and (chain_replacement(request_text) or 'revizie' in request_text or ('ulei' in request_text and 'filtr' in request_text))
     if is_service and _float_or_zero(draft.get("oil_liters")) > 0:
         # Uleiul se ofertează la litru întreg. Capacitatea tehnică rămâne
         # separată, iar cantitatea facturabilă se rotunjește mereu în sus.
@@ -4073,6 +4208,23 @@ def _require_original_oil_selection(request_id: int) -> None:
 def _require_advisor_labour_review(request_id: int) -> dict:
     _require_original_oil_selection(request_id)
     draft = _draft_for_request(request_id)
+    from offer_parts_checklist import pending_lines, is_workshop_consumable
+    from timing_chain_policy import chain_replacement
+    checklist = draft.get('parts_checklist') or []
+    if any(is_workshop_consumable(row) and not row.get('stock_request') for row in checklist):
+        raise HTTPException(409, 'Consumabilele se adaugă în deviz numai după înregistrarea cererii mecanicului din magazie. Salvează mai întâi oferta pentru separarea necesarului intern.')
+    selected = _load_offer_selections().get(str(request_id), {})
+    if any(is_workshop_consumable(dict(p, code=p.get('manufacturer_ref') or p.get('code')))
+           for p in selected.get('products') or ([selected['product']] if selected.get('product') else [])):
+        raise HTTPException(409, 'Scoate consumabilele din selecția de ofertare și înregistrează cererea efectivă din magazie în deviz.')
+    if checklist and pending_lines(checklist):
+        raise HTTPException(409, 'Necesarul de piese are coduri, cantități, prețuri sau verificări neconfirmate.')
+    if chain_replacement((_request_by_id(request_id) or {}).get('symptom')):
+        from original_oil_policy import is_original_engine_oil
+        if not checklist or not is_original_engine_oil({'description': draft.get('oil_product_name')},
+                                                      (_request_by_id(request_id) or {}).get('vehicle')) \
+                or _float_or_zero(draft.get('oil_unit_price_ron')) <= 0 or _float_or_zero(draft.get('oil_liters')) <= 0:
+            raise HTTPException(409, 'Distribuția pe lanț necesită lista de piese verificată și revizia cu ulei original, cantitate și preț confirmate.')
     if not draft or not draft.get("labour_reviewed"):
         raise HTTPException(
             status_code=409,
@@ -4140,9 +4292,16 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
     if oil_unit_price > 0 and not str(draft.get("oil_product_name") or "").strip():
         missing.append("identificarea uleiului")
     request_text = " ".join(str(request_row.get(k) or "") for k in ("symptom", "request", "solicitare", "problem")).lower()
-    is_service = "revizie" in request_text or ("ulei" in request_text and "filtr" in request_text)
+    from transmission_service_policy import engine_service_requested
+    is_service = engine_service_requested(request_text) and ('revizie' in request_text or ('ulei' in request_text and 'filtr' in request_text))
     selected_entry = _load_offer_selections().get(str(request_id), {})
     selected_for_validation = selected_entry.get("products") or ([selected_entry.get("product")] if selected_entry.get("product") else [])
+    # An individually verified checklist is also an explicit parts selection.
+    # Do not require selecting the same filters a second time in supplier cards.
+    selected_for_validation = list(selected_for_validation) + [
+        {'description': row['description'], 'manufacturer_ref': row['code']}
+        for row in draft.get('parts_checklist') or [] if row.get('confirmed')
+    ]
     if is_service:
         selected_kinds = {_offer_product_kind(p)
                           for p in selected_for_validation if isinstance(p, dict)}
@@ -5741,6 +5900,8 @@ def request_offer_select(request_id: int, data: OfferSelectionInput, confirmatio
     if any((p.get("intercars_code") or p.get("supplier_code")) == code for p in selected_products):
         selected_products = [p for p in selected_products if (p.get("intercars_code") or p.get("supplier_code")) != code]
     else:
+        if _defer_workshop_product(request_id, product):
+            return {'ok': True, 'request_id': request_id, 'status': 'necesar_intern_magazie', 'selected': selected_products}
         selected_kind = _offer_product_kind(product)
         selected_side = _normalize_text(product.get("side") or "")
         selected_products = [
@@ -5817,6 +5978,9 @@ def request_offer_manual_part(request_id: int, data: ManualOfferPartInput):
         raise HTTPException(status_code=400, detail="Cantitatea trebuie să fie între 1 și 99.")
     if data.unit_price_ron < 0 or data.unit_price_ron > 1_000_000:
         raise HTTPException(status_code=400, detail="Prețul unitar nu poate fi negativ.")
+    if _defer_workshop_product(request_id, dict(description=description, manufacturer_ref=manufacturer_ref,
+                                               quantity=data.quantity, price_ron=data.unit_price_ron)):
+        return {'ok': True, 'status': 'necesar_intern_magazie'}
 
     product_code = "MANUAL-" + uuid4().hex[:12].upper()
     product = {
@@ -5848,6 +6012,22 @@ def request_offer_manual_part(request_id: int, data: ManualOfferPartInput):
     _save_offer_selections(selections)
     _reset_draft_parts_from_selection(request_id)
     return {"ok": True, "product": product, "selected": selected_products}
+
+
+def _defer_workshop_product(request_id: int, product: dict) -> bool:
+    from offer_parts_checklist import is_workshop_consumable, material_key
+    row = dict(description=product.get('description') or product.get('requested_item') or '',
+               code=product.get('manufacturer_ref') or product.get('code') or '',
+               quantity=None, unit_price_ron=None, confirmed=False,
+               source=product.get('source') or 'Necesar atelier')
+    if not is_workshop_consumable(row):
+        return False
+    draft = _draft_for_request(request_id)
+    internal = {material_key(item): item for item in draft.get('internal_consumables') or []}
+    internal[material_key(row)] = row
+    draft['internal_consumables'] = list(internal.values())
+    _persist_offer_draft(request_id, OfferDraftInput(**draft))
+    return True
 
 
 @app.post("/api/requests/{request_id}/offer-manual-part-remove")
@@ -5994,6 +6174,13 @@ def request_unified_offer_page(request_id: int):
     tech = _load_technician_result(request_id)
     tech_defaults = _partial_tech_defaults(tech)
     draft = _draft_for_request(request_id)
+    from offer_parts_checklist import render_lines, render_internal_materials
+    from timing_chain_policy import default_checklist, chain_replacement
+    from transmission_service_policy import engine_service_requested, drivetrain_operations
+    drivetrain_only = bool(drivetrain_operations(request_row.get('symptom'))) and not engine_service_requested(request_row.get('symptom'))
+    engine_oil_panel_style = 'display:none' if drivetrain_only else ''
+    parts_checklist_html = render_lines(draft.get('parts_checklist') or default_checklist(request_row.get('symptom')), engine_oil_separate=not drivetrain_only)
+    internal_consumables_html = render_internal_materials(draft.get('internal_consumables') or [])
     history_job = next((row for row in _load_robot_jobs()
                         if int(row.get("request_id") or 0) == int(request_id)), None)
     history_oils = [part for part in (history_job or {}).get("history_parts") or []
@@ -6005,7 +6192,7 @@ def request_unified_offer_page(request_id: int):
     vin = request_row.get("vin") or "—"
     symptom = request_row.get("symptom") or request_row.get("request") or request_row.get("solicitare") or request_row.get("problem") or "—"
     search_query = offer.get("query") or symptom
-    is_service_offer = any(
+    is_service_offer = chain_replacement(symptom) or any(
         key in _normalize_text(symptom)
         for key in ("revizie", "filtru", "filtre", "schimb ulei", "ulei motor")
     )
@@ -6300,9 +6487,9 @@ def request_unified_offer_page(request_id: int):
         labour_breakdown_html = f"""
         <div class="span3" style="padding:14px;background:#eff6ff;border:1px solid #93c5fd;border-radius:10px">
           <h3 style="margin:0 0 8px">Observații interne — timpi de reparație</h3>
-          <table style="margin:0"><thead><tr><th>Operație</th><th>Timp catalog</th><th>Sursă / observație</th></tr></thead>
+          <table style="margin:0"><thead><tr><th>Operație</th><th>Timp / estimare</th><th>Sursă / observație</th></tr></thead>
           <tbody>{''.join(labour_rows_html)}</tbody></table>
-          <div style="margin-top:10px"><b>Calcul:</b> timpi confirmați {shown_technical:g} h
+          <div style="margin-top:10px"><b>Calcul:</b> timp însumat {shown_technical:g} h
           + marjă Albatros {shown_margin:g} h = {shown_expected:g} h estimate.
           Timp rezervat: {shown_booking:g} h.</div>
           <div><b>Stare:</b> calcul {_escape_html(labour_state)}</div>
@@ -6551,6 +6738,8 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
 
   <div class="card">
     <h2 style="margin-top:0">Rezultate piese</h2>
+    {parts_checklist_html}
+    {internal_consumables_html}
     {autototal_status_html}
     {partial_notice}
     {products_html}
@@ -6615,7 +6804,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
       <input id="parts_name" type="hidden" value="{_escape_html(parts_name)}">
       <input id="parts_price_ron" type="hidden" value="{parts_price}">
       <input id="parts_availability" type="hidden" value="{_escape_html(parts_availability)}">
-      <div class="span3 oilbox">
+      <div class="span3 oilbox" style="{engine_oil_panel_style}">
         <h3 style="margin:0 0 6px">{"Ulei identificat automat" if robot_oil_identified else "Ulei de completat de consilier"}</h3>
         <div style="margin-bottom:12px"><small>{_escape_html(oil_quantity_note)} {"Programul a completat produsul, ambalajul și prețul; consilierul le poate modifica." if robot_oil_identified else "Programul completează automat ce identifică; consilierul poate corecta valorile."}</small></div>
         <div class="formgrid">
@@ -6657,7 +6846,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
           </div>
         </div>
       </div>
-      <div class="span3 oilbox" style="background:#eff6ff;border-color:#2563eb">
+      <div class="span3 oilbox" style="background:#eff6ff;border-color:#2563eb;{engine_oil_panel_style}">
         <h3 style="margin:0 0 6px">Bușon baie ulei — obligatoriu la schimbul de ulei</h3>
         <div><small>Bușonul trebuie selectat din lista de piese de mai sus. Bifează confirmarea după ce ai verificat selecția; datele comerciale nu se repetă aici.</small></div>
         <label style="display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;margin-top:12px">
@@ -6712,6 +6901,8 @@ function n(id){{
   return Number.isFinite(x)?x:0;
 }}
 function updateTotal(){{
+  const checklist=quoteParts();
+  if(checklist.length)document.getElementById("parts_price_ron").value=checklist.reduce((sum,row)=>sum+(row.quantity||0)*(row.unit_price_ron||0),0).toFixed(2);
   const oilTotal=n("oil_unit_price_ron")*n("oil_liters");
   const packLiters=n("oil_pack_liters");
   document.getElementById("oil_pack_quantity").value=
@@ -6722,7 +6913,9 @@ function updateTotal(){{
     oilTotal.toLocaleString("ro-RO",{{minimumFractionDigits:2,maximumFractionDigits:2}})+" RON";
   document.getElementById("total_value").textContent=
     total.toLocaleString("ro-RO",{{minimumFractionDigits:2,maximumFractionDigits:2}})+" RON"+
-    (n("oil_unit_price_ron")>0 && n("oil_liters")===0?" (fără ulei; preț pe litru)":"");
+    (n("oil_unit_price_ron")>0 && n("oil_liters")===0?" (fără ulei; preț pe litru)":"")+
+    (checklist.some(row=>!row.confirmed||row.unit_price_ron===null||row.quantity===null||!row.code)||
+      (checklist.length && (n("oil_unit_price_ron")<=0||n("oil_liters")<=0))?" — TOTAL PARȚIAL, piese sau ulei de confirmat":"");
 }}
 function updateOilFromPack(){{
   const packLiters=n("oil_pack_liters"),packPrice=n("oil_pack_price_ron");
@@ -6925,7 +7118,7 @@ async function addManualPart(){{
   const r=await fetch("/api/requests/{request_id}/offer-manual-part",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(data)}});
   const d=await r.json();
   if(!r.ok){{box.textContent=d.detail||"Piesa nu a putut fi adăugată.";return;}}
-  box.textContent="Piesa a fost adăugată și marcată ca verificată manual.";
+  box.textContent=d.status==='necesar_intern_magazie'?'Consumabil păstrat în necesarul intern; se adaugă în deviz după cererea mecanicului.':"Piesa a fost adăugată și marcată ca verificată manual.";
   setTimeout(()=>location.reload(),500);
 }}
 async function removeManualPart(code){{
@@ -6934,8 +7127,41 @@ async function removeManualPart(code){{
   if(!r.ok){{alert(d.detail||"Piesa manuală nu a putut fi ștearsă.");return;}}
   location.reload();
 }}
+function quoteParts(){{
+ return [...document.querySelectorAll('.quote-part-row')].map(row=>({{
+  description:row.querySelector('.quote-description').value.trim(),
+  code:row.querySelector('.quote-code').value.trim(),
+  quantity:row.querySelector('.quote-quantity').value===''?null:Number(row.querySelector('.quote-quantity').value),
+  unit_price_ron:row.querySelector('.quote-price').value===''?null:Number(row.querySelector('.quote-price').value),
+  confirmed:row.querySelector('.quote-confirmed').checked,
+  note:row.querySelector('.quote-note').value,source:row.dataset.source||''
+ }}));
+}}
+async function recordWorkshopRequest(key){{
+ const box=document.getElementById('stock_'+key);
+ const technician=box.querySelector('.stock-technician').value.trim();
+ const quantity=box.querySelector('.stock-quantity').value;
+ const price=box.querySelector('.stock-price').value;
+ if(!technician||quantity===''||Number(quantity)<=0||price===''){{alert('Completează mecanicul, cantitatea solicitată și prețul.');return;}}
+ const button=box.querySelector('button');button.disabled=true;
+ try{{
+  const current=payload();current.labour_reviewed=false;
+  const saved=await fetch('/api/requests/{request_id}/offer-draft',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(current)}});
+  if(!saved.ok){{alert((await saved.json()).detail||'Salvează mai întâi oferta.');return;}}
+  const r=await fetch('/api/requests/{request_id}/workshop-stock-request',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{
+   item_key:key,technician,quantity:Number(quantity),unit_price_ron:Number(price),reference:box.querySelector('.stock-reference').value.trim()
+  }})}});
+  const result=await r.json();if(!r.ok){{alert(result.detail||'Cererea nu a putut fi înregistrată.');return;}}
+  location.reload();
+ }}finally{{button.disabled=false;}}
+}}
+document.querySelectorAll('.quote-part-row input').forEach(input=>input.addEventListener('input',()=>{{
+ if(!input.classList.contains('quote-confirmed'))input.closest('.quote-part-row').querySelector('.quote-confirmed').checked=false;
+ updateTotal();
+}}));
 function payload(){{
   return {{
+    parts_checklist:quoteParts(),
     operation:document.getElementById("operation").value,
     labour_operations:labourOperations(),
     additional_operation:document.getElementById("additional_operation").value,
@@ -8946,6 +9172,7 @@ function esc(value) {
 }
 
 function requestDateRaw(row) {
+    if (row.source === 'dsm_accepted_offer') return String(row.accepted_at || "");
     return String(value(row, "request_datetime", "created_at", "created", "timestamp", "date_created") || "");
 }
 function requestMonth(row) {
@@ -8959,7 +9186,9 @@ function requestMonth(row) {
 }
 function formatRequestDate(row) {
     const raw = requestDateRaw(row).trim();
+    if (row.source === 'dsm_accepted_offer' && !raw) return "Data acceptării indisponibilă în DSM";
     if (!raw) return "—";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw.split('-').reverse().join('.');
     const d = new Date(raw);
     if (!Number.isNaN(d.getTime())) {
         return d.toLocaleString("ro-RO", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
@@ -9021,6 +9250,7 @@ async function updateStatus(requestId, status) {
         const row = requests.find(r => String(requestId) === String(value(r, "id", "request_id", "req_id")));
         if (row) {
             row.desktop_status = status;
+            row.status = status;
         }
 
         renderStats();
@@ -9212,7 +9442,8 @@ function detailHtml(row) {
         ["Sursă manoperă", value(row, "labour_source")],
         ["Operație manoperă", value(row, "labour_operation")],
         ["Sesiune / caz", value(row, "session_id")],
-        ["Creat la", value(row, "created_at", "created", "timestamp")],
+        [row.source === 'dsm_accepted_offer' ? "Acceptată la" : "Creat la", row.source === 'dsm_accepted_offer' ? formatRequestDate(row) : value(row, "created_at", "created", "timestamp")],
+        ["Importată în Dashboard la", row.source === 'dsm_accepted_offer' ? value(row, "created_at") : ""],
     ].filter(item => item[1] !== "");
 
     if (!fields.length) {
@@ -9365,7 +9596,7 @@ function render() {
         });
         tr.innerHTML = `
             <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
-            <td style="white-space:nowrap">${esc(formatRequestDate(row))}</td>
+            <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}${row.source === 'dsm_accepted_offer' ? `<br><strong style="color:${row.offer_validity === 'expired' ? '#b91c1c' : row.offer_validity === 'valid' ? '#166534' : '#92400e'}">${esc(row.offer_validity_message || 'Valabilitate de verificat')}</strong>` : ''}</td>
             <td>${esc(customer || "—")}</td>
             <td>${esc(phone || "—")}</td>
             <td>${esc(vehicle || "—")}</td>
@@ -10869,6 +11100,8 @@ WORK_REQUEST_PATTERN = re.compile(
     r"constata|tronc|ambreiaj|distribu|itp|diagno|parbriz|anvelop|ro[țt]i|"
     r"pivot|cap(?:at)?\s+(?:de\s+)?bar[aă]|bielet|bilet(?:e)?\s+bar[aă]|"
     r"bar[aă]\s+stabiliz|buc[șs]|bascul|amortiz|arc|planetar|cardan|"
+    r"vops|revops|tinich|[iî]ndrept|retu[șs]|[șs]lefui|polish|polis|"
+    r"repar(?:at|a[țt]ie|are)?.*(?:bar[aă]|arip|portier|capot|prag|caroser)|"
     r"curea\s+(?:de\s+)?accesor|reglaj\s+(?:de\s+)?direc|geometr",
     re.IGNORECASE,
 )
@@ -11264,7 +11497,8 @@ async def _route_new_vehicle_intake(sender: str, body: str) -> bool:
             if line.strip() and not _looks_like_greeting_only(line.strip())
         ]
         symptom = " ".join(symptom_lines).strip() or body.strip()
-        category = "ÎNTREȚINERE" if re.search(r"revizie|filtr|ulei", _normalize_text(symptom)) else "MECANICĂ"
+        category = ("TINICHIGERIE–VOPSITORIE" if scheduler_department_for_operations(symptom) == 'tinichigerie_vopsitorie'
+                    else "ÎNTREȚINERE" if re.search(r"revizie|filtr|ulei", _normalize_text(symptom)) else "MECANICĂ")
         request_id = create_request({
             "session_id": case_id,
             "conversation_id": case_id,

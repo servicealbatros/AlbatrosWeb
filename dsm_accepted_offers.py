@@ -8,10 +8,86 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import shutil
+import os
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 ROMANIA = ZoneInfo('Europe/Bucharest')
 LOCK = asyncio.Lock()
+
+
+def acceptance_datetime(payload):
+    """Only explicit signing timestamps count; document/import dates never do."""
+    states = payload.get('sms_or_qrcode_sended') or {}
+    if not isinstance(states, dict):
+        return ''
+    dates = set()
+    for document, evidence in states.items():
+        if re.sub(r'^\d+_', '', str(document)) != 'service_offer' or not isinstance(evidence, dict):
+            continue
+        status = signature_status({'sms_or_qrcode_sended': {document: evidence}})
+        if status not in {'signed', 'complete', 'completed'}:
+            continue
+        for key in ('signed_at', 'accepted_at', 'signature_datetime', 'acceptance_datetime'):
+            raw = evidence.get(key)
+            if not isinstance(raw, str):
+                continue
+            try:
+                if re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw):
+                    dates.add(datetime.strptime(raw, '%Y-%m-%d').date().isoformat())
+                elif re.fullmatch(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?', raw):
+                    parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=ROMANIA)
+                    dates.add(parsed.astimezone(ROMANIA).isoformat())
+            except ValueError:
+                continue
+    return dates.pop() if len(dates) == 1 else ''
+
+
+def offer_validity(record, now=None):
+    now = (now or datetime.now(ROMANIA)).astimezone(ROMANIA)
+    detail = json.loads(record['payload_json']) if record else {}
+    accepted = detail.get('accepted_at') or ''
+    unknown = {'offer_validity': 'unknown', 'offer_expires_at': '',
+               'offer_validity_message': 'Data acceptării trebuie verificată în DSM; valabilitatea de 10 zile nu poate fi confirmată.'}
+    if not isinstance(accepted, str) or not accepted:
+        return unknown
+    try:
+        parsed = datetime.fromisoformat(accepted.replace('Z', '+00:00'))
+        parsed = parsed.replace(tzinfo=ROMANIA) if parsed.tzinfo is None else parsed.astimezone(ROMANIA)
+    except (ValueError, TypeError):
+        return unknown
+    if parsed > now:
+        return unknown
+    expiry = parsed + timedelta(days=10)
+    date_only = len(accepted) == 10
+    expired = now.date() > expiry.date() if date_only else now >= expiry
+    return {'offer_validity': 'expired' if expired else 'valid',
+            'offer_expires_at': expiry.date().isoformat() if date_only else expiry.isoformat(),
+            'offer_validity_message': ('Ofertă expirată — trebuie actualizată înainte de programare.' if expired
+                                       else 'Valabilă până la ' + expiry.strftime('%d.%m.%Y' if date_only else '%d.%m.%Y %H:%M'))}
+
+
+def require_valid_for_booking(db_path, request_row, now=None):
+    if not request_row or request_row.get('source') != 'dsm_accepted_offer':
+        return
+    record = offer_record(db_path, request_row['id'])
+    if not has_signed_dashboard_offer(db_path, request_row):
+        raise ValueError('Semnătura ofertei DSM nu mai este confirmată pentru programare.')
+    validity = offer_validity(record, now)
+    if validity['offer_validity'] != 'valid':
+        raise ValueError(validity['offer_validity_message'])
+
+
+def dashboard_dates(record):
+    """Keep the technical import time separate from the business event."""
+    detail = json.loads(record['payload_json']) if record else {}
+    accepted = detail.get('accepted_at') or ''
+    return {'accepted_at': accepted, 'request_datetime': accepted,
+            'request_date_kind': 'accepted',
+            'request_date_missing': not bool(accepted), **offer_validity(record)}
 
 
 def signature_status(payload):
@@ -118,6 +194,7 @@ async def read_snapshot(previous_ids):
                 if len(details) != 1 or not details[0].get('detail'):
                     raise ValueError('Datele ofertei semnate sunt incomplete; importul este păstrat.')
                 detail = details[0]['detail']
+                detail['accepted_at'] = acceptance_datetime(value)
             snapshot.append({'id': ident, 'reason': reason, 'signature': signature_status(value),
                              'code': value['transaction'].get('transaction_head__code') or '', 'detail': detail})
     return snapshot
@@ -245,8 +322,88 @@ def offer_record(db_path, request_id):
         return dict(row) if row else None
 
 
+def has_signed_dashboard_offer(db_path, request_row):
+    """Imported DSM approval is separate from approval of a local offer draft."""
+    if request_row.get('source') != 'dsm_accepted_offer':
+        return False
+    record = offer_record(db_path, request_row['id'])
+    return bool(record
+                and record['signature_state'] in {'signed', 'complete', 'completed'}
+                and record['eligibility'] in {'accepted', 'scheduled'})
+
+
+def rebuild_dashboard(db_path, root, snapshot, *, quoted_ids=(), status_map=None, protected_ids=()):
+    """Recoverable removal of old quote cards; never delete requests or bookings."""
+    status_map = status_map or {}
+    protected_ids = set(protected_ids)
+    quoted_ids = set(quoted_ids)
+    backup = Path(root) / 'backups' / ('dashboard-offers-' + datetime.now(ROMANIA).strftime('%Y%m%dT%H%M%S') + '-' + uuid4().hex[:8])
+    backup.mkdir(parents=True, mode=0o700)
+    with connection(db_path) as conn:
+        recovery = sqlite3.connect(backup / 'requests.sqlite3')
+        try:
+            conn.backup(recovery)
+        finally:
+            recovery.close()
+    os.chmod(backup / 'requests.sqlite3', 0o600)
+    for name in ('request_status.json', 'offer_drafts.json', 'offer_selections.json'):
+        source = Path(root) / name
+        if source.is_file():
+            shutil.copy2(source, backup / name)
+            os.chmod(backup / name, 0o600)
+    # Complete DSM reads and durable backup precede any removal from Dashboard.
+    imported = apply_snapshot(db_path, snapshot)
+    candidates = set(imported['request_ids'])
+    archived, restored, kept, untouched = [], [], [], []
+    with connection(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('CREATE TABLE IF NOT EXISTS request_archive(request_id INTEGER PRIMARY KEY, archived_at TEXT DEFAULT CURRENT_TIMESTAMP)')
+        conn.execute('BEGIN IMMEDIATE')
+        archived_before = {r[0] for r in conn.execute('SELECT request_id FROM request_archive')}
+        rows = conn.execute('SELECT id,status,source FROM service_requests').fetchall()
+        for row in rows:
+            ident = row['id']
+            active = conn.execute("SELECT 1 FROM scheduler_appointments WHERE request_id=? AND status!='anulat' LIMIT 1", (ident,)).fetchone()
+            if ident in candidates and row['status'] == 'acceptat' and not active:
+                kept.append(ident)
+                if ident in archived_before:
+                    conn.execute('DELETE FROM request_archive WHERE request_id=?', (ident,))
+                    restored.append(ident)
+                continue
+            if ident in archived_before:
+                continue
+            state = str(status_map.get(ident, status_map.get(str(ident), row['status'])) or '').lower()
+            is_old_quote = (row['source'] == 'dsm_accepted_offer' or ident in quoted_ids
+                            or state in {'ofertat', 'acceptat', 'programat', 'anulat', 'rezolvat', 'finalizat'}
+                            or row['status'] in {'ofertat', 'acceptat', 'programat', 'anulat', 'rezolvat', 'finalizat'})
+            if is_old_quote and ident not in protected_ids:
+                conn.execute('INSERT OR IGNORE INTO request_archive(request_id) VALUES (?)', (ident,))
+                archived.append(ident)
+            else:
+                untouched.append(ident)
+    return {'ok': True, 'accepted': len(kept), 'request_ids': kept, 'archived': len(archived),
+            'archived_ids': archived, 'restored': len(restored), 'untouched_ids': untouched,
+            'protected_ids': sorted(protected_ids), 'backup': str(backup), 'sync': imported}
+
+
+async def rebuild_signed_offers(db_path, root, **options):
+    if LOCK.locked():
+        return {'ok': False, 'status': 'running'}
+    async with LOCK:
+        snapshot = await read_snapshot(linked_ids(db_path))
+        result = await asyncio.to_thread(rebuild_dashboard, db_path, root, snapshot, **options)
+        info = state(root)
+        info.update(status='success', last_success_day=datetime.now(ROMANIA).date().isoformat(),
+                    last_finished=datetime.now(ROMANIA).isoformat(), result=result['sync'])
+        info.pop('error', None)
+        info.pop('retry_after', None)
+        save_state(root, info)
+        return result
+
+
 def offer_html(record, request_row):
     detail = json.loads(record['payload_json'])
+    validity = offer_validity(record)
     escape = lambda x: html.escape(str('—' if x is None or x == '' else x))
     signed_label = 'Ofertă semnată în DSM' if record['signature_state'] in {'signed', 'complete', 'completed'} else 'Semnătura ofertei nu mai este confirmată în DSM'
     rows = []
@@ -258,6 +415,8 @@ def offer_html(record, request_row):
     <main><nav><a href="/cereri">← Dashboard</a> · <a href="/programator">Deschide programatorul</a></nav>
     <h1>{escape(record['document_code'])} · {escape(detail.get('registration'))}</h1>
     <div class="badge">{escape(signed_label)} · {escape('Acceptată — în așteptarea programării' if request_row.get('status') == 'acceptat' else request_row.get('status'))}</div>
+    <p>Data acceptării: {escape(detail.get('accepted_at') or 'indisponibilă în DSM')}</p>
+    <p><strong>{escape(validity['offer_validity_message'])}</strong></p>
     <h2>{escape(detail.get('vehicle'))}</h2><p>{escape(detail.get('customer_name'))} · {escape(detail.get('customer_phone'))}\nVIN: {escape(detail.get('vin'))}</p>
     <p>{escape(detail.get('description'))}</p><div class="scroll"><table><thead><tr><th>Tip</th><th>Cod</th><th>Lucrare / piesă</th><th>Cantitate / ore</th><th>Preț unitar DSM (RON, cu TVA)</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
     <p>Oferta acceptată este preluată din DSM. Prețurile sunt cele citite din ofertă; nu sunt recalculate din catalog. Ultima sincronizare: {escape(record['updated_at'])}</p></main></html>'''

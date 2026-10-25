@@ -191,10 +191,15 @@ def probe_browser(keep_provider_tabs=False):
                          ('dsm', restored_dsm['landing'] if restored_dsm and restored_dsm['cookies'] else 'https://apps.dsmpro.ro/'),
                           ('autototal', 'https://www3.eoriginal.ro/'),
                           ('intercars', 'https://ro.e-cat.intercars.eu/')]
+        from provider_sessions import provider_url
+        provider_names = {'dsm': 'DSM', 'autototal': 'AutoTotal', 'intercars': 'Inter Cars'}
         for name, url in public_pages:
-            page = context.new_page()
+            page = next((p for p in context.pages if not p.is_closed()
+                         and provider_url(provider_names[name], p.url)), None) if keep_provider_tabs else None
+            existing = page is not None
+            page = page or context.new_page()
             try:
-                response = page.goto(url, wait_until='domcontentloaded', timeout=20000)
+                response = None if existing else page.goto(url, wait_until='domcontentloaded', timeout=20000)
                 reachability[name] = {'http_status': response.status if response else None,
                                       'authenticated': False}
             except Exception as error:

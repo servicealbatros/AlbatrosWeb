@@ -733,7 +733,12 @@ def accepted_requests(db_path: Path) -> list[dict]:
             ORDER BY CASE WHEN LOWER(COALESCE(r.priority,''))='urgent' THEN 0 ELSE 1 END,r.id DESC
             LIMIT 40
         """).fetchall()
-        return [dict(row) for row in rows]
+        result = [dict(row) for row in rows]
+    from dsm_accepted_offers import dashboard_dates, offer_record
+    for row in result:
+        if row.get('source') == 'dsm_accepted_offer':
+            row.update(dashboard_dates(offer_record(db_path, row['id'])))
+    return result
 
 
 def cancel_waiting_request(db_path: Path, request_id: int) -> dict:
@@ -796,6 +801,8 @@ def suggest_appointment(db_path: Path, request_id: int, duration_hours: float = 
     request = request_by_id(db_path, request_id)
     if not request:
         raise ValueError("Cererea nu a fost găsită.")
+    from dsm_accepted_offers import require_valid_for_booking
+    require_valid_for_booking(db_path, request)
     duration = max(0.5, math.ceil(float(duration_hours or request.get("booking_time") or 1.0) * 2) / 2)
     skills_needed = classify_operations(request.get("symptom") or "")
     department = department_for_operations(request.get("symptom") or "")
@@ -982,6 +989,8 @@ def plan_request_assignments(db_path: Path, request_id: int, earliest: str | Non
     request = request_by_id(db_path, request_id)
     if not request:
         raise ValueError("Cererea nu a fost găsită.")
+    from dsm_accepted_offers import require_valid_for_booking
+    require_valid_for_booking(db_path, request)
     work_text = " ".join(str(request.get(key) or "") for key in ("vehicle", "symptom"))
     skills = classify_operations(work_text)
     department = department_for_operations(request.get("symptom") or "")
@@ -1409,6 +1418,8 @@ def distribute_dsm_appointments_by_capacity(
 def create_appointment(db_path: Path, payload: dict) -> dict:
     request_id = int(payload.get("request_id") or 0) or None
     request = request_by_id(db_path, request_id) if request_id else None
+    from dsm_accepted_offers import require_valid_for_booking
+    require_valid_for_booking(db_path, request)
     technician_id = int(payload.get("technician_id") or 0) or None
     start, end = _parse_local(payload.get("start_at")), _parse_local(payload.get("end_at"))
     if end <= start:

@@ -86,6 +86,8 @@ ACCURACY_EVALUATIONS_FILE = DATA_DIR / "accuracy_evaluations.json"
 app = FastAPI(title="Albatros AI v1.0.9 - Oferta editabilă")
 from provider_test_console import router as provider_test_router
 app.include_router(provider_test_router)
+from dsm_advisor_packages import router as advisor_packages_router
+app.include_router(advisor_packages_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
@@ -8688,6 +8690,7 @@ def requests_dashboard():
             <button onclick="refreshDashboard()" title="Reîncarcă integral dashboardul">Reîncarcă</button>
             <a class="link-button" href="/programator">Programator atelier</a>
             <a class="link-button" href="/baza-dsm">Baza DSM</a>
+            <a class="link-button" href="/baza-dsm/pachete">Pachete piese</a>
             <a class="link-button" href="/arhiva">Arhivă / curăță cereri</a>
             <a class="link-button" href="/acuratete">Măsurare acuratețe</a>
         </div>

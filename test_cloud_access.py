@@ -154,6 +154,26 @@ class CloudAccessTests(unittest.TestCase):
     def setUp(self):
         self.client.cookies.clear()
 
+    def test_advisor_parts_packages_require_login_and_support_existing_session(self):
+        from unittest.mock import patch
+        for path in ('/baza-dsm/pachete', '/api/dashboard/parts-packages/vehicles?query=B271', '/api/dashboard/parts-packages/lookup?registration=B109TST'):
+            self.assertEqual(self.client.get(path, follow_redirects=False).status_code, 401)
+        device, _ = POLICY.devices.register(None, 'Fixture advisor', 'testclient')
+        POLICY.devices.change(device, True)
+        self.client.cookies.set('albatros_device', device)
+        login = self.client.post('/receptie/login', data={'username':'test-user','password':'test-password'}, follow_redirects=False)
+        self.assertEqual(login.status_code, 303)
+        with patch.dict(os.environ, {'RECEPTION_BRIDGE_URL':''}):
+            self.assertEqual(self.client.get('/baza-dsm/pachete').status_code, 200)
+            with patch('dsm_automatic_codes.vehicles', return_value={'vehicles':[], 'has_more':False}):
+                result = self.client.get('/api/dashboard/parts-packages/vehicles?query=B271')
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.headers['cache-control'], 'no-store')
+            with patch('dsm_automatic_codes.lookup', return_value={'status':'ready','packages':[]}):
+                self.assertEqual(self.client.get('/api/dashboard/parts-packages/lookup?vin=WBA00000000000004&work=drums').status_code, 200)
+        POLICY.devices.change(device, False)
+        self.assertEqual(self.client.get('/api/dashboard/parts-packages/lookup?registration=B109TST').status_code, 401)
+
     def test_anonymous_cannot_read_application_even_from_local_address(self):
         for path in ("/cereri", "/programator", "/oferta/27", "/api/requests/27/offer-products",
                      "/api/scheduler/technicians", "/static/chat.html", "/api/chat",

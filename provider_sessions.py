@@ -12,6 +12,8 @@ from cryptography.fernet import Fernet
 DOMAINS = {'DSM': ('dsmpro.ro', 'servicemanager.q-service.ro'),
            'Inter Cars': ('intercars.eu',), 'AutoTotal': ('eoriginal.ro',),
            'Haynes': ('workshopdata.com',)}
+AUTOTOTAL_HOME = 'https://www3.eoriginal.ro/'
+AUTOTOTAL_LOGIN = 'https://www3.eoriginal.ro/login'
 
 
 def provider_url(provider, url):
@@ -83,7 +85,24 @@ async def authenticated(page, provider):
     if await page.locator('input[type=password]:visible').count():
         return False
     # Positive account evidence, never just a tab or the absence of a password.
-    return bool(await page.locator('a[href*="logout"],a[href*="logoff"],form[action*="logout"],button[data-action="logout"]').count())
+    if await page.locator('a[href*="logout"],a[href*="logoff"],form[action*="logout"],button[data-action="logout"]').count():
+        return True
+    if provider == 'AutoTotal':
+        # Its account menu can use a JavaScript action instead of an href.
+        return bool(await page.locator('a,button,[role=button],[ng-click*="logout"],[onclick*="logout"]').filter(
+            has_text=re.compile(r'^\s*(?:Deconectare|Ie[sșş]ire|Logout|Log out|Sign out)\s*$', re.I)).count())
+    return False
+
+
+async def expired_autototal_form(page):
+    if (not provider_url('AutoTotal', page.url)
+            or urlparse(page.url).path.rstrip('/') != '/login'):
+        return False
+    return bool(await page.locator('body').evaluate(r"""body=>{
+        const t=body.innerText.trim();
+        return t.length<1000 && /An Error Was Encountered/i.test(t) &&
+            /The action you have requested is not allowed[.]/i.test(t);
+    }"""))
 
 
 async def reconnect(page, credentials, provider):
@@ -107,10 +126,20 @@ async def reconnect(page, credentials, provider):
     button = form.get_by_role('button', name=re.compile(r'^(?:Autentificare|Autentifică-te|Login|Log in|Sign in|Conectare|Conectează-te|Intră în cont)$', re.I))
     if await username.count() != 1 or await button.count() != 1:
         return 'unsupported_login_form'
-    if await password.input_value() or (await username.input_value()).strip() not in {'', credentials['username']}:
+    user_value = (await username.input_value()).strip()
+    password_value = await password.input_value()
+    if (password_value not in {'', credentials['password']}
+            or user_value not in {'', credentials['username']}):
         return 'human_login_in_progress'
-    await username.fill(credentials['username'], timeout=10000)
-    await password.fill(credentials['password'], timeout=10000)
+    # Re-filling unchanged credentials invalidates a freshly completed CAPTCHA
+    # on AutoTotal. Submit matching fields without firing more input events.
+    fields_changed = user_value != credentials['username'] or password_value != credentials['password']
+    if user_value != credentials['username']:
+        await username.fill(credentials['username'], timeout=10000)
+    if password_value != credentials['password']:
+        await password.fill(credentials['password'], timeout=10000)
+    if fields_changed and await active_verification(page):
+        return 'human_verification_required'
     await button.click(timeout=15000)
     for _ in range(10):
         if await authenticated(page, provider):
@@ -133,6 +162,30 @@ class ProviderSessionKeeper:
         self.vaults = {p: ProviderLoginVault(profile, key, p) for p in DOMAINS if p != 'DSM'}
         self.attempts = {}
         self.error_reloads = {}
+        self.last_keepalive = {}
+        self.last_restore = {}
+
+    def idle(self):
+        root = os.getenv('ALBATROS_DATA_DIR')
+        if not root:
+            return True
+        from browser_resources import busy_reason
+        return busy_reason(root) is None
+
+    async def keep_autototal(self, page):
+        """Refresh the HTTP session, without navigating the catalogue tab."""
+        now = time.monotonic()
+        if now - self.last_keepalive.get('AutoTotal', -600) < 600:
+            return None
+        self.last_keepalive['AutoTotal'] = now
+        try:
+            response = await page.request.get(AUTOTOTAL_HOME, timeout=10000)
+        except Exception:
+            self.last_keepalive['AutoTotal'] = now - 540
+            return 'upstream_unavailable'
+        if response.status in {401, 403} or urlparse(response.url).path.rstrip('/') == '/login':
+            return 'login_required'
+        return 'ok' if response.ok else 'upstream_unavailable'
 
     async def check(self, context):
         result = {}
@@ -144,10 +197,33 @@ class ProviderSessionKeeper:
                     result[provider] = state
                     continue
                 pages = [p for p in context.pages if not p.is_closed() and provider_url(provider, p.url)]
+                if (provider == 'AutoTotal' and not pages and vault.path.exists() and self.idle()
+                        and time.monotonic() - self.last_restore.get(provider, -60) >= 60):
+                    self.last_restore[provider] = time.monotonic()
+                    page = await context.new_page()
+                    pages = [page]
+                    try:
+                        await page.goto(AUTOTOTAL_HOME, wait_until='domcontentloaded', timeout=15000)
+                    except Exception:
+                        if not provider_url(provider, page.url):
+                            await page.close()
+                        raise
+                    state['tab_restored'] = True
                 connected = False
                 for page in pages:
                     if await authenticated(page, provider):
                         connected = True
+                        if provider == 'AutoTotal' and self.idle():
+                            outcome = await self.keep_autototal(page)
+                            if outcome == 'login_required':
+                                connected = False
+                                # An idle home page may return to a fresh login
+                                # with GET. Never reload a submitted POST form.
+                                path = urlparse(page.url).path
+                                if path == '/' or path.startswith(('/search/', '/auto/vin/', '/uleiuri/')):
+                                    await page.goto(AUTOTOTAL_LOGIN, wait_until='domcontentloaded', timeout=15000)
+                            elif outcome == 'upstream_unavailable':
+                                state['keepalive_status'] = outcome
                         break
                 if connected:
                     state['status'] = 'connected'
@@ -155,6 +231,13 @@ class ProviderSessionKeeper:
                     result[provider] = state
                     continue
                 for page in pages:
+                    if provider == 'AutoTotal' and await expired_autototal_form(page):
+                        state['status'] = 'login_form_expired'
+                        if self.idle() and time.monotonic() - self.error_reloads.get(provider, -60) >= 60:
+                            self.error_reloads[provider] = time.monotonic()
+                            await page.goto(AUTOTOTAL_LOGIN, wait_until='domcontentloaded', timeout=15000)
+                            state['status'] = 'login_form_refreshed'
+                        break
                     if await upstream_error(page):
                         state['status'] = 'upstream_unavailable'
                         if time.monotonic() - self.error_reloads.get(provider, 0) > 60:
@@ -166,6 +249,9 @@ class ProviderSessionKeeper:
                         continue
                     state['status'] = 'login_required'
                     if not vault.path.exists():
+                        continue
+                    if not self.idle():
+                        state['status'] = 'retry_wait'
                         continue
                     version = vault.path.stat().st_mtime_ns
                     last, failures, previous_version = self.attempts.get(provider, (0, 0, 0))

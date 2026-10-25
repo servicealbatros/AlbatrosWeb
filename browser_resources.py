@@ -252,6 +252,10 @@ class BrowserMemoryGuard:
                 and (self.last_reload is None or now - self.last_reload >= 900)):
             from provider_sessions import authenticated
             for page in list(context.pages):
+                # AutoTotal CAPTCHA/session state is especially sensitive to
+                # navigation. Keep its one persistent tab; only collect garbage.
+                if home_provider(page.url) == 'AutoTotal':
+                    continue
                 async with asyncio.timeout(4):
                     safe = await safe_home(page)
                 if not safe:

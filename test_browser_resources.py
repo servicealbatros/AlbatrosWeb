@@ -148,6 +148,15 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.client.detach.assert_awaited_once()
         self.lease.close.assert_called_once()
 
+    async def test_autototal_tab_is_never_closed_or_reloaded_for_memory(self):
+        auto=page('https://www3.eoriginal.ro/')
+        self.context.pages=[auto,page('https://www3.eoriginal.ro/')]
+        with patch.object(resources,'safe_home',AsyncMock(return_value=True)):
+            result=await self.guard.tick(self.context,now=1000)
+        self.assertEqual(result['status'],'collected')
+        for p in self.context.pages:
+            p.close.assert_not_awaited();p.reload.assert_not_awaited()
+
     async def test_maintenance_timeout_releases_exclusive_lease(self):
         with patch.object(self.guard, 'maintain', AsyncMock(side_effect=TimeoutError)):
             result = await self.guard.tick(self.context, now=1000)

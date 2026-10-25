@@ -2346,9 +2346,10 @@ def _clear_offer_work_state(request_id: int) -> None:
         # Retain the researched scope, but invalidate prices and approvals from
         # the previous search. New supplier results must be reviewed again.
         checklist = drafts[key].get('parts_checklist') or []
-        if checklist:
+        internal = drafts[key].get('internal_consumables') or []
+        if checklist or internal:
             drafts[key] = {'parts_checklist': [dict(row, unit_price_ron=None, confirmed=False)
-                                               for row in checklist]}
+                                               for row in checklist], 'internal_consumables': internal}
         else:
             drafts.pop(key, None)
         _save_offer_drafts(drafts)
@@ -2811,6 +2812,7 @@ class WhatsAppDestinationInput(BaseModel):
 
 class OfferDraftInput(BaseModel):
     parts_checklist: list[dict] = Field(default_factory=list)
+    internal_consumables: list[dict] = Field(default_factory=list)
     operation: str = ""
     labour_operations: list[dict] = Field(default_factory=list)
     additional_operation: str = ""
@@ -2841,6 +2843,14 @@ class OfferDraftInput(BaseModel):
     drain_plug_price_ron: float = 0.0
     drain_plug_availability: str = ""
     notes: str = ""
+
+
+class WorkshopStockRequestInput(BaseModel):
+    item_key: str = Field(min_length=20, max_length=20)
+    technician: str = Field(min_length=1, max_length=120)
+    quantity: float = Field(gt=0, le=999, allow_inf_nan=False)
+    unit_price_ron: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    reference: str = Field(default="", max_length=160)
 
 
 class SchedulerTechnicianInput(BaseModel):
@@ -4030,23 +4040,56 @@ def request_technician_result(request_id: int):
 
 @app.post("/api/requests/{request_id}/offer-draft")
 def save_offer_draft(request_id: int, data: OfferDraftInput, confirmation_token: str | None = Header(None, alias="X-Confirmation-Token")):
+    return _persist_offer_draft(request_id, data)
+
+
+@app.post("/api/requests/{request_id}/workshop-stock-request")
+def record_workshop_stock_request(request_id: int, data: WorkshopStockRequestInput):
+    from offer_parts_checklist import material_key
+    old = _draft_for_request(request_id)
+    internal = old.get('internal_consumables') or []
+    item = next((row for row in internal if material_key(row) == data.item_key), None)
+    if not item:
+        raise HTTPException(409, 'Consumabilul nu mai este în necesarul intern. Reîncarcă oferta.')
+    if not data.technician.strip():
+        raise HTTPException(400, 'Completează mecanicul care a solicitat consumabilul.')
+    if not item.get('code'):
+        raise HTTPException(400, 'Confirmă mai întâi codul consumabilului.')
+    stock_request = dict(item_key=data.item_key, technician=data.technician.strip(),
+                         quantity=data.quantity, reference=data.reference.strip(),
+                         requested_at=datetime.now().isoformat(timespec='seconds'))
+    draft = dict(old)
+    draft['internal_consumables'] = [row for row in internal if material_key(row) != data.item_key]
+    draft['parts_checklist'] = list(old.get('parts_checklist') or []) + [dict(
+        item, quantity=data.quantity, unit_price_ron=data.unit_price_ron, confirmed=False)]
+    # Adding an actual charge requires advisor review again; it never sends a message.
+    draft['labour_reviewed'] = False
+    return _persist_offer_draft(request_id, OfferDraftInput(**draft), stock_request=stock_request)
+
+
+def _persist_offer_draft(request_id: int, data: OfferDraftInput, *, stock_request=None):
     # Salvarea schiței este internă și reversibilă; nu transmite oferta.
     request_row = _request_by_id(request_id)
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost găsită.")
 
     draft = data.model_dump()
-    from offer_parts_checklist import normalize_lines, subtotal
+    from offer_parts_checklist import split_workshop_materials, subtotal
     from timing_chain_policy import default_checklist, chain_replacement
+    old = _draft_for_request(request_id)
     if 'parts_checklist' not in data.model_fields_set:
-        draft['parts_checklist'] = _draft_for_request(request_id).get('parts_checklist') or []
+        draft['parts_checklist'] = old.get('parts_checklist') or []
+    if 'internal_consumables' not in data.model_fields_set:
+        draft['internal_consumables'] = old.get('internal_consumables') or []
     if not draft['parts_checklist']:
         draft['parts_checklist'] = default_checklist(request_row.get('symptom'))
+    had_checklist = bool(draft['parts_checklist'])
     try:
-        draft['parts_checklist'] = normalize_lines(draft['parts_checklist'])
+        draft['parts_checklist'], draft['internal_consumables'] = split_workshop_materials(
+            draft['parts_checklist'], draft['internal_consumables'], old.get('parts_checklist') or [], stock_request)
     except (ValueError, TypeError, OverflowError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    if draft['parts_checklist']:
+    if had_checklist:
         draft['parts_price_ron'] = subtotal(draft['parts_checklist'])
     from offer_parts_checklist import pending_lines
     draft['parts_prices_pending'] = bool(pending_lines(draft['parts_checklist']))
@@ -4162,9 +4205,15 @@ def _require_original_oil_selection(request_id: int) -> None:
 def _require_advisor_labour_review(request_id: int) -> dict:
     _require_original_oil_selection(request_id)
     draft = _draft_for_request(request_id)
-    from offer_parts_checklist import pending_lines
+    from offer_parts_checklist import pending_lines, is_workshop_consumable
     from timing_chain_policy import chain_replacement
     checklist = draft.get('parts_checklist') or []
+    if any(is_workshop_consumable(row) and not row.get('stock_request') for row in checklist):
+        raise HTTPException(409, 'Consumabilele se adaugă în deviz numai după înregistrarea cererii mecanicului din magazie. Salvează mai întâi oferta pentru separarea necesarului intern.')
+    selected = _load_offer_selections().get(str(request_id), {})
+    if any(is_workshop_consumable(dict(p, code=p.get('manufacturer_ref') or p.get('code')))
+           for p in selected.get('products') or ([selected['product']] if selected.get('product') else [])):
+        raise HTTPException(409, 'Scoate consumabilele din selecția de ofertare și înregistrează cererea efectivă din magazie în deviz.')
     if checklist and pending_lines(checklist):
         raise HTTPException(409, 'Necesarul de piese are coduri, cantități, prețuri sau verificări neconfirmate.')
     if chain_replacement((_request_by_id(request_id) or {}).get('symptom')):
@@ -5847,6 +5896,8 @@ def request_offer_select(request_id: int, data: OfferSelectionInput, confirmatio
     if any((p.get("intercars_code") or p.get("supplier_code")) == code for p in selected_products):
         selected_products = [p for p in selected_products if (p.get("intercars_code") or p.get("supplier_code")) != code]
     else:
+        if _defer_workshop_product(request_id, product):
+            return {'ok': True, 'request_id': request_id, 'status': 'necesar_intern_magazie', 'selected': selected_products}
         selected_kind = _offer_product_kind(product)
         selected_side = _normalize_text(product.get("side") or "")
         selected_products = [
@@ -5923,6 +5974,9 @@ def request_offer_manual_part(request_id: int, data: ManualOfferPartInput):
         raise HTTPException(status_code=400, detail="Cantitatea trebuie să fie între 1 și 99.")
     if data.unit_price_ron < 0 or data.unit_price_ron > 1_000_000:
         raise HTTPException(status_code=400, detail="Prețul unitar nu poate fi negativ.")
+    if _defer_workshop_product(request_id, dict(description=description, manufacturer_ref=manufacturer_ref,
+                                               quantity=data.quantity, price_ron=data.unit_price_ron)):
+        return {'ok': True, 'status': 'necesar_intern_magazie'}
 
     product_code = "MANUAL-" + uuid4().hex[:12].upper()
     product = {
@@ -5954,6 +6008,22 @@ def request_offer_manual_part(request_id: int, data: ManualOfferPartInput):
     _save_offer_selections(selections)
     _reset_draft_parts_from_selection(request_id)
     return {"ok": True, "product": product, "selected": selected_products}
+
+
+def _defer_workshop_product(request_id: int, product: dict) -> bool:
+    from offer_parts_checklist import is_workshop_consumable, material_key
+    row = dict(description=product.get('description') or product.get('requested_item') or '',
+               code=product.get('manufacturer_ref') or product.get('code') or '',
+               quantity=None, unit_price_ron=None, confirmed=False,
+               source=product.get('source') or 'Necesar atelier')
+    if not is_workshop_consumable(row):
+        return False
+    draft = _draft_for_request(request_id)
+    internal = {material_key(item): item for item in draft.get('internal_consumables') or []}
+    internal[material_key(row)] = row
+    draft['internal_consumables'] = list(internal.values())
+    _persist_offer_draft(request_id, OfferDraftInput(**draft))
+    return True
 
 
 @app.post("/api/requests/{request_id}/offer-manual-part-remove")
@@ -6100,9 +6170,10 @@ def request_unified_offer_page(request_id: int):
     tech = _load_technician_result(request_id)
     tech_defaults = _partial_tech_defaults(tech)
     draft = _draft_for_request(request_id)
-    from offer_parts_checklist import render_lines
+    from offer_parts_checklist import render_lines, render_internal_materials
     from timing_chain_policy import default_checklist, chain_replacement
     parts_checklist_html = render_lines(draft.get('parts_checklist') or default_checklist(request_row.get('symptom')))
+    internal_consumables_html = render_internal_materials(draft.get('internal_consumables') or [])
     history_job = next((row for row in _load_robot_jobs()
                         if int(row.get("request_id") or 0) == int(request_id)), None)
     history_oils = [part for part in (history_job or {}).get("history_parts") or []
@@ -6661,6 +6732,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
   <div class="card">
     <h2 style="margin-top:0">Rezultate piese</h2>
     {parts_checklist_html}
+    {internal_consumables_html}
     {autototal_status_html}
     {partial_notice}
     {products_html}
@@ -7039,7 +7111,7 @@ async function addManualPart(){{
   const r=await fetch("/api/requests/{request_id}/offer-manual-part",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(data)}});
   const d=await r.json();
   if(!r.ok){{box.textContent=d.detail||"Piesa nu a putut fi adăugată.";return;}}
-  box.textContent="Piesa a fost adăugată și marcată ca verificată manual.";
+  box.textContent=d.status==='necesar_intern_magazie'?'Consumabil păstrat în necesarul intern; se adaugă în deviz după cererea mecanicului.':"Piesa a fost adăugată și marcată ca verificată manual.";
   setTimeout(()=>location.reload(),500);
 }}
 async function removeManualPart(code){{
@@ -7057,6 +7129,24 @@ function quoteParts(){{
   confirmed:row.querySelector('.quote-confirmed').checked,
   note:row.querySelector('.quote-note').value,source:row.dataset.source||''
  }}));
+}}
+async function recordWorkshopRequest(key){{
+ const box=document.getElementById('stock_'+key);
+ const technician=box.querySelector('.stock-technician').value.trim();
+ const quantity=box.querySelector('.stock-quantity').value;
+ const price=box.querySelector('.stock-price').value;
+ if(!technician||quantity===''||Number(quantity)<=0||price===''){{alert('Completează mecanicul, cantitatea solicitată și prețul.');return;}}
+ const button=box.querySelector('button');button.disabled=true;
+ try{{
+  const current=payload();current.labour_reviewed=false;
+  const saved=await fetch('/api/requests/{request_id}/offer-draft',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(current)}});
+  if(!saved.ok){{alert((await saved.json()).detail||'Salvează mai întâi oferta.');return;}}
+  const r=await fetch('/api/requests/{request_id}/workshop-stock-request',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{
+   item_key:key,technician,quantity:Number(quantity),unit_price_ron:Number(price),reference:box.querySelector('.stock-reference').value.trim()
+  }})}});
+  const result=await r.json();if(!r.ok){{alert(result.detail||'Cererea nu a putut fi înregistrată.');return;}}
+  location.reload();
+ }}finally{{button.disabled=false;}}
 }}
 document.querySelectorAll('.quote-part-row input').forEach(input=>input.addEventListener('input',()=>{{
  if(!input.classList.contains('quote-confirmed'))input.closest('.quote-part-row').querySelector('.quote-confirmed').checked=false;

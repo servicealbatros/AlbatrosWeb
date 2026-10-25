@@ -1,6 +1,47 @@
 """Editable quote lines: an unknown price stays unknown, never free."""
 from html import escape
 import math
+import hashlib
+import re
+import unicodedata
+
+
+def is_workshop_consumable(row):
+    code = re.sub(r'[^A-Z0-9]', '', str(row.get('code') or '').upper())
+    if code in {'83190404517', '83230441070', '83238854223'}:
+        return True
+    text = unicodedata.normalize('NFKD', str(row.get('description') or '')).encode('ascii', 'ignore').decode().lower()
+    return bool(re.search(r'\betansant\w*|\bloctite\s*5970\b|\bpast[ae]\b.{0,35}(?:etans|montaj|injector|lubrif)|\b(?:lavet\w*|carp[ae])\b|\bdegresant\w*|\bspray\b.{0,20}curat', text))
+
+
+def material_key(row):
+    value = (str(row.get('code') or '').upper().replace(' ', '') or str(row.get('description') or '').strip().casefold())
+    return hashlib.sha256(value.encode()).hexdigest()[:20]
+
+
+def split_workshop_materials(rows, internal, previous_rows=(), stock_request=None):
+    """Only a server-recorded mechanic request can authorize a consumable charge."""
+    authorized = {material_key(row): row['stock_request'] for row in previous_rows
+                  if is_workshop_consumable(row) and isinstance(row.get('stock_request'), dict) and row['stock_request'].get('technician')
+                  and row['stock_request'].get('requested_at')}
+    if stock_request:
+        authorized[stock_request['item_key']] = stock_request
+    waiting = {material_key(row): row for row in normalize_lines(internal)}
+    billable = []
+    for row in normalize_lines(rows):
+        key = material_key(row)
+        row.pop('stock_request', None)
+        if is_workshop_consumable(row):
+            if key not in authorized:
+                waiting[key] = row
+                continue
+            row['stock_request'] = authorized[key]
+            # Changing the charged quantity requires recording a new actual request.
+            if row['quantity'] != authorized[key]['quantity']:
+                raise ValueError('Cantitatea consumabilului trebuie să corespundă cererii din magazie.')
+            waiting.pop(key, None)
+        billable.append(row)
+    return billable, list(waiting.values())
 
 
 def normalize_lines(rows):
@@ -22,10 +63,33 @@ def normalize_lines(rows):
         if row.get('confirmed') not in (None, True, False):
             raise ValueError('Verificarea piesei trebuie să fie o valoare booleană.')
         item['confirmed'] = row.get('confirmed') is True
+        if isinstance(row.get('stock_request'), dict):
+            item['stock_request'] = dict(row['stock_request'])
         if item['confirmed'] and (not item['code'] or item['quantity'] is None or item['unit_price_ron'] is None):
             raise ValueError('Confirmarea necesită cod, cantitate și preț: ' + item['description'])
         output.append(item)
     return output
+
+
+def render_internal_materials(rows):
+    if not rows:
+        return ''
+    items = []
+    for row in normalize_lines(rows):
+        key = material_key(row)
+        name = escape(row['description'])
+        code = escape(row['code']) or 'Cod de confirmat'
+        items.append(f'''<li style="margin:16px 0"><strong>{name}</strong> · {code}
+          <details id="stock_{key}"><summary>Înregistrează cererea mecanicului din magazie</summary>
+          <label>Mecanic<input class="stock-technician" required maxlength="120"></label>
+          <label>Cantitate solicitată<input class="stock-quantity" type="number" min="0.001" step="any" required></label>
+          <label>Preț unitar RON<input class="stock-price" type="number" min="0" step="0.01" required></label>
+          <label>Referință cerere / bon magazie<input class="stock-reference" maxlength="160"></label>
+          <button type="button" onclick="recordWorkshopRequest('{key}')">Adaugă în deviz cererea efectivă</button>
+          </details></li>''')
+    return '''<div class="card" id="internal_workshop_materials"><h2>Consumabile de atelier — necesar intern</h2>
+      <p>Nu sunt incluse în oferta inițială sau în total. Se adaugă în deviz numai după cererea efectivă
+      a mecanicului către magazie, cu mecanic și cantitate înregistrate. Nu se solicită automat din magazie.</p><ul>''' + ''.join(items) + '</ul></div>'
 
 
 def pending_lines(rows):
@@ -44,9 +108,11 @@ def render_lines(rows):
     for item in normalize_lines(rows):
         e = lambda key: escape(str(item.get(key) or ''), quote=True)
         number = lambda key: '' if item[key] is None else str(item[key])
+        stock = item.get('stock_request') or {}
+        stock_note = escape(f"Cerut din magazie de {stock.get('technician')} la {stock.get('requested_at')}; {stock.get('reference') or ''}") if stock else ''
         body.append(f'''<tr class="quote-part-row" data-source="{e('source')}">
           <td><input class="quote-description" aria-label="Denumire piesă" value="{e('description')}">
-          <small>{e('note')}</small><input class="quote-note" type="hidden" value="{e('note')}"></td>
+          <small>{e('note')}</small><small>{stock_note}</small><input class="quote-note" type="hidden" value="{e('note')}"></td>
           <td><input class="quote-code" aria-label="Cod piesă" value="{e('code')}"></td>
           <td><input class="quote-quantity" aria-label="Cantitate piesă" type="number" min="0.001" step="any" value="{number('quantity')}" placeholder="De confirmat"></td>
           <td><input class="quote-price" aria-label="Preț unitar piesă" type="number" min="0" step="0.01" value="{number('unit_price_ron')}" placeholder="De confirmat"></td>

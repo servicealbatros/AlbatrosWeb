@@ -42,6 +42,30 @@ def login_page(url='https://www3.eoriginal.ro/login'):
 
 
 class ProviderLoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_autototal_icon_menu_is_positive_evidence_but_login_is_not(self):
+        from playwright.async_api import async_playwright, Error
+        async with async_playwright() as playwright:
+            try:
+                browser = await playwright.chromium.launch(headless=True)
+            except Error as exc:
+                if "Executable doesn't exist" in str(exc):
+                    self.skipTest('Playwright Chromium is not installed')
+                raise
+            try:
+                page = await browser.new_page()
+                markup = '<a href="" class="dropdown-item"><i>exit_to_app</i><span>Deconectare</span></a>'
+                await page.route('**/*', lambda route: route.fulfill(body=markup, content_type='text/html'))
+                await page.goto('https://www3.eoriginal.ro/')
+                self.assertTrue(await sessions.authenticated(page, 'AutoTotal'))
+                await page.set_content(markup + '<input type="password">')
+                self.assertFalse(await sessions.authenticated(page, 'AutoTotal'))
+                await page.set_content('<div>Catalog auto</div>')
+                self.assertFalse(await sessions.authenticated(page, 'AutoTotal'))
+                await page.goto('https://untrusted.example/')
+                self.assertFalse(await sessions.authenticated(page, 'AutoTotal'))
+            finally:
+                await browser.close()
+
     async def test_completed_captcha_does_not_get_reset_by_identical_credentials(self):
         page,password,username,button=login_page()
         password.input_value.return_value='test-secret'

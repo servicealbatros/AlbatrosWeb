@@ -89,7 +89,7 @@ async def authenticated(page, provider):
         return True
     if provider == 'AutoTotal':
         # Its account menu can use a JavaScript action instead of an href.
-        return bool(await page.locator('a,button,[role=button],[ng-click*="logout"],[onclick*="logout"]').filter(
+        return bool(await page.locator('a,button,[role=button],[ng-click*="logout"],[onclick*="logout"],a.dropdown-item > span').filter(
             has_text=re.compile(r'^\s*(?:Deconectare|Ie[sșş]ire|Logout|Log out|Sign out)\s*$', re.I)).count())
     return False
 

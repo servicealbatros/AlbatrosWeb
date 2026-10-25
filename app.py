@@ -4243,6 +4243,12 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
     is_service = "revizie" in request_text or ("ulei" in request_text and "filtr" in request_text)
     selected_entry = _load_offer_selections().get(str(request_id), {})
     selected_for_validation = selected_entry.get("products") or ([selected_entry.get("product")] if selected_entry.get("product") else [])
+    # An individually verified checklist is also an explicit parts selection.
+    # Do not require selecting the same filters a second time in supplier cards.
+    selected_for_validation = list(selected_for_validation) + [
+        {'description': row['description'], 'manufacturer_ref': row['code']}
+        for row in draft.get('parts_checklist') or [] if row.get('confirmed')
+    ]
     if is_service:
         selected_kinds = {_offer_product_kind(p)
                           for p in selected_for_validation if isinstance(p, dict)}

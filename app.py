@@ -6409,9 +6409,9 @@ def request_unified_offer_page(request_id: int):
         labour_breakdown_html = f"""
         <div class="span3" style="padding:14px;background:#eff6ff;border:1px solid #93c5fd;border-radius:10px">
           <h3 style="margin:0 0 8px">Observații interne — timpi de reparație</h3>
-          <table style="margin:0"><thead><tr><th>Operație</th><th>Timp catalog</th><th>Sursă / observație</th></tr></thead>
+          <table style="margin:0"><thead><tr><th>Operație</th><th>Timp / estimare</th><th>Sursă / observație</th></tr></thead>
           <tbody>{''.join(labour_rows_html)}</tbody></table>
-          <div style="margin-top:10px"><b>Calcul:</b> timpi confirmați {shown_technical:g} h
+          <div style="margin-top:10px"><b>Calcul:</b> timp însumat {shown_technical:g} h
           + marjă Albatros {shown_margin:g} h = {shown_expected:g} h estimate.
           Timp rezervat: {shown_booking:g} h.</div>
           <div><b>Stare:</b> calcul {_escape_html(labour_state)}</div>

@@ -51,7 +51,11 @@ def render_lines(rows):
           <td><input class="quote-quantity" aria-label="Cantitate piesă" type="number" min="0.001" step="any" value="{number('quantity')}" placeholder="De confirmat"></td>
           <td><input class="quote-price" aria-label="Preț unitar piesă" type="number" min="0" step="0.01" value="{number('unit_price_ron')}" placeholder="De confirmat"></td>
           <td><input class="quote-confirmed" aria-label="Piesă verificată" type="checkbox" {'checked' if item['confirmed'] else ''}></td></tr>''')
-    return '''<div class="card" id="quote_parts_checklist"><h2>Necesar de piese — verificare și prețuri</h2>
+    return '''<div class="card" id="quote_parts_checklist"><style>
+      #quote_parts_checklist table{min-width:800px}#quote_parts_checklist td:first-child{width:44%}
+      #quote_parts_checklist input:not([type=checkbox]){width:100%;box-sizing:border-box;padding:7px;border:1px solid #cbd5e1;border-radius:6px}
+      #quote_parts_checklist small{display:block;margin-top:5px;line-height:1.45;color:#475569}
+      </style><h2>Necesar de piese — verificare și prețuri</h2>
       <p>Prețurile goale sunt neconfirmate. Totalul este parțial până la verificarea tuturor pozițiilor.
       Uleiul se completează separat în secțiunea dedicată și se facturează o singură dată.</p>
       <div style="overflow:auto"><table><thead><tr><th>Piesă / observații</th><th>Cod</th><th>Cantitate</th><th>Preț unitar RON</th><th>Verificat</th></tr></thead><tbody>''' + ''.join(body) + '</tbody></table></div></div>'

@@ -444,7 +444,10 @@ def detect_operations(request: str) -> list[dict]:
         "service complet",
         "full service",
     )
-    wants_all_filters = any(normalize(p) in s for p in all_filters_phrases)
+    from transmission_service_policy import engine_service_requested, drivetrain_operations
+    engine_context = engine_service_requested(request)
+    transmission_ops = drivetrain_operations(request)
+    wants_all_filters = engine_context and any(normalize(p) in s for p in all_filters_phrases)
 
     if wants_all_filters:
         for opid in ("oil_filter", "air_filter", "cabin_filter", "fuel_filter"):
@@ -471,7 +474,7 @@ def detect_operations(request: str) -> list[dict]:
         "oil filters",
         "full service",
     )
-    if any(normalize(p) in s for p in service_phrases):
+    if engine_context and any(normalize(p) in s for p in service_phrases):
         if not any(x["id"] == "engine_oil" for x in result):
             op = next(x for x in OPERATION_LIBRARY if x["id"] == "engine_oil")
             result.append({
@@ -552,6 +555,12 @@ def detect_operations(request: str) -> list[dict]:
     if "timing_belt" in ids and "water_pump" in ids:
         result = [x for x in result if x["id"] != "water_pump"]
 
+    if not engine_context and re.search(r'ulei|lubrif|fluid|atf', s):
+        result = [op for op in result if op['id'] not in {'engine_oil', 'oil_filter'}]
+    if any(op['id'] == 'transfer_case_oil' for op in transmission_ops) and not re.search(
+            r'(?:lant|curea).{0,20}distribut|distribut\w*.{0,15}(?:motor|lant|curea)', s):
+        result = [op for op in result if op['id'] not in {'timing_belt', 'timing_chain'}]
+    result = [op for op in result if op['id'] not in {row['id'] for row in transmission_ops}] + transmission_ops
     return sorted(result, key=lambda x: x["intent_score"], reverse=True)
 
 def find_haynes_page(browser):
@@ -979,6 +988,11 @@ def tecrmi_row_matches_request(operation: dict, row_text: str) -> bool:
     # "bieleta" previously matched "ventilatie").  Require the physical part
     # and the requested axle to be present in the TecRMI description.
     strict_terms = {
+        'automatic_transmission_service': lambda t: 'automat' in t and bool(re.search(r'\b(?:baia|baie|baii)\b', t)) and 'filtr' in t,
+        'automatic_transmission_oil': lambda t: 'ulei' in t and 'automat' in t and 'filtr' not in t,
+        'transfer_case_oil': lambda t: 'ulei' in t and any(w in t for w in ('transfer', 'cutia de distribut', 'cutie de distribut')),
+        'differential_oil_front': lambda t: 'ulei' in t and 'diferent' in t and 'fata' in t and 'spate' not in t,
+        'differential_oil_rear': lambda t: 'ulei' in t and 'diferent' in t and 'spate' in t and 'fata' not in t,
         "timing_chain": lambda t: "lant" in t and "distribut" in t and "inlocuire" in t
                                   and any(word in t for word in ("set", "ambele", "ambelor")),
         "brake_pads_front": lambda t: "placut" in t and "fran" in t and "fata" in t,
@@ -1140,6 +1154,8 @@ async def _autototal_repair_times(request_id: int, offer_result_path: str,
             oil_specification = " / ".join(preferred_oil["classifications"])
             if preferred_oil["grades"]:
                 oil_specification += " · SAE " + " sau ".join(preferred_oil["grades"])
+        if not any(op['id'] in {'engine_oil', 'oil_filter'} for op in operations):
+            engine_oil_liters, oil_options, oil_specification = 0, [], ''
 
         leaves = []
         def walk(nodes, path=None, main_id=None, sub_id=None):

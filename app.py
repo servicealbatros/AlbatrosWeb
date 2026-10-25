@@ -4118,7 +4118,8 @@ def _persist_offer_draft(request_id: int, data: OfferDraftInput, *, stock_reques
             or draft["drain_plug_price_ron"] < 0):
         raise HTTPException(status_code=400, detail="Prețurile și cantitatea uleiului trebuie să fie pozitive.")
     request_text = str(request_row.get("symptom") or "").lower()
-    is_service = chain_replacement(request_text) or "revizie" in request_text or ("ulei" in request_text and "filtr" in request_text)
+    from transmission_service_policy import engine_service_requested
+    is_service = engine_service_requested(request_text) and (chain_replacement(request_text) or 'revizie' in request_text or ('ulei' in request_text and 'filtr' in request_text))
     if is_service and _float_or_zero(draft.get("oil_liters")) > 0:
         # Uleiul se ofertează la litru întreg. Capacitatea tehnică rămâne
         # separată, iar cantitatea facturabilă se rotunjește mereu în sus.
@@ -4289,7 +4290,8 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
     if oil_unit_price > 0 and not str(draft.get("oil_product_name") or "").strip():
         missing.append("identificarea uleiului")
     request_text = " ".join(str(request_row.get(k) or "") for k in ("symptom", "request", "solicitare", "problem")).lower()
-    is_service = "revizie" in request_text or ("ulei" in request_text and "filtr" in request_text)
+    from transmission_service_policy import engine_service_requested
+    is_service = engine_service_requested(request_text) and ('revizie' in request_text or ('ulei' in request_text and 'filtr' in request_text))
     selected_entry = _load_offer_selections().get(str(request_id), {})
     selected_for_validation = selected_entry.get("products") or ([selected_entry.get("product")] if selected_entry.get("product") else [])
     # An individually verified checklist is also an explicit parts selection.
@@ -6172,7 +6174,10 @@ def request_unified_offer_page(request_id: int):
     draft = _draft_for_request(request_id)
     from offer_parts_checklist import render_lines, render_internal_materials
     from timing_chain_policy import default_checklist, chain_replacement
-    parts_checklist_html = render_lines(draft.get('parts_checklist') or default_checklist(request_row.get('symptom')))
+    from transmission_service_policy import engine_service_requested, drivetrain_operations
+    drivetrain_only = bool(drivetrain_operations(request_row.get('symptom'))) and not engine_service_requested(request_row.get('symptom'))
+    engine_oil_panel_style = 'display:none' if drivetrain_only else ''
+    parts_checklist_html = render_lines(draft.get('parts_checklist') or default_checklist(request_row.get('symptom')), engine_oil_separate=not drivetrain_only)
     internal_consumables_html = render_internal_materials(draft.get('internal_consumables') or [])
     history_job = next((row for row in _load_robot_jobs()
                         if int(row.get("request_id") or 0) == int(request_id)), None)
@@ -6797,7 +6802,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
       <input id="parts_name" type="hidden" value="{_escape_html(parts_name)}">
       <input id="parts_price_ron" type="hidden" value="{parts_price}">
       <input id="parts_availability" type="hidden" value="{_escape_html(parts_availability)}">
-      <div class="span3 oilbox">
+      <div class="span3 oilbox" style="{engine_oil_panel_style}">
         <h3 style="margin:0 0 6px">{"Ulei identificat automat" if robot_oil_identified else "Ulei de completat de consilier"}</h3>
         <div style="margin-bottom:12px"><small>{_escape_html(oil_quantity_note)} {"Programul a completat produsul, ambalajul și prețul; consilierul le poate modifica." if robot_oil_identified else "Programul completează automat ce identifică; consilierul poate corecta valorile."}</small></div>
         <div class="formgrid">
@@ -6839,7 +6844,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
           </div>
         </div>
       </div>
-      <div class="span3 oilbox" style="background:#eff6ff;border-color:#2563eb">
+      <div class="span3 oilbox" style="background:#eff6ff;border-color:#2563eb;{engine_oil_panel_style}">
         <h3 style="margin:0 0 6px">Bușon baie ulei — obligatoriu la schimbul de ulei</h3>
         <div><small>Bușonul trebuie selectat din lista de piese de mai sus. Bifează confirmarea după ce ai verificat selecția; datele comerciale nu se repetă aici.</small></div>
         <label style="display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;margin-top:12px">

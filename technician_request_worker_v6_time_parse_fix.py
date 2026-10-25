@@ -101,8 +101,10 @@ OPERATION_LIBRARY = [
     },
     {
         "id": "timing_chain",
-        "canonical": "inlocuire lant de distributie",
+        "canonical": "inlocuire set lanturi de distributie",
+        "haynes_queries": ["inlocuire ambele lanturi de distributie", "set lanturi de distributie inlocuire"],
         "aliases": [
+            "distributie pe lant", "lant de distributie", "lanturi de distributie", "distributie lant",
             "lant distributie", "kit lant distributie", "schimb lant distributie",
             "timing chain", "timing chain kit", "steuerkette",
             "chaine distribution",
@@ -417,6 +419,9 @@ def detect_operations(request: str) -> list[dict]:
             unique[item["id"]] = item
 
     result = list(unique.values())
+    from timing_chain_policy import chain_replacement
+    if chain_replacement(request):
+        result = [op for op in result if op['id'] != 'timing_belt']
 
     s = normalize(cleaned)
 
@@ -974,6 +979,8 @@ def tecrmi_row_matches_request(operation: dict, row_text: str) -> bool:
     # "bieleta" previously matched "ventilatie").  Require the physical part
     # and the requested axle to be present in the TecRMI description.
     strict_terms = {
+        "timing_chain": lambda t: "lant" in t and "distribut" in t and "inlocuire" in t
+                                  and any(word in t for word in ("set", "ambele", "ambelor")),
         "brake_pads_front": lambda t: "placut" in t and "fran" in t and "fata" in t,
         "brake_pads_rear": lambda t: "placut" in t and "fran" in t and "spate" in t,
         "brake_discs_front": lambda t: "disc" in t and "fran" in t and "fata" in t,
@@ -1155,6 +1162,7 @@ async def _autototal_repair_times(request_id: int, offer_result_path: str,
         walk(tree)
 
         preferred_text = {
+            "timing_chain": "set lanturi de distributie inlocuire",
             "engine_oil": "ulei de motor inlocuire",
             "oil_filter": "filtru de ulei de motor inlocuire",
             "air_filter": "filtru de aer inlocuire",

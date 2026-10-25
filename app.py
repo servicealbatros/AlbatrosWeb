@@ -2343,7 +2343,14 @@ def _clear_offer_work_state(request_id: int) -> None:
         _save_offer_selections(selections)
     drafts = _load_offer_drafts()
     if key in drafts:
-        drafts.pop(key, None)
+        # Retain the researched scope, but invalidate prices and approvals from
+        # the previous search. New supplier results must be reviewed again.
+        checklist = drafts[key].get('parts_checklist') or []
+        if checklist:
+            drafts[key] = {'parts_checklist': [dict(row, unit_price_ron=None, confirmed=False)
+                                               for row in checklist]}
+        else:
+            drafts.pop(key, None)
         _save_offer_drafts(drafts)
 
 
@@ -2803,6 +2810,7 @@ class WhatsAppDestinationInput(BaseModel):
 
 
 class OfferDraftInput(BaseModel):
+    parts_checklist: list[dict] = Field(default_factory=list)
     operation: str = ""
     labour_operations: list[dict] = Field(default_factory=list)
     additional_operation: str = ""
@@ -4028,6 +4036,20 @@ def save_offer_draft(request_id: int, data: OfferDraftInput, confirmation_token:
         raise HTTPException(status_code=404, detail="Cererea nu a fost găsită.")
 
     draft = data.model_dump()
+    from offer_parts_checklist import normalize_lines, subtotal
+    from timing_chain_policy import default_checklist, chain_replacement
+    if 'parts_checklist' not in data.model_fields_set:
+        draft['parts_checklist'] = _draft_for_request(request_id).get('parts_checklist') or []
+    if not draft['parts_checklist']:
+        draft['parts_checklist'] = default_checklist(request_row.get('symptom'))
+    try:
+        draft['parts_checklist'] = normalize_lines(draft['parts_checklist'])
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if draft['parts_checklist']:
+        draft['parts_price_ron'] = subtotal(draft['parts_checklist'])
+    from offer_parts_checklist import pending_lines
+    draft['parts_prices_pending'] = bool(pending_lines(draft['parts_checklist']))
     normalized_operations = []
     for index, row in enumerate((draft.get("labour_operations") or [])[:50]):
         if not isinstance(row, dict):
@@ -4053,7 +4075,7 @@ def save_offer_draft(request_id: int, data: OfferDraftInput, confirmation_token:
             or draft["drain_plug_price_ron"] < 0):
         raise HTTPException(status_code=400, detail="Prețurile și cantitatea uleiului trebuie să fie pozitive.")
     request_text = str(request_row.get("symptom") or "").lower()
-    is_service = "revizie" in request_text or ("ulei" in request_text and "filtr" in request_text)
+    is_service = chain_replacement(request_text) or "revizie" in request_text or ("ulei" in request_text and "filtr" in request_text)
     if is_service and _float_or_zero(draft.get("oil_liters")) > 0:
         # Uleiul se ofertează la litru întreg. Capacitatea tehnică rămâne
         # separată, iar cantitatea facturabilă se rotunjește mereu în sus.
@@ -4140,6 +4162,17 @@ def _require_original_oil_selection(request_id: int) -> None:
 def _require_advisor_labour_review(request_id: int) -> dict:
     _require_original_oil_selection(request_id)
     draft = _draft_for_request(request_id)
+    from offer_parts_checklist import pending_lines
+    from timing_chain_policy import chain_replacement
+    checklist = draft.get('parts_checklist') or []
+    if checklist and pending_lines(checklist):
+        raise HTTPException(409, 'Necesarul de piese are coduri, cantități, prețuri sau verificări neconfirmate.')
+    if chain_replacement((_request_by_id(request_id) or {}).get('symptom')):
+        from original_oil_policy import is_original_engine_oil
+        if not checklist or not is_original_engine_oil({'description': draft.get('oil_product_name')},
+                                                      (_request_by_id(request_id) or {}).get('vehicle')) \
+                or _float_or_zero(draft.get('oil_unit_price_ron')) <= 0 or _float_or_zero(draft.get('oil_liters')) <= 0:
+            raise HTTPException(409, 'Distribuția pe lanț necesită lista de piese verificată și revizia cu ulei original, cantitate și preț confirmate.')
     if not draft or not draft.get("labour_reviewed"):
         raise HTTPException(
             status_code=409,
@@ -6061,6 +6094,9 @@ def request_unified_offer_page(request_id: int):
     tech = _load_technician_result(request_id)
     tech_defaults = _partial_tech_defaults(tech)
     draft = _draft_for_request(request_id)
+    from offer_parts_checklist import render_lines
+    from timing_chain_policy import default_checklist, chain_replacement
+    parts_checklist_html = render_lines(draft.get('parts_checklist') or default_checklist(request_row.get('symptom')))
     history_job = next((row for row in _load_robot_jobs()
                         if int(row.get("request_id") or 0) == int(request_id)), None)
     history_oils = [part for part in (history_job or {}).get("history_parts") or []
@@ -6072,7 +6108,7 @@ def request_unified_offer_page(request_id: int):
     vin = request_row.get("vin") or "—"
     symptom = request_row.get("symptom") or request_row.get("request") or request_row.get("solicitare") or request_row.get("problem") or "—"
     search_query = offer.get("query") or symptom
-    is_service_offer = any(
+    is_service_offer = chain_replacement(symptom) or any(
         key in _normalize_text(symptom)
         for key in ("revizie", "filtru", "filtre", "schimb ulei", "ulei motor")
     )
@@ -6618,6 +6654,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
 
   <div class="card">
     <h2 style="margin-top:0">Rezultate piese</h2>
+    {parts_checklist_html}
     {autototal_status_html}
     {partial_notice}
     {products_html}
@@ -6779,6 +6816,8 @@ function n(id){{
   return Number.isFinite(x)?x:0;
 }}
 function updateTotal(){{
+  const checklist=quoteParts();
+  if(checklist.length)document.getElementById("parts_price_ron").value=checklist.reduce((sum,row)=>sum+(row.quantity||0)*(row.unit_price_ron||0),0).toFixed(2);
   const oilTotal=n("oil_unit_price_ron")*n("oil_liters");
   const packLiters=n("oil_pack_liters");
   document.getElementById("oil_pack_quantity").value=
@@ -6789,7 +6828,9 @@ function updateTotal(){{
     oilTotal.toLocaleString("ro-RO",{{minimumFractionDigits:2,maximumFractionDigits:2}})+" RON";
   document.getElementById("total_value").textContent=
     total.toLocaleString("ro-RO",{{minimumFractionDigits:2,maximumFractionDigits:2}})+" RON"+
-    (n("oil_unit_price_ron")>0 && n("oil_liters")===0?" (fără ulei; preț pe litru)":"");
+    (n("oil_unit_price_ron")>0 && n("oil_liters")===0?" (fără ulei; preț pe litru)":"")+
+    (checklist.some(row=>!row.confirmed||row.unit_price_ron===null||row.quantity===null||!row.code)||
+      (checklist.length && (n("oil_unit_price_ron")<=0||n("oil_liters")<=0))?" — TOTAL PARȚIAL, piese sau ulei de confirmat":"");
 }}
 function updateOilFromPack(){{
   const packLiters=n("oil_pack_liters"),packPrice=n("oil_pack_price_ron");
@@ -7001,8 +7042,23 @@ async function removeManualPart(code){{
   if(!r.ok){{alert(d.detail||"Piesa manuală nu a putut fi ștearsă.");return;}}
   location.reload();
 }}
+function quoteParts(){{
+ return [...document.querySelectorAll('.quote-part-row')].map(row=>({{
+  description:row.querySelector('.quote-description').value.trim(),
+  code:row.querySelector('.quote-code').value.trim(),
+  quantity:row.querySelector('.quote-quantity').value===''?null:Number(row.querySelector('.quote-quantity').value),
+  unit_price_ron:row.querySelector('.quote-price').value===''?null:Number(row.querySelector('.quote-price').value),
+  confirmed:row.querySelector('.quote-confirmed').checked,
+  note:row.querySelector('.quote-note').value,source:row.dataset.source||''
+ }}));
+}}
+document.querySelectorAll('.quote-part-row input').forEach(input=>input.addEventListener('input',()=>{{
+ if(!input.classList.contains('quote-confirmed'))input.closest('.quote-part-row').querySelector('.quote-confirmed').checked=false;
+ updateTotal();
+}}));
 function payload(){{
   return {{
+    parts_checklist:quoteParts(),
     operation:document.getElementById("operation").value,
     labour_operations:labourOperations(),
     additional_operation:document.getElementById("additional_operation").value,

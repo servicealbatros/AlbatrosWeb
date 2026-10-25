@@ -84,6 +84,7 @@ TECHNICAL_VOCABULARY = (
     )),
     ("kit ambreiaj", ("ambreiaj", "kit ambreiaj", "placa disc rulment")),
     ("volantă cu masă dublă", ("volanta", "volantă", "volanta dubla", "volantă dublă")),
+    ("kit distribuție pe lanț", ("distributie pe lant", "distribuție pe lanț", "lant de distributie", "lanț de distribuție", "lanturi de distributie", "lanțuri de distribuție", "distributie lant", "timing chain")),
     ("kit distribuție", ("distributie", "distribuție", "kit distributie", "kit distribuție")),
     ("kit curea accesorii complet: curea, role, întinzător și pompă de apă", (
         "kit curea accesorii", "kit curea de accesorii", "kit accesorii",
@@ -144,7 +145,8 @@ def canonical_terms(value: str) -> list[str]:
 
 
 def expand_technical_request(value: str) -> str:
-    original = str(value or "").strip()
+    from timing_chain_policy import expand_chain_scope
+    original = expand_chain_scope(value)
     terms = canonical_terms(original)
     if not terms:
         return original

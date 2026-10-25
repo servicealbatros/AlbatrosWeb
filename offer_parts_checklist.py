@@ -81,13 +81,22 @@ def render_internal_materials(rows):
         code = escape(row['code']) or 'Cod de confirmat'
         items.append(f'''<li style="margin:16px 0"><strong>{name}</strong> · {code}
           <details id="stock_{key}"><summary>Înregistrează cererea mecanicului din magazie</summary>
+          <div class="stock-request-fields">
           <label>Mecanic<input class="stock-technician" required maxlength="120"></label>
           <label>Cantitate solicitată<input class="stock-quantity" type="number" min="0.001" step="any" required></label>
           <label>Preț unitar RON<input class="stock-price" type="number" min="0" step="0.01" required></label>
           <label>Referință cerere / bon magazie<input class="stock-reference" maxlength="160"></label>
+          </div>
           <button type="button" onclick="recordWorkshopRequest('{key}')">Adaugă în deviz cererea efectivă</button>
           </details></li>''')
-    return '''<div class="card" id="internal_workshop_materials"><h2>Consumabile de atelier — necesar intern</h2>
+    return '''<div class="card" id="internal_workshop_materials"><style>
+      #internal_workshop_materials summary{cursor:pointer;color:#1d4ed8;margin:8px 0}
+      #internal_workshop_materials .stock-request-fields{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px;margin:12px 0}
+      #internal_workshop_materials label{display:flex;flex-direction:column;gap:6px;font-size:14px}
+      #internal_workshop_materials input{width:100%;box-sizing:border-box;padding:9px;border:1px solid #cbd5e1;border-radius:6px}
+      #internal_workshop_materials button{background:#1d4ed8;color:white;border:0;border-radius:7px;padding:10px 14px;cursor:pointer}
+      @media(max-width:750px){#internal_workshop_materials .stock-request-fields{grid-template-columns:1fr 1fr}}
+      </style><h2>Consumabile de atelier — necesar intern</h2>
       <p>Nu sunt incluse în oferta inițială sau în total. Se adaugă în deviz numai după cererea efectivă
       a mecanicului către magazie, cu mecanic și cantitate înregistrate. Nu se solicită automat din magazie.</p><ul>''' + ''.join(items) + '</ul></div>'
 

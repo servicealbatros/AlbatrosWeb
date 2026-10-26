@@ -9047,6 +9047,7 @@ def requests_dashboard():
             <a class="link-button" href="/baza-dsm">Istoric DSM</a>
             <a class="link-button" href="/arhiva">Arhivă / curăță cereri</a>
             <a class="link-button" href="/acuratete">Măsurare acuratețe</a>
+            <form method="post" action="/receptie/logout" style="margin:0;display:inline-flex"><button type="submit" title="Închide sesiunea curentă pentru a te conecta cu utilizatorul Master">Ieșire / Master</button></form>
         </div>
     </div>
 

@@ -17,6 +17,7 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, R
 from app import app as backend
 from security import POLICY, SecurityViolation
 from reception_bridge import bridge_url, dashboard_route, forward, verify_request
+from navigation_ui import with_navigation_style
 
 BASE = Path(__file__).resolve().parent
 
@@ -111,6 +112,7 @@ class CloudGateway:
             # pretend they work in a Linux container without a connected worker.
             response = JSONResponse({"detail": "Workerul de catalog nu este conectat la server."}, status_code=503)
         if response is not None:
+            response = await with_navigation_style(path, response)
             response.headers["Cache-Control"] = "no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["X-Frame-Options"] = "DENY"

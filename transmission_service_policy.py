@@ -28,9 +28,9 @@ def drivetrain_operations(value):
 
 
 def engine_service_requested(value):
-    text = plain(value)
-    if chain_replacement(value) or re.search(r'ulei(?: de)? motor|engine oil|revizie motor', text):
+    text = plain(value).split('| termeni tehnici:', 1)[0]
+    if chain_replacement(value) or re.search(r'ulei(?: de)? motor|engine oil|revizie motor|filtr\w* (?:de )?(?:aer|habitaclu|polen|combustibil|motorina)', text):
         return True
-    if (drivetrain_operations(value) or re.search(r'ulei.{0,20}(?:cuti[ae]|transmisi|diferent|grup)', text)):
+    if drivetrain_operations(value) or re.search(r'\bcuti[ae]\w*|\btransmisi\w*|\bdiferent\w*|\bgrup(?:ul|uri|urile)?\b|\batf\b|\bdtf\b', text):
         return False
-    return 'revizie' in text or ('ulei' in text and ('filtr' in text or 'schimb' in text))
+    return 'revizie' in text or 'filtr' in text or ('ulei' in text and 'schimb' in text)

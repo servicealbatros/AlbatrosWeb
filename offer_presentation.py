@@ -39,7 +39,18 @@ document.addEventListener('DOMContentLoaded',()=>{
 '''
 
 
-def render_parts_workspace(groups, missing):
+def render_parts_workspace(groups, missing, *, checklist=None):
+    from offer_parts_checklist import line_gaps
+    checklist = checklist or []
+    checklist_notice = ''
+    if checklist:
+        pending = line_gaps(checklist)
+        checklist_notice = (f'<div class="parts-progress"><b>Necesar editabil: {len(checklist)} poziții</b>'
+                            f' · {len(pending)} de verificat. '
+                            '<a href="#quote_parts_checklist">Vezi codurile, prețurile și verificările de mai sus ↑</a>'
+                            '<br><small>Lista de mai jos conține variante suplimentare de la furnizori. '
+                            'Lipsa variantelor nu înseamnă că necesarul editabil este gol. '
+                            'Completarea manuală nu dovedește identificarea automată în catalog.</small></div>')
     selected = sum(bool(group['selected']) for group in groups)
     sections = []
     for group in groups:
@@ -51,10 +62,12 @@ def render_parts_workspace(groups, missing):
           <div class="part-table-scroll"><table><thead><tr><th>Tip</th><th>Marcă / furnizor</th><th>Detalii</th><th>Cod piesă</th><th>Preț</th><th>Stoc</th><th>Alegere</th></tr></thead>
           <tbody>{''.join(group['rows'])}</tbody></table></div></details>''')
     missing_html = ('<div class="parts-missing"><b>Rezultate lipsă:</b> ' + escape(', '.join(map(str, missing))) + '</div>') if missing else ''
+    progress = (f'<b>{selected} / {len(groups)}</b> grupe cu variantă selectată' if groups
+                else 'Nu există variante suplimentare de la furnizori.' if checklist else 'Nu există încă rezultate de piese.')
     return f'''<style>{STYLE}</style><section class="parts-workspace" id="partsWorkspace">
-      <div class="parts-tools"><div class="parts-progress"><b>{selected} / {len(groups)}</b> grupe cu piesă selectată<br><small>Selecția pieselor nu înlocuiește verificarea ofertei.</small></div>
+      {checklist_notice}<div class="parts-tools"><div class="parts-progress">{progress}<br><small>Selecția pieselor nu înlocuiește verificarea ofertei.</small></div>
       <label><input id="partsOutstandingOnly" type="checkbox">Arată doar piesele neselectate</label></div>
-      {missing_html}{''.join(sections) if sections else '<div class="muted">Nu există încă rezultate de piese.</div>'}
+      {missing_html}{''.join(sections)}
       <div id="partsFilterEmpty" class="parts-filter-empty" hidden>Toate grupele cu rezultate au o piesă selectată. Verifică și eventualele rezultate lipsă de mai sus.</div>
-      </section><aside class="offer-dock"><div><b>Piese: {selected}/{len(groups)} grupe</b> <span>· Manoperă: <span id="dockLabour">—</span></span></div>
+      </section><aside class="offer-dock"><div><b>{f'Necesar: {len(checklist)} poziții' if checklist else f'Piese: {selected}/{len(groups)} grupe'}</b> <span>· Manoperă: <span id="dockLabour">—</span></span></div>
       <a href="#partsWorkspace">Înapoi la piese ↑</a><div><span>Total estimativ </span><strong id="dockTotal">—</strong></div></aside><script>{SCRIPT}</script>'''

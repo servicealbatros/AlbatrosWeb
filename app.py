@@ -9272,7 +9272,7 @@ async function updateStatus(requestId, status) {
         setTimeout(syncStickyHorizontalScrollbar, 0);
 
     } catch (error) {
-        alert("Nu am putut schimba statusul: " + error.message);
+        await window.AlbatrosAI.notify(error.message, {tone:"warning",title:"Statusul nu a fost schimbat"});
     }
 }
 
@@ -9407,7 +9407,7 @@ async function deleteYardOrder(id, button) {
         await loadRequests();
     } catch (error) {
         button.disabled = false; button.textContent = "Șterge";
-        alert(error.message);
+        await window.AlbatrosAI.notify(error.message);
     }
 }
 
@@ -9423,7 +9423,7 @@ async function createYardRequest(id, button) {
         window.location.href = data.offer_url;
     } catch (error) {
         button.disabled = false; button.textContent = "Deschide cererea de ofertare";
-        alert(error.message);
+        await window.AlbatrosAI.notify(error.message);
     }
 }
 
@@ -9435,9 +9435,9 @@ async function importYardOrders() {
         const result = await response.json();
         if (!response.ok || result.ok === false) throw new Error(result.detail || "Importul DSM a eșuat.");
         await loadRequests();
-        alert(`DSM actualizat: ${result.created} adăugate, ${result.updated} actualizate, ${result.skipped_scheduled} deja programate și excluse.`);
+        await window.AlbatrosAI.notify(`DSM actualizat: ${result.created} adăugate, ${result.updated} actualizate, ${result.skipped_scheduled} deja programate și excluse.`, {tone:"success",title:"DSM actualizat"});
     } catch (error) {
-        alert(error.message);
+        await window.AlbatrosAI.notify(error.message);
     } finally {
         button.disabled = false; button.textContent = "Actualizează din DSM";
     }
@@ -9489,7 +9489,7 @@ async function archiveDashboardRequest(id,button){
         if(!response.ok)throw Error(data.detail||'Arhivarea a eșuat.');
         requests=requests.filter(r=>String(value(r,'id','request_id','req_id'))!==String(id));
         renderStats();render();setupStickyHorizontalScrollbar();
-    }catch(error){button.disabled=false;button.textContent='Arhivează';alert(error.message)}
+    }catch(error){button.disabled=false;button.textContent='Arhivează';await window.AlbatrosAI.notify(error.message)}
 }
 
 async function sendOfferFromDashboard(requestId, button, currentPhone) {
@@ -9533,7 +9533,7 @@ async function startLabourOnlyFromDashboard(requestId, button) {
     } catch (error) {
         button.disabled = false;
         button.textContent = original;
-        alert(error.message);
+        await window.AlbatrosAI.notify(error.message);
     }
 }
 
@@ -9556,7 +9556,7 @@ async function startPartsOfferFromDashboard(requestId, button) {
     } catch (error) {
         button.disabled = false;
         button.textContent = original;
-        alert(error.message);
+        await window.AlbatrosAI.notify(error.message);
     }
 }
 

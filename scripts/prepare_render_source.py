@@ -8,7 +8,7 @@ import shutil
 
 BASE = Path(__file__).resolve().parents[1]
 FILES = (
-    'app.py', 'offer_presentation.py', 'cloud_app.py', 'reception_bridge.py', 'cloud_backup.py', 'navigation_ui.py',
+    'app.py', 'offer_presentation.py', 'customer_offer_text.py', 'cloud_app.py', 'reception_bridge.py', 'cloud_backup.py', 'navigation_ui.py',
     'agent.py', 'security.py', 'database.py', 'labour.py',
     'vision.py', 'dashboard_devices.py', 'scheduler.py', 'schedule_import_control.py', 'mechanic_schedule_clock.py', 'dsm_session_vault.py', 'automotive_vocabulary.py',
     'oe_english_vocabulary.py', 'part_accuracy.py', 'worker_run_guard.py', 'browser_resources.py',

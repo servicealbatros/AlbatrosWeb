@@ -4415,7 +4415,8 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         else:
             lines.append("• Cantitatea de ulei nu este confirmată; prețul este pe litru.")
         if draft.get("oil_specification"):
-            lines.append(f"• Specificație verificată: {draft['oil_specification']}")
+            from customer_offer_text import customer_oil_specification
+            lines.append(f"• Specificație producător auto: {customer_oil_specification(draft['oil_specification'])}")
 
     if drain_plug_selected and drain_plug_price > 0:
         plug_label = "original" if drain_plug_is_oe else drain_plug_brand
@@ -4458,7 +4459,8 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         "După accept, verificăm programatorul service-ului și vă comunicăm noi primul interval disponibil."
     ])
 
-    message = "\n".join(lines)
+    from customer_offer_text import customer_offer_text
+    message = customer_offer_text("\n".join(lines))
 
     # Meta limits each WhatsApp template parameter to 1,024 characters.  The
     # dashboard keeps the complete offer, while the approved template receives
@@ -4480,7 +4482,8 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         compact_lines.append(oil_summary)
         oil_specification = str(draft.get("oil_specification") or "").strip()
         if oil_specification:
-            compact_lines.append(f"Specificație: {oil_specification}")
+            from customer_offer_text import customer_oil_specification
+            compact_lines.append(f"Specificație producător auto: {customer_oil_specification(oil_specification)}")
     if drain_plug_selected and drain_plug_price > 0:
         compact_lines.append(f"Bușon baie ulei: {ron(drain_plug_price)}")
     if additional_operation and additional_hours > 0:
@@ -4493,7 +4496,7 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         compact_lines.append(f"Manoperă totală: {ron(labour_price)}; durată totală: {expected_hours:.1f} h")
     compact_lines.append(f"Total estimativ: {ron(total)}")
     compact_lines.append("Răspundeți ACCEPT dacă sunteți de acord. După accept verificăm programarea.")
-    compact_template_message = "\n".join(compact_lines)
+    compact_template_message = customer_offer_text("\n".join(compact_lines))
     if len(compact_template_message) > 1000:
         # Product descriptions can occasionally be very long. Preserve all
         # prices and decision data, shortening only the descriptive parts.
@@ -4522,7 +4525,7 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
             f"Total estimativ: {ron(total)}",
             "Răspundeți ACCEPT dacă sunteți de acord."
         ])
-        compact_template_message = "\n".join(compact_lines)
+        compact_template_message = customer_offer_text("\n".join(compact_lines))
     await send_whatsapp_notification(
         to_number, message, kind="offer",
         subject=f"oferta #{request_id}",
@@ -10290,6 +10293,11 @@ async def send_whatsapp_notification(to_number: str, text: str, *, kind: str,
                                      recipient_name: str = "client",
                                      template_text: str | None = None) -> dict:
     """Send free-form in the 24h window, otherwise require an approved utility template."""
+    if kind == 'offer':
+        from customer_offer_text import customer_offer_text
+        text = customer_offer_text(text)
+        if template_text is not None:
+            template_text = customer_offer_text(template_text)
     target = _normalize_whatsapp_phone(to_number)
     if _has_open_whatsapp_window(target):
         result = await send_whatsapp_text(target, text)

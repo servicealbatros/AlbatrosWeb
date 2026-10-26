@@ -305,6 +305,26 @@ class ScheduleImportStatusTests(unittest.TestCase):
   self.calendar=dict(dsm_appointment_id='APP-1952',job_number='B100TST / APP-1952',mechanic='Import fixture',
     registration='B100TST',operations='OFERTA 1-PLACUTE FATA/SPATE',
     start_at=tomorrow+'T08:30',end_at=tomorrow+'T13:00')
+ def test_scheduler_waiting_queue_contains_only_unarchived_accepted_unscheduled_requests(self):
+  from scheduler import accepted_requests
+  with sync.connection(self.db) as conn:
+   conn.execute('CREATE TABLE IF NOT EXISTS request_archive(request_id INTEGER PRIMARY KEY)')
+   ids={}
+   for state in ('acceptat','programat','asteptare','nou','rezolvat','anulat','ofertat','in_lucru','finalizat'):
+    ids[state]=conn.execute("INSERT INTO service_requests(session_id,symptom,status,source) VALUES (?,'fixture',?,'whatsapp')",('state-'+state,state)).lastrowid
+   archived=conn.execute("INSERT INTO service_requests(session_id,symptom,status,source) VALUES ('archived','fixture','acceptat','whatsapp')").lastrowid
+   booked=conn.execute("INSERT INTO service_requests(session_id,symptom,status,source) VALUES ('booked','fixture','acceptat','whatsapp')").lastrowid
+   cancelled_booking=conn.execute("INSERT INTO service_requests(session_id,symptom,status,source) VALUES ('cancelled-booking','fixture','acceptat','whatsapp')").lastrowid
+   conn.execute('INSERT INTO request_archive VALUES (?)',(archived,))
+   for ident,state in ((booked,'programat'),(cancelled_booking,'anulat')):
+    conn.execute("INSERT INTO scheduler_appointments(request_id,start_at,end_at,status,operations,estimated_hours) VALUES (?,'2026-11-01T08:30','2026-11-01T09:30',?,'fixture',1)",(ident,state))
+  self.assertEqual({r['id'] for r in accepted_requests(self.db)},{ids['acceptat'],cancelled_booking})
+ def test_scheduler_waiting_queue_works_before_archive_table_is_created(self):
+  from scheduler import accepted_requests
+  with sync.connection(self.db) as conn:
+   conn.execute('DROP TABLE IF EXISTS request_archive')
+   ident=conn.execute("INSERT INTO service_requests(session_id,symptom,status,source) VALUES ('waiting','fixture','acceptat','whatsapp')").lastrowid
+  self.assertEqual([r['id'] for r in accepted_requests(self.db)],[ident])
  def test_schedule_import_immediately_updates_status_and_reimport_preserves_terminal_states(self):
   from dsm_schedule_sync import sync_local_schedule
   ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]

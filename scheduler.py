@@ -723,13 +723,16 @@ def dismiss_yard_order(db_path: Path, yard_order_id: int) -> bool:
 def accepted_requests(db_path: Path) -> list[dict]:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
+        archived = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='request_archive'").fetchone()
+        archive_filter = "AND NOT EXISTS (SELECT 1 FROM request_archive ar WHERE ar.request_id=r.id)" if archived else ""
         rows = conn.execute("""
             SELECT r.* FROM service_requests r
-            WHERE LOWER(COALESCE(r.status,'')) NOT IN ('anulat','finalizat','respins','sters')
+            WHERE LOWER(TRIM(COALESCE(r.status,''))) = 'acceptat'
               AND NOT EXISTS (
                 SELECT 1 FROM scheduler_appointments a
                 WHERE a.request_id=r.id AND a.status!='anulat'
               )
+            """ + archive_filter + """
             ORDER BY CASE WHEN LOWER(COALESCE(r.priority,''))='urgent' THEN 0 ELSE 1 END,r.id DESC
             LIMIT 40
         """).fetchall()

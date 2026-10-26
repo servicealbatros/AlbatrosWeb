@@ -179,6 +179,54 @@ class SignedOfferTests(unittest.TestCase):
   with sync.connection(self.db) as conn:
    self.assertEqual(conn.execute('SELECT status FROM service_requests').fetchone()[0],'programat')
    self.assertEqual(conn.execute('SELECT request_id FROM scheduler_appointments').fetchone()[0],result['request_ids'][0])
+ def calendar_offer_fixture(self, **changes):
+  data=item();ident=sync.apply_snapshot(self.db,[data])['request_ids'][0]
+  with sync.connection(self.db) as conn:
+   for column in ('source','dsm_appointment_id','registration','operations','end_at'):
+    conn.execute('ALTER TABLE scheduler_appointments ADD COLUMN '+column+' TEXT')
+   fields=dict(id=658,request_id=None,job_number='B100TST / APP-1952',status='programat',
+      source='dsm_schedule_readonly',dsm_appointment_id='APP-1952',registration='B100 TST',
+      operations='OFERTA 1-PLACUTE FATA/SPATE',end_at=(datetime.now(sync.ROMANIA)+timedelta(days=1)).isoformat())
+   fields.update(changes)
+   conn.execute('INSERT INTO scheduler_appointments ('+','.join(fields)+') VALUES ('+','.join('?' for _ in fields)+')',list(fields.values()))
+  return ident
+ def test_signed_calendar_description_links_existing_booking_without_inventing_acceptance_date(self):
+  ident=self.calendar_offer_fixture()
+  env=self.status_endpoint()
+  self.assertEqual(env['set_request_status'](ident,SimpleNamespace(status='programat'),object())['status'],'programat')
+  self.assertEqual(sync.reconcile_existing_bookings(self.db),[ident])
+  with sync.connection(self.db) as conn:
+   self.assertEqual(conn.execute('SELECT request_id FROM scheduler_appointments').fetchall(),[(ident,)])
+   self.assertEqual(conn.execute('SELECT status FROM service_requests').fetchone()[0],'programat')
+  self.assertEqual(sync.dashboard_dates(sync.offer_record(self.db,ident))['offer_validity'],'unknown')
+  # Recognising an existing appointment does not approve another new booking.
+  with self.assertRaisesRegex(ValueError,'10 zile'):
+   sync.require_valid_for_booking(self.db,dict(id=ident,source='dsm_accepted_offer'))
+  env['_verify_dsm_booking_approval'].assert_not_called()
+ def test_calendar_match_requires_exact_offer_plate_signed_vin_active_unique_and_unclaimed(self):
+  ident=self.calendar_offer_fixture()
+  cases=[('operations','OFERTA 10-PLACUTE'),('operations','B100TST PLACUTE'),
+    ('operations','OFERTA 1 SI OFERTA 2'),('registration','B113TST'),('source','manual'),
+    ('request_id',999),('status','anulat'),('status','finalizat'),('dsm_appointment_id',''),
+    ('end_at',(datetime.now(sync.ROMANIA)-timedelta(days=1)).isoformat())]
+  with sync.connection(self.db) as conn:
+   conn.row_factory=sqlite3.Row
+   original=dict(conn.execute('SELECT * FROM scheduler_appointments').fetchone())
+  for field,value in cases:
+   with self.subTest(field=field,value=value):
+    with sync.connection(self.db) as conn:conn.execute('UPDATE scheduler_appointments SET '+field+'=?',(value,))
+    self.assertEqual(sync.reconcile_existing_bookings(self.db),[])
+    with sync.connection(self.db) as conn:conn.execute('UPDATE scheduler_appointments SET '+field+'=?',(original[field],))
+  for field,value in [('signature_state','sent'),('eligibility','closed'),('payload_json',json.dumps(dict(vin='WV100000000000008')))]:
+   with sync.connection(self.db) as conn:
+    original_value=conn.execute('SELECT '+field+' FROM dsm_accepted_offer_links').fetchone()[0]
+    conn.execute('UPDATE dsm_accepted_offer_links SET '+field+'=?',(value,))
+   self.assertEqual(sync.reconcile_existing_bookings(self.db),[])
+   with sync.connection(self.db) as conn:conn.execute('UPDATE dsm_accepted_offer_links SET '+field+'=?',(original_value,))
+  with sync.connection(self.db) as conn:
+   conn.execute('INSERT INTO scheduler_appointments SELECT 659,request_id,job_number,status,source,dsm_appointment_id,registration,operations,end_at FROM scheduler_appointments')
+  self.assertEqual(sync.reconcile_existing_bookings(self.db),[])
+  with sync.connection(self.db) as conn:self.assertEqual(conn.execute('SELECT status FROM service_requests').fetchone()[0],'acceptat')
  def test_invalid_batch_rolls_back_every_insert(self):
   invalid=item('2');invalid['detail']['transaction_id']='99'
   with self.assertRaises(ValueError):sync.apply_snapshot(self.db,[item(),invalid])

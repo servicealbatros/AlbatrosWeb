@@ -62,6 +62,24 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await reminders.tick(self.db,self.root,self.now,self.notify,self.seed,check_orders=check)
         self.notify.assert_not_awaited();self.assertIn('duplicat',reminders.status(self.root)['issues'][0]['error'])
 
+    async def test_explicit_existing_order_binding_allows_invitation_only_for_that_order(self):
+        reminders.configure(self.root,True,self.now.date().isoformat(),['B112TST'],{'B112TST':'20'})
+        reminders.configure(self.root,True,self.now.date().isoformat())
+        check=AsyncMock(return_value=[{'id':'20','code':'PHDEV-20'}])
+        result=await reminders.preview(self.db,self.root,self.target,self.seed,check_orders=check)
+        self.assertEqual(result['eligible'],1);self.assertEqual(result['candidates'][0]['mode'],'update_existing')
+        await reminders.tick(self.db,self.root,self.now,self.notify,self.seed,check_orders=check)
+        data=flow.get(self.root,PHONE)[1]
+        self.assertEqual(data['appointment_command_id'],'20');self.assertEqual(data['approved_existing_order_id'],'20')
+        check.return_value=[]
+        result=await reminders.preview(self.db,self.root,self.target,self.seed,check_orders=check)
+        self.assertEqual(result['eligible'],0)
+        check.return_value=[{'id':'21','code':'PHDEV-21'}]
+        result=await reminders.preview(self.db,self.root,self.target,self.seed,check_orders=check)
+        self.assertEqual(result['eligible'],0)
+        reminders.configure(self.root,False,self.now.date().isoformat(),[])
+        self.assertEqual(reminders.settings(self.root)['existing_order_ids'],{})
+
     async def test_removed_dsm_appointment_is_excluded_by_fresh_snapshot_after_restart(self):
         refresh=AsyncMock(return_value={'appointment_ids':[]})
         result=await reminders.tick(self.db,self.root,self.now,self.notify,self.seed,refresh=refresh)

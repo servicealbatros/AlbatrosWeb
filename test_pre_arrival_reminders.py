@@ -43,6 +43,8 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notify.await_count,1)
         stage,data=flow.get(self.root,PHONE)
         self.assertEqual(stage,'attendance');self.assertTrue(data['production'])
+        self.assertIn('ALBATROS A',self.notify.await_args.args[1]);self.assertNotIn('TEST',self.notify.await_args.args[1])
+        self.assertEqual(reminders.status(self.root)['counts'],{'sent':1})
 
     async def test_removed_dsm_appointment_is_excluded_by_fresh_snapshot_after_restart(self):
         refresh=AsyncMock(return_value={'appointment_ids':[]})
@@ -50,8 +52,6 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['sent'],0);self.notify.assert_not_awaited()
         result=await reminders.tick(self.db,self.root,self.now,self.notify,self.seed,refresh=refresh)
         self.assertEqual(result['sent'],0);self.assertEqual(refresh.await_count,1)
-        self.assertIn('ALBATROS A',self.notify.await_args.args[1]);self.assertNotIn('TEST',self.notify.await_args.args[1])
-        self.assertEqual(reminders.status(self.root)['counts'],{'sent':1})
 
     async def test_uncertain_delivery_and_unidentified_client_are_not_retried_blindly(self):
         self.notify.side_effect=TimeoutError('Rezultat incert')

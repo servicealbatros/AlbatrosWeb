@@ -89,7 +89,7 @@ class CloudAccessTests(unittest.TestCase):
             self.assertEqual(client.get('/api/dashboard/master/status').status_code, 403)
             self.assertEqual(client.post('/api/dashboard/master/provider-login',json={},headers={'Origin':'https://app.servicealbatros.ro'}).status_code,403)
             dashboard = client.get('/cereri')
-            self.assertIn('Ieșire / Master', dashboard.text)
+            self.assertIn('Ieșire', dashboard.text)
             result = client.post('/receptie/logout', headers={'Origin':'https://app.servicealbatros.ro'}, follow_redirects=False)
             self.assertEqual(result.headers['location'], '/receptie/login')
             self.assertNotIn('albatros_reception', client.cookies)

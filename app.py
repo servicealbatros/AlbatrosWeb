@@ -8433,11 +8433,11 @@ def requests_dashboard():
     <style>
         @keyframes overdueRequestPulse {0%,100%{box-shadow:inset 0 0 0 2px #f59e0b55}50%{box-shadow:inset 0 0 0 3px #f59e0b}}
         tr.request-overdue{animation:overdueRequestPulse 1.8s ease-in-out infinite}
-        tr.request-overdue>td{animation:overdueCellPulse 1.8s ease-in-out infinite}
+        tr.request-overdue>td{animation:none}
         @keyframes urgentRequestPulse{0%,100%{box-shadow:inset 0 0 0 2px #dc262666}50%{box-shadow:inset 0 0 0 3px #dc2626}}
         @keyframes urgentCellPulse{0%,100%{background-color:#ef44440a}50%{background-color:#ef444438}}
         tr.request-urgent-pulse{animation:urgentRequestPulse 1.6s ease-in-out infinite}
-        tr.request-urgent-pulse>td{animation:urgentCellPulse 1.6s ease-in-out infinite}
+        tr.request-urgent-pulse>td{animation:none}
         @media(prefers-reduced-motion:reduce){tr.request-urgent-pulse,tr.request-urgent-pulse>td{animation:none}tr.request-urgent-pulse{outline:2px solid #dc2626}}
 
         @keyframes overdueCellPulse{0%,100%{background-color:transparent}50%{background-color:#f59e0b33}}
@@ -8910,13 +8910,13 @@ def requests_dashboard():
         .table-card { border-radius:14px; box-shadow:0 4px 20px #25344606; }
         th { background:#f7f9fb; color:#647184; padding:15px 12px; font-size:10px; letter-spacing:.8px; }
         td { padding:17px 12px; font-size:13px; line-height:1.5; }
-        tr.status-new td { background:#fff; }
-        tr.status-blue td { background:#f0f6ff; }
-        tr.status-green td { background:#edf9f1; }
-        tr.status-accepted td { background:#fff8eb; }
-        tr.status-waiting td { background:#fffbea; }
-        tr.status-urgent td { background:#fff1f1; }
-        tr.status-gray td { background:#f3f5f7; }
+        tr.status-new td, tr.status-new:hover td { background:#f3f4f6; }
+        tr.status-blue td, tr.status-blue:hover td { background:#93c5fd; }
+        tr.status-green td, tr.status-green:hover td { background:#86efac; }
+        tr.status-accepted td, tr.status-accepted:hover td { background:#fed7aa; }
+        tr.status-waiting td, tr.status-waiting:hover td { background:#fef3c7; }
+        tr.status-urgent td, tr.status-urgent:hover td { background:#ff4d4f; }
+        tr.status-gray td, tr.status-gray:hover td { background:#d1d5db; }
         tr.request-clickable-row:hover td { box-shadow:inset 0 0 0 9999px #24374d06; }
         tr.status-new td:first-child { border-left:3px solid #97a6b9; }
         tr.status-blue td:first-child { border-left:3px solid #5583ca; }

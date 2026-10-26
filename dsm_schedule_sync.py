@@ -209,6 +209,8 @@ async def _read_dsm_schedule_existing_tab(target_date: date) -> list[dict]:
                   end:String(event.endStr||'').slice(0,19),
                   resource_id:String(event.getResources?.()[0]?.id||extra.appointment_resource_id||''),
                   appointment_code:String(extra.appointment_code||''),
+                  source_transaction_id:String(extra.estimate_transaction_head__id||extra.offer_transaction_head__id||event.id||''),
+                  source_transaction_type:String(extra.estimate_transaction_head__id?(extra.estimate_transaction_head__type||'2'):extra.offer_transaction_head__id?'1':'3'),
                   registration:String(extra.car_number||''),
                   operations:String(extra.description||extra.work_summary||extra.services||''),
                   services:String(extra.services||''),
@@ -329,6 +331,10 @@ def _appointments_from_snapshot(snapshot: dict, target_date: date) -> list[dict]
             "status": "anulat" if _plain_fold(str(event.get("status") or "")) in {"CANCELED", "CANCELLED", "ANULAT"} else "programat",
             "customer_name": "",
             "phone": "",
+            "source_transaction_id": str(event.get('source_transaction_id') or ''),
+            "source_transaction_type": str(event.get('source_transaction_type') or ''),
+            "original_start_at": raw_start,
+            "original_end_at": raw_end,
             "start_at": daily_start,
             "end_at": daily_end,
             "operations": operations,
@@ -494,7 +500,7 @@ def sync_local_schedule(db_path: Path, rows: list[dict]) -> dict:
                 str(row.get("job_number") or dsm_id), operations,
                 duration, "Import automat read-only din programatorul DSM. Angajat DSM: " + mechanic,
                 str((tech or {}).get("department") or row.get("department") or "mecanica"), dsm_id,
-                operations, start_text, end_text,
+                operations, str(row.get('original_start_at') or start_text), str(row.get('original_end_at') or end_text),
             )
             if existing:
                 if existing['source'] == 'mechanic_takeover':
@@ -523,6 +529,14 @@ def sync_local_schedule(db_path: Path, rows: list[dict]) -> dict:
                     VALUES(NULL,?,?,?,'programat',?,?,?,?,?,?,?,?,'dsm_schedule_readonly',?,?,?,?,?)
                 """, values)
                 inserted += 1
+        for row in rows:
+            ident=str(row.get('source_transaction_id') or '')
+            kind=str(row.get('source_transaction_type') or '')
+            if ident.isdigit() and kind in {'1','2','3'}:
+                conn.execute('UPDATE scheduler_appointments SET dsm_transaction_id=?,dsm_transaction_type=? WHERE dsm_appointment_id=?',
+                             (ident,kind,str(row.get('dsm_appointment_id') or '')))
+            if row.get('status')=='anulat':
+                conn.execute("UPDATE scheduler_appointments SET status='anulat' WHERE dsm_appointment_id=? AND status!='finalizat'",(str(row.get('dsm_appointment_id') or ''),))
         conn.commit()
     from dsm_accepted_offers import reconcile_existing_bookings
     programmed_ids = reconcile_existing_bookings(db_path)

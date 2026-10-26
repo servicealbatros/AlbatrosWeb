@@ -112,10 +112,11 @@ async def save_client_details(data, head, command_id):
 
 async def save_vehicle_details(data, head, command_id):
     fields = vehicle_fields(data)
+    expected_vin=str(data.get('vin') or VIN).upper()
     car_id = str(head['car_id'])
     car = await call('/special/car/get_car', {'car_id': car_id})
     # Verify the record before modifying shared vehicle data.
-    if str(car.get('car_body_series', '')).upper() != VIN:
+    if str(car.get('car_body_series', '')).upper() != expected_vin:
         raise ValueError('Datele mașinii nu corespund VIN-ului confirmat.')
     check_previous(data, car, fields)
     for field, value in fields.items():
@@ -126,7 +127,7 @@ async def save_vehicle_details(data, head, command_id):
         if str(result.get('status')) not in {'1', 'True', 'true'} or result.get('validation'):
             raise ValueError('Salvarea datelor mașinii necesită verificare.')
     check = await call('/special/car/get_car', {'car_id': car_id})
-    if str(check.get('car_body_series', '')).upper() != VIN or any(str(check.get(field) or '') != value for field, value in fields.items()):
+    if str(check.get('car_body_series', '')).upper() != expected_vin or any(str(check.get(field) or '') != value for field, value in fields.items()):
         raise ValueError('Datele mașinii salvate nu au fost confirmate în DSM.')
 
 

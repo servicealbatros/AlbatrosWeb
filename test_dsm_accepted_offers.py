@@ -293,4 +293,51 @@ class SignedOfferTests(unittest.TestCase):
    with self.assertRaises(RuntimeError):asyncio.run(sync.rebuild_signed_offers(self.db,self.root))
   with sync.connection(self.db) as conn:self.assertEqual(conn.execute('SELECT COUNT(*) FROM request_archive').fetchone()[0],0)
 
+class ScheduleImportStatusTests(unittest.TestCase):
+ def setUp(self):
+  from scheduler import init_scheduler_db, save_technician
+  self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.addCleanup(gc.collect)
+  self.db=Path(self.temp.name)/'import.db'
+  with patch.object(database,'DB_PATH',self.db):database.init_db()
+  init_scheduler_db(self.db)
+  save_technician(self.db,dict(name='Import fixture',skills={'revizie':5}))
+  tomorrow=(datetime.now(sync.ROMANIA)+timedelta(days=1)).date().isoformat()
+  self.calendar=dict(dsm_appointment_id='APP-1952',job_number='B100TST / APP-1952',mechanic='Import fixture',
+    registration='B100TST',operations='OFERTA 1-PLACUTE FATA/SPATE',
+    start_at=tomorrow+'T08:30',end_at=tomorrow+'T13:00')
+ def test_schedule_import_immediately_updates_status_and_reimport_preserves_terminal_states(self):
+  from dsm_schedule_sync import sync_local_schedule
+  ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  result=sync_local_schedule(self.db,[self.calendar])
+  self.assertEqual(result['programmed_request_ids'],[ident])
+  with sync.connection(self.db) as conn:
+   self.assertEqual(conn.execute('SELECT status FROM service_requests WHERE id=?',(ident,)).fetchone()[0],'programat')
+   self.assertEqual(conn.execute('SELECT request_id FROM scheduler_appointments').fetchall(),[(ident,)])
+  for status in ('anulat','rezolvat','finalizat'):
+   with sync.connection(self.db) as conn:conn.execute('UPDATE service_requests SET status=? WHERE id=?',(status,ident))
+   result=sync_local_schedule(self.db,[self.calendar])
+   self.assertEqual(result['programmed_request_ids'],[])
+   self.assertEqual(result['inserted'],0)
+   with sync.connection(self.db) as conn:
+    self.assertEqual(conn.execute('SELECT status FROM service_requests WHERE id=?',(ident,)).fetchone()[0],status)
+    self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_appointments').fetchone()[0],1)
+ def test_schedule_import_preserves_explicit_whatsapp_link_without_matching_by_plate_alone(self):
+  from dsm_schedule_sync import sync_local_schedule
+  ident=sync.apply_snapshot(self.db,[item()])['request_ids'][0]
+  self.calendar['operations']='Revizie, fara cod oferta'
+  result=sync_local_schedule(self.db,[self.calendar])
+  self.assertEqual(result['programmed_request_ids'],[])
+  with sync.connection(self.db) as conn:
+   conn.execute("UPDATE service_requests SET source='whatsapp',status='asteptare' WHERE id=?",(ident,))
+   conn.execute('UPDATE scheduler_appointments SET request_id=?',(ident,))
+  self.assertEqual(sync_local_schedule(self.db,[self.calendar])['programmed_request_ids'],[ident])
+  with sync.connection(self.db) as conn:conn.execute("UPDATE service_requests SET status='asteptare',registration='B113TST' WHERE id=?",(ident,))
+  self.assertEqual(sync_local_schedule(self.db,[self.calendar])['programmed_request_ids'],[])
+ def test_offers_imported_after_calendar_are_also_marked_programmed(self):
+  from dsm_schedule_sync import sync_local_schedule
+  self.assertEqual(sync_local_schedule(self.db,[self.calendar])['programmed_request_ids'],[])
+  result=sync.apply_snapshot(self.db,[item()])
+  self.assertEqual(result['programmed_request_ids'],result['request_ids'])
+  with sync.connection(self.db) as conn:self.assertEqual(conn.execute('SELECT status FROM service_requests').fetchone()[0],'programat')
+
 if __name__=='__main__':unittest.main()

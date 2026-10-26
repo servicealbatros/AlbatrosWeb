@@ -524,7 +524,10 @@ def sync_local_schedule(db_path: Path, rows: list[dict]) -> dict:
                 """, values)
                 inserted += 1
         conn.commit()
-    return {"inserted": inserted, "updated": updated, "skipped": skipped, "warnings": warnings, "captured": len(rows)}
+    from dsm_accepted_offers import reconcile_existing_bookings
+    programmed_ids = reconcile_existing_bookings(db_path)
+    return {"inserted": inserted, "updated": updated, "skipped": skipped, "warnings": warnings,
+            "captured": len(rows), "programmed_request_ids": programmed_ids}
 
 
 async def import_dsm_schedule(db_path: Path, target_date: date) -> dict:

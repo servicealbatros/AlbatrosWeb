@@ -51,6 +51,41 @@ def amount(value):
         return Decimal(0)
 
 
+def validate_package(pkg):
+    """A replacement labor line requires its corresponding filter SKU on this document."""
+    categories = {category(p) for p in pkg.get('parts', []) if amount(p.get('quantity')) > 0}
+    labels = {'fuel_filter': 'filtrului de combustibil', 'air_filter': 'filtrului de aer', 'cabin_filter': 'filtrului de habitaclu'}
+    issues = set(pkg.get('issues') or [])
+    for labor in pkg.get('labors') or []:
+        text = normalized(labor.get('name'))
+        if amount(labor.get('quantity')) <= 0 or not re.search(r'\b(?:inlocu\w*|schimb\w*|replac\w*)\b', text):
+            continue
+        if re.search(r'\bfara\s+(?:inlocu|schimb)|\bnu\s+(?:se\s+)?(?:inlocu|schimb)', text):
+            continue
+        expected = category(labor)
+        if expected in labels and expected not in categories:
+            issues.add(f'Manopera indică înlocuirea {labels[expected]}, dar piesa și codul nu apar pe acest deviz. Pachet incomplet: necesită verificare în DSM.')
+    return {**pkg, 'issues': sorted(issues), 'ready': bool(pkg.get('ready')) and not issues}
+
+
+def revalidate_catalogue(path=DEFAULT_DB):
+    """Update old imports with current checks without changing source parts or invoices."""
+    changed = 0
+    with connect(path) as db:
+        rows = db.execute('SELECT id,payload_json FROM packages').fetchall()
+        for row in rows:
+            original = json.loads(row['payload_json'])
+            checked = validate_package(original)
+            if checked != original:
+                db.execute('UPDATE packages SET ready=?,payload_json=? WHERE id=?', (checked['ready'], json.dumps(checked, ensure_ascii=False), row['id']))
+                changed += 1
+        summary_row = db.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
+        stats = json.loads(summary_row[0]) if summary_row else {}
+        stats.update(ready_packages=db.execute('SELECT count(*) FROM packages WHERE ready=1').fetchone()[0], completeness_check_at=datetime.now(timezone.utc).isoformat())
+        db.execute("INSERT OR REPLACE INTO metadata VALUES ('summary',?)", (json.dumps(stats, ensure_ascii=False),))
+    return {'changed_packages': changed, 'ready_packages': stats['ready_packages']}
+
+
 def package_parts(rows):
     """Keep original codes/brands/units; only aggregate exact same identity."""
     grouped = {}
@@ -145,7 +180,7 @@ def ingest(records, path=DEFAULT_DB, metadata=None):
         if any(len(names)>1 for names in sku_names.values()):notes.append('Același cod și aceeași marcă au descrieri diferite; verifică identitatea produsului.')
         pkg = {k: d.get(k) for k in ('transaction_id','document_code','registration','vin','vehicle','service_date','description','status')}
         pkg.update(registration=plate(d.get('registration')), parts=revision_parts, other_parts=[p for p in parts if p['category']=='other'], labors=d.get('labors') or [], invoices=invoices, offer_ids=sorted(linked), offers=[{'id':i,'code':docs[i].get('document_code') or i,'status':docs[i].get('status')} for i in sorted(linked)], issues=sorted(set(notes)), ready=not notes, customer_type='unknown', checked_at=d.get('checked_at'))
-        packages.append(pkg)
+        packages.append(validate_package(pkg))
     confirmed_offers = set()
     for p in packages:
         if p['invoices']:
@@ -176,7 +211,7 @@ def search(registration='', vin='', path=DEFAULT_DB):
     with connect(path) as db:
         rows=db.execute('SELECT payload_json FROM packages WHERE '+('vin=?' if vin else 'registration=?')+' ORDER BY service_date DESC,CAST(id AS INTEGER) DESC',(vin or registration,)).fetchall()
         known_vins=[r[0] for r in db.execute('SELECT vin FROM vehicle_vins WHERE registration=? ORDER BY vin',(registration,))] if registration else []
-    packages=[json.loads(x[0]) for x in rows]
+    packages=[validate_package(json.loads(x[0])) for x in rows]
     vins=sorted(set(known_vins)|{p['vin'] for p in packages if re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}',str(p.get('vin') or ''))})
     return {'packages':packages,'vins':vins,'ambiguous_registration':len(vins)>1 and not vin}
 

@@ -108,6 +108,8 @@ def lookup(registration='', vin='', work='all', revision_db=None, brake_db=None)
             result['packages'].append({'work': category, 'label': WORKS[category], 'status': 'not_found', 'parts': [], 'issues': ['Nu există o lucrare facturată confirmată în această categorie.']})
             continue
         source, component = candidates[0]
+        if category == 'revision':
+            component = revisions.validate_package(component)
         ready = bool(component.get('ready') and component.get('parts'))
         result['packages'].append({
             'work': category, 'label': WORKS[category], 'status': 'ready' if ready else 'needs_review',

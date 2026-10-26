@@ -84,6 +84,24 @@ class RevisionPackagesTests(unittest.TestCase):
         d=copy.deepcopy(self.record);d['labors'][0]['quantity']='0'
         ingest([d],self.db);self.assertFalse(search('B100TST',path=self.db)['packages'][0]['ready'])
 
+    def test_fuel_replacement_labor_without_filter_sku_is_incomplete(self):
+        d=copy.deepcopy(self.record)
+        d['labors'].append({'name':'Înlocuire filtru de combustibil','quantity':'0.66'})
+        ingest([d],self.db);p=search('B100TST',path=self.db)['packages'][0]
+        self.assertFalse(p['ready'])
+        self.assertTrue(any('combustibil' in issue for issue in p['issues']))
+
+    def test_fuel_replacement_with_part_and_code_remains_ready(self):
+        d=copy.deepcopy(self.record)
+        d['labors'].append({'name':'Înlocuire filtru de combustibil','quantity':'0.66'})
+        d['parts'].append({'code':'FUEL-EXAMPLE','manufacturer':'TEST','name':'Filtru combustibil','quantity':1,'unit':'pc'})
+        ingest([d],self.db);self.assertTrue(search('B100TST',path=self.db)['packages'][0]['ready'])
+
+    def test_filter_inspection_and_zero_quantity_do_not_require_a_sku(self):
+        d=copy.deepcopy(self.record)
+        d['labors'] += [{'name':'Verificare filtru combustibil','quantity':1},{'name':'Înlocuire filtru de combustibil','quantity':0}]
+        ingest([d],self.db);self.assertTrue(search('B100TST',path=self.db)['packages'][0]['ready'])
+
     def test_appointment_explicit_offer_reference(self):
         d=copy.deepcopy(self.record);d['parent_id']='15';d['parent_type']='3'
         offer=copy.deepcopy(self.offer);offer['children']=[]

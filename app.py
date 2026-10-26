@@ -483,8 +483,8 @@ async def pre_arrival_preview(request: Request):
         target=datetime.fromisoformat(str(body['date'])).date()
     except (ValueError,KeyError,TypeError) as exc:
         raise HTTPException(400,'Data trebuie să fie AAAA-LL-ZZ.') from exc
-    await import_dsm_schedule(DB_PATH,target)
-    return await preview(DB_PATH,DATA_DIR,target,seed)
+    snapshot=await import_dsm_schedule(DB_PATH,target)
+    return await preview(DB_PATH,DATA_DIR,target,seed,snapshot.get('appointment_ids'))
 
 
 @app.post('/api/dashboard/master/pre-reception/pilot')

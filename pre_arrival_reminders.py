@@ -93,14 +93,23 @@ def status(root):
     return {**settings(root), 'timezone':'Europe/Bucharest','counts':counts,'issues':errors,'cases':cases}
 
 
-async def preview(db_path, root, target, seed):
+def current_appointments(db_path,target,keys=None):
+    return [a for a in appointments(db_path,target)
+            if keys is None or not a.get('dsm_appointment_id') or str(a['dsm_appointment_id']) in keys]
+
+
+async def preview(db_path, root, target, seed, keys=None):
     results=[]
-    for appointment in appointments(db_path,target):
+    phones=set()
+    for appointment in current_appointments(db_path,target,keys):
         try:
             data=await seed(appointment)
-            results.append(dict(appointment_id=appointment['id'],eligible=True,phone_suffix=data['phone'][-4:]))
+            if data['phone'] in phones:
+                raise ValueError('Același număr are mai multe programări; verificare consilier pentru a nu amesteca mașinile.')
+            phones.add(data['phone'])
+            results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=True,phone_suffix=data['phone'][-4:]))
         except Exception as exc:
-            results.append(dict(appointment_id=appointment['id'],eligible=False,reason=str(exc)[:250]))
+            results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=False,reason=str(exc)[:250]))
     return dict(date=target.isoformat(),candidates=results,eligible=sum(r['eligible'] for r in results))
 
 
@@ -113,14 +122,15 @@ async def tick(db_path, root, now, notify, seed, refresh=None, allowed=lambda:Tr
         today=now.astimezone(ROMANIA).date().isoformat()
         if refresh and settings(root).get('last_refresh_day')!=today:
             try:
-                await refresh(target)
+                snapshot=await refresh(target)
                 config=settings(root);config.update(last_refresh_day=today,last_refresh_error='')
+                config['last_refresh_ids']=snapshot.get('appointment_ids') if isinstance(snapshot,dict) else None
                 write_settings(root,config)
             except Exception as exc:
                 config=settings(root);config['last_refresh_error']=str(exc)[:300];write_settings(root,config)
                 return dict(sent=0,skipped=0,failed=1)
         result=dict(sent=0,skipped=0,failed=0)
-        for appointment in appointments(db_path,target):
+        for appointment in current_appointments(db_path,target,settings(root).get('last_refresh_ids')):
             key=f'{appointment.get("dsm_appointment_id") or appointment["id"]}:{target}'
             with db(root) as conn:
                 if conn.execute('SELECT 1 FROM reminders WHERE reminder_key=?',(key,)).fetchone():

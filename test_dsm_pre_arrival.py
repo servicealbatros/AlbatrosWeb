@@ -114,11 +114,12 @@ class ProductionWriterTests(unittest.IsolatedAsyncioTestCase):
                     code='APP-10',canCancel=True,canTransform=True,start='2030-01-01T08:30')
         async def call(path,fields):
             if '/get_car' in path:return {'car_body_series':VIN}
-            return dict(contact_name='Client',mobile=[dict(val='0700100009',checked='checked')],address=[])
+            return dict(contact_name='Client',mobile=[dict(val='0700100009',checked='checked')],address=[[]])
         with patch.object(prod,'appointment_call',AsyncMock(return_value=dict(status='success',detail=detail))), \
              patch.object(prod,'call',AsyncMock(side_effect=call)),patch.object(prod,'_search_transactions',AsyncMock()) as search:
             data=await prod.seed(dict(registration='B112TST',dsm_transaction_id='10',dsm_transaction_type='3',operations='Revizie'))
         self.assertEqual(data['phone'],'40700100009');self.assertEqual(data['source_type'],'3')
+        self.assertEqual(data['client_address'],'')
         search.assert_not_awaited()
 
 

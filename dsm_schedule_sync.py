@@ -548,4 +548,5 @@ async def import_dsm_schedule(db_path: Path, target_date: date) -> dict:
     rows = await read_dsm_schedule(target_date)
     result = sync_local_schedule(db_path, rows)
     result["date"] = target_date.isoformat()
+    result['appointment_ids'] = [str(r['dsm_appointment_id']) for r in rows if r.get('status')!='anulat']
     return result

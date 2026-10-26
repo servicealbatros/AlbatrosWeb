@@ -3411,6 +3411,8 @@ def debug_latest_requests():
 
 @app.get("/api/requests")
 def requests():
+    from dsm_accepted_offers import reconcile_existing_bookings
+    reconcile_existing_bookings(DB_PATH)
     rows = list_requests(include_dsm_accepted=True)
     archived_ids = _archive_ids()
     rows = [row for row in rows if int(row["id"]) not in archived_ids]
@@ -3818,6 +3820,12 @@ async def set_request_status(
             status_code=400,
             detail="Status invalid"
         )
+
+    if status == 'programat':
+        from dsm_accepted_offers import reconcile_existing_bookings
+        if request_id in reconcile_existing_bookings(DB_PATH, request_id):
+            _persist_request_status(request_id, status)
+            return {"request_id": request_id, "status": status}
 
     if status in {'acceptat', 'programat'} and not _request_has_approved_offer(request_id):
         if not await _verify_dsm_booking_approval(request_row):

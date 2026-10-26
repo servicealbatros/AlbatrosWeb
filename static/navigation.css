@@ -1,0 +1,84 @@
+/* One navigation treatment, including links inserted by live page updates. */
+body :is(a.back, a.link-button, :where(nav) a[href^="/"], a[href="/cereri"], a[href="/master"], a[href="/programator"], a[href="/baza-dsm"], a[href="/baza-dsm/pachete"], a[href="/arhiva"], a[href="/acuratete"]) {
+  --albatros-nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14m-5-5 5 5-5 5'/%3E%3C/svg%3E");
+  box-sizing: border-box;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 11px 15px !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 11px !important;
+  background: #fff !important;
+  color: #213b55 !important;
+  font: 700 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif !important;
+  text-decoration: none !important;
+  text-align: center;
+  white-space: normal;
+  vertical-align: middle;
+  box-shadow: 0 2px 4px #142c4210;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+body :is(a.back, a.link-button, :where(nav) a[href^="/"], a[href="/cereri"], a[href="/master"], a[href="/programator"], a[href="/baza-dsm"], a[href="/baza-dsm/pachete"], a[href="/arhiva"], a[href="/acuratete"])::before {
+  content: "";
+  display: block;
+  flex: 0 0 19px;
+  width: 19px;
+  height: 19px;
+  background: currentColor;
+  -webkit-mask: var(--albatros-nav-icon) center / contain no-repeat;
+  mask: var(--albatros-nav-icon) center / contain no-repeat;
+}
+body :is(a.back, a[href="/cereri"]) {
+  --albatros-nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M19 12H5m6-6-6 6 6 6'/%3E%3C/svg%3E");
+  background: #18344d !important;
+  color: #fff !important;
+  border-color: #18344d !important;
+  box-shadow: 0 3px 7px #142c4220;
+}
+body :is(a.back, a[href="/cereri"])::before { background: #f3ca70; }
+body a[href="/programator"] {
+  --albatros-nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='16' rx='3'/%3E%3Cpath d='M7 3v4m10-4v4M3 11h18m-13 4h2m4 0h2m-8 3h2'/%3E%3C/svg%3E");
+}
+body :is(a[href="/baza-dsm"], a[href="/baza-dsm/pachete"]) {
+  --albatros-nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='8' ry='3'/%3E%3Cpath d='M4 5v7c0 4 16 4 16 0V5M4 12v7c0 4 16 4 16 0v-7'/%3E%3C/svg%3E");
+}
+body a[href="/arhiva"] {
+  --albatros-nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='18' height='5' rx='1.5'/%3E%3Cpath d='M5 8v12h14V8m-10 4h6'/%3E%3C/svg%3E");
+}
+body a[href="/master"] {
+  --albatros-nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h16M4 17h16'/%3E%3Crect x='7' y='4' width='4' height='6' rx='1' fill='white'/%3E%3Crect x='13' y='14' width='4' height='6' rx='1' fill='white'/%3E%3C/svg%3E");
+}
+body a[href="/acuratete"] {
+  --albatros-nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 4v16h16M8 15l4-5 4 2 4-7'/%3E%3C/svg%3E");
+}
+body nav a:is(.active, [aria-current="page"]) {
+  background: #e8f0f8 !important;
+  color: #18344d !important;
+  border-color: #9aafc3 !important;
+  box-shadow: inset 0 -2px #b98c39;
+}
+body :is(a.back, a.link-button, :where(nav) a[href^="/"], a[href="/cereri"], a[href="/master"], a[href="/programator"], a[href="/baza-dsm"], a[href="/baza-dsm/pachete"], a[href="/arhiva"], a[href="/acuratete"]):hover {
+  border-color: #b98c39 !important;
+  box-shadow: 0 3px 9px #142c4224;
+  filter: none;
+}
+body :is(a.back, a[href="/cereri"]):hover { background: #254b68 !important; }
+body :is(a.back, a.link-button, :where(nav) a[href^="/"], a[href="/cereri"], a[href="/master"], a[href="/programator"], a[href="/baza-dsm"], a[href="/baza-dsm/pachete"], a[href="/arhiva"], a[href="/acuratete"]):focus-visible {
+  outline: 3px solid #dba84d !important;
+  outline-offset: 3px;
+}
+header.top a[href="/cereri"] { background: #fff !important; color: #18344d !important; border-color: #fff !important; }
+header.top a[href="/cereri"]::before { background: #18344d; }
+header.top a[href="/cereri"]:hover { background: #fff5df !important; border-color: #e7bd69 !important; }
+.top:has(> a.back), header.top:has(> a[href="/cereri"]) { flex-wrap: wrap; gap: 12px; }
+@media (max-width: 640px) {
+  body :is(a.back, a.link-button, :where(nav) a[href^="/"], a[href="/cereri"], a[href="/master"], a[href="/programator"], a[href="/baza-dsm"], a[href="/baza-dsm/pachete"], a[href="/arhiva"], a[href="/acuratete"]) { padding: 10px 12px !important; }
+  .actions:has(> a.link-button) { gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body :is(a.back, a.link-button, :where(nav) a[href^="/"], a[href="/cereri"], a[href="/master"], a[href="/programator"], a[href="/baza-dsm"], a[href="/baza-dsm/pachete"], a[href="/arhiva"], a[href="/acuratete"]) { transition: none; }
+}

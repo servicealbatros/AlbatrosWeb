@@ -28,6 +28,7 @@ if os.getenv("ALBATROS_CLOUD_MODE", "").lower() != "true":
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from navigation_ui import with_navigation_style
 from pydantic import BaseModel, Field
 
 from agent import chat
@@ -220,6 +221,7 @@ async def security_rate_limit(request: Request, call_next):
         headers = dict(response.headers)
         headers.pop('content-length', None)
         response = Response(content=body + extra, status_code=response.status_code, headers=headers)
+    response = await with_navigation_style(request.url.path, response)
     POLICY.metrics.observe_response(asyncio.get_running_loop().time() - started)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"

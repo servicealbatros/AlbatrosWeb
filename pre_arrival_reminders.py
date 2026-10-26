@@ -2,6 +2,7 @@
 import asyncio
 from datetime import datetime, timedelta, date
 import json
+import re
 from pathlib import Path
 import sqlite3
 from contextlib import closing
@@ -18,9 +19,17 @@ def settings(root):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else dict(enabled=False, start_date='', send_time='17:00')
 
 
-def configure(root, enabled, start_date):
+def configure(root, enabled, start_date, registrations=None):
     date.fromisoformat(start_date)
-    value=dict(enabled=bool(enabled),start_date=start_date,send_time='17:00')
+    value=settings(root)
+    selected=registrations if registrations is not None else value.get('registrations',[])
+    if not isinstance(selected,list) or any(not isinstance(p,str) for p in selected):
+        raise ValueError('Lista mașinilor de test este invalidă.')
+    selected=list(dict.fromkeys(re.sub(r'[^A-Z0-9]','',p.upper()) for p in selected))
+    if len(selected)>3 or any(not re.fullmatch(r'[A-Z0-9]{3,12}',p) for p in selected) or enabled and not selected:
+        raise ValueError('Alege între una și trei mașini pentru test.')
+    value.update(enabled=bool(enabled),start_date=start_date,end_date=start_date,
+                 send_time='17:00',registrations=selected)
     write_settings(root,value)
     return value
 
@@ -35,7 +44,9 @@ def due(root, now):
     now=now.astimezone(ROMANIA)
     config=settings(root)
     return (config.get('enabled') and bool(config.get('start_date'))
-            and now.date().isoformat()>=config['start_date'] and '17:00'<=now.strftime('%H:%M')<'18:00')
+            and bool(config.get('registrations'))
+            and config['start_date']<=now.date().isoformat()<=config.get('end_date',config['start_date'])
+            and '17:00'<=now.strftime('%H:%M')<'18:00')
 
 
 def appointments(db_path, target):
@@ -93,17 +104,23 @@ def status(root):
     return {**settings(root), 'timezone':'Europe/Bucharest','counts':counts,'issues':errors,'cases':cases}
 
 
-def current_appointments(db_path,target,keys=None):
+def current_appointments(db_path,target,keys=None,registrations=None):
     return [a for a in appointments(db_path,target)
-            if keys is None or not a.get('dsm_appointment_id') or str(a['dsm_appointment_id']) in keys]
+            if (keys is None or not a.get('dsm_appointment_id') or str(a['dsm_appointment_id']) in keys)
+            and (registrations is None or re.sub(r'[^A-Z0-9]','',str(a.get('registration') or '').upper()) in registrations)]
 
 
-async def preview(db_path, root, target, seed, keys=None):
+async def preview(db_path, root, target, seed, keys=None,check_orders=None):
     results=[]
     phones=set()
-    for appointment in current_appointments(db_path,target,keys):
+    for appointment in current_appointments(db_path,target,keys,settings(root).get('registrations',[])):
         try:
             data=await seed(appointment)
+            existing=await check_orders(data) if check_orders else []
+            if existing:
+                results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=False,
+                    reason='Există deja deviz/comandă deschisă; testul nu creează un duplicat.',existing_orders=existing))
+                continue
             if data['phone'] in phones:
                 raise ValueError('Același număr are mai multe programări; verificare consilier pentru a nu amesteca mașinile.')
             phones.add(data['phone'])
@@ -113,7 +130,7 @@ async def preview(db_path, root, target, seed, keys=None):
     return dict(date=target.isoformat(),candidates=results,eligible=sum(r['eligible'] for r in results))
 
 
-async def tick(db_path, root, now, notify, seed, refresh=None, allowed=lambda:True):
+async def tick(db_path, root, now, notify, seed, refresh=None, allowed=lambda:True,check_orders=None):
     if not due(root,now) or LOCK.locked() or not allowed():
         return None
     async with LOCK:
@@ -130,13 +147,15 @@ async def tick(db_path, root, now, notify, seed, refresh=None, allowed=lambda:Tr
                 config=settings(root);config['last_refresh_error']=str(exc)[:300];write_settings(root,config)
                 return dict(sent=0,skipped=0,failed=1)
         result=dict(sent=0,skipped=0,failed=0)
-        for appointment in current_appointments(db_path,target,settings(root).get('last_refresh_ids')):
+        for appointment in current_appointments(db_path,target,settings(root).get('last_refresh_ids'),settings(root).get('registrations',[])):
             key=f'{appointment.get("dsm_appointment_id") or appointment["id"]}:{target}'
             with db(root) as conn:
                 if conn.execute('SELECT 1 FROM reminders WHERE reminder_key=?',(key,)).fetchone():
                     result['skipped']+=1;continue
             try:
                 data=await seed(appointment)
+                if check_orders and await check_orders(data):
+                    raise ValueError('Există deja deviz/comandă deschisă; verificăm cu consilierul, fără duplicat.')
                 with db(root) as conn:
                     prior=conn.execute('SELECT data FROM cases WHERE phone=?',(data['phone'],)).fetchone()
                 if prior and json.loads(prior['data']).get('production_optout'):
@@ -151,6 +170,8 @@ async def tick(db_path, root, now, notify, seed, refresh=None, allowed=lambda:Tr
                     raise ValueError('Programarea s-a modificat înainte de trimitere.')
                 if not due(root,now) or not allowed():
                     break
+                if data['registration'] not in settings(root).get('registrations',[]):
+                    continue
                 data.update(production=True,appointment_id=appointment['id'],appointment_start=appointment['start_at'],
                             offer_id='arrival:'+key,expires_at=(target+timedelta(days=2)).isoformat())
                 with db(root) as conn:

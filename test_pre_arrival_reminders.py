@@ -22,7 +22,7 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         init_scheduler_db(self.db)
         self.now=(datetime.now(reminders.ROMANIA)+timedelta(days=1)).replace(hour=17,minute=0,second=0,microsecond=0)
         self.target=(self.now+timedelta(days=1)).date()
-        reminders.configure(self.root,True,self.now.date().isoformat())
+        reminders.configure(self.root,True,self.now.date().isoformat(),['B112TST'])
         with connection(self.db) as conn:
             conn.execute("""INSERT INTO scheduler_appointments(id,start_at,end_at,status,registration,operations,estimated_hours,dsm_appointment_id)
                 VALUES (1,?,?,'programat','B112TST','Revizie',2,'APP-1')""",(str(self.target)+'T08:30',str(self.target)+'T10:30'))
@@ -45,6 +45,22 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stage,'attendance');self.assertTrue(data['production'])
         self.assertIn('ALBATROS A',self.notify.await_args.args[1]);self.assertNotIn('TEST',self.notify.await_args.args[1])
         self.assertEqual(reminders.status(self.root)['counts'],{'sent':1})
+
+    async def test_only_selected_cars_can_be_contacted_and_configuration_survives_stop(self):
+        reminders.configure(self.root,False,self.now.date().isoformat(),['b114 tst','B115TST','B116TST'])
+        self.assertEqual(reminders.settings(self.root)['registrations'],['B114TST','B115TST','B116TST'])
+        reminders.configure(self.root,True,self.now.date().isoformat())
+        self.assertFalse(reminders.due(self.root,self.now+timedelta(days=1)))
+        self.assertEqual((await self.tick())['sent'],0);self.seed.assert_not_awaited();self.notify.assert_not_awaited()
+        self.assertEqual((await reminders.preview(self.db,self.root,self.target,self.seed))['eligible'],0)
+        with self.assertRaises(ValueError):reminders.configure(self.root,True,self.now.date().isoformat(),[])
+
+    async def test_existing_work_order_excludes_customer_from_test_and_prevents_invitation(self):
+        check=AsyncMock(return_value=[{'id':'20','code':'PHDEV-20'}])
+        preview=await reminders.preview(self.db,self.root,self.target,self.seed,check_orders=check)
+        self.assertEqual(preview['eligible'],0);self.assertEqual(preview['candidates'][0]['existing_orders'][0]['code'],'PHDEV-20')
+        await reminders.tick(self.db,self.root,self.now,self.notify,self.seed,check_orders=check)
+        self.notify.assert_not_awaited();self.assertIn('duplicat',reminders.status(self.root)['issues'][0]['error'])
 
     async def test_removed_dsm_appointment_is_excluded_by_fresh_snapshot_after_restart(self):
         refresh=AsyncMock(return_value={'appointment_ids':[]})

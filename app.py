@@ -468,23 +468,23 @@ async def pre_arrival_configure(request: Request):
     if not isinstance(body,dict) or type(body.get('enabled')) is not bool:
         raise HTTPException(400,'Configurație invalidă.')
     try:
-        return configure(DATA_DIR,body['enabled'],str(body['start_date']))
+        return configure(DATA_DIR,body['enabled'],str(body['start_date']),body.get('registrations'))
     except (ValueError,KeyError) as exc:
-        raise HTTPException(400,'Data de începere trebuie să fie AAAA-LL-ZZ.') from exc
+        raise HTTPException(400,'Verifică data AAAA-LL-ZZ și lista de maximum trei mașini de test.') from exc
 
 
 @app.post('/api/dashboard/master/pre-arrival/preview')
 async def pre_arrival_preview(request: Request):
     _master_access(request)
     from pre_arrival_reminders import preview
-    from dsm_pre_arrival import seed
+    from dsm_pre_arrival import seed,existing_orders
     body=await request.json()
     try:
         target=datetime.fromisoformat(str(body['date'])).date()
     except (ValueError,KeyError,TypeError) as exc:
         raise HTTPException(400,'Data trebuie să fie AAAA-LL-ZZ.') from exc
     snapshot=await import_dsm_schedule(DB_PATH,target)
-    return await preview(DB_PATH,DATA_DIR,target,seed,snapshot.get('appointment_ids'))
+    return await preview(DB_PATH,DATA_DIR,target,seed,snapshot.get('appointment_ids'),check_orders=existing_orders)
 
 
 @app.post('/api/dashboard/master/pre-reception/pilot')
@@ -531,6 +531,9 @@ async def _pre_reception_write(data, allow_create):
                          (json.dumps({'id': command_id}), data['offer_id'], 'creating'))
     if data.get('production'):
         from dsm_pre_arrival import create_or_find as production_writer
+        from pre_arrival_reminders import settings as arrival_settings
+        if data['registration'] not in arrival_settings(DATA_DIR).get('registrations',[]):
+            raise ValueError('Mașina nu este selectată pentru testul de pre-recepție.')
         with closing(sqlite3.connect(DB_PATH)) as conn:
             conn.row_factory=sqlite3.Row
             appointment=conn.execute('SELECT * FROM scheduler_appointments WHERE id=?',(data.get('appointment_id'),)).fetchone()
@@ -8010,7 +8013,7 @@ async def _pre_arrival_loop():
         try:
             if POLICY.robot_enabled:
                 await tick(DB_PATH,DATA_DIR,datetime.now(ROMANIA),send_whatsapp_notification,seed,
-                           refresh=refresh,allowed=lambda:POLICY.robot_enabled)
+                           refresh=refresh,allowed=lambda:POLICY.robot_enabled,check_orders=existing_orders)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -35,6 +35,15 @@
       .albatros-ai-dialog button.albatros-ai-acknowledge{margin:0;min-width:156px;padding:12px 20px;border:1px solid #147d70;border-radius:11px;background:#147d70;color:white;font:700 14px Inter,Segoe UI,system-ui,sans-serif;cursor:pointer;box-shadow:0 3px 8px #147d701a}
       .albatros-ai-dialog button.albatros-ai-acknowledge:hover{background:#10695e}
       .albatros-ai-dialog button:focus-visible{outline:3px solid #60cdb6;outline-offset:3px}
+      .albatros-ai-notice{box-sizing:border-box;overflow:hidden;margin:16px 0;border:1px solid #e9d7af;border-left:4px solid #d49b2a;border-radius:14px;background:#fffdf8;box-shadow:0 4px 15px #283f4d08;font-family:Inter,Segoe UI,system-ui,sans-serif}
+      .albatros-ai-notice .albatros-ai-notice-header{display:flex;align-items:center;gap:10px;padding:13px 16px;background:#112e3c;color:white}
+      .albatros-ai-notice .albatros-ai-logo{display:grid;place-items:center;flex:none;width:30px;height:30px;border:1px solid #ffd08140;border-radius:9px;background:#ffd08112;color:#ffd081}
+      .albatros-ai-notice .albatros-ai-logo svg{width:22px;height:22px}
+      .albatros-ai-notice .albatros-ai-notice-brand{font-size:13px;font-weight:800;letter-spacing:1.2px;color:white}
+      .albatros-ai-notice .albatros-ai-notice-label{margin-left:auto;padding:4px 8px;border-radius:6px;background:#ffd0811a;color:#ffd081;font-size:10px;font-weight:700;letter-spacing:.7px}
+      .albatros-ai-notice .albatros-ai-notice-body{padding:16px 18px}
+      .albatros-ai-notice h3{margin:0 0 8px;font-size:17px;line-height:1.4;color:#263f4c}
+      .albatros-ai-notice p{margin:0;font-size:14px;line-height:1.75;color:#765b29;white-space:pre-wrap;overflow-wrap:anywhere}
       @keyframes albatros-ai-appear{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
       @media(max-width:480px){.albatros-ai-dialog .albatros-ai-header{padding:20px}.albatros-ai-dialog .albatros-ai-content{padding:25px 20px 22px;gap:13px}.albatros-ai-dialog h2{font-size:20px}.albatros-ai-dialog .albatros-ai-footer{padding:0 20px 22px}.albatros-ai-dialog button.albatros-ai-acknowledge{width:100%}}
       @media(prefers-reduced-motion:reduce){.albatros-ai-dialog[open]{animation:none}}
@@ -70,6 +79,30 @@
   }
   window.AlbatrosAI = Object.freeze({
     whenIdle() { return queue; },
+    notice(message, options = {}) {
+      create();
+      const box = document.createElement('div');
+      box.className = 'albatros-ai-notice';
+      box.setAttribute('role', 'alert');
+      const header = document.createElement('div');
+      header.className = 'albatros-ai-notice-header';
+      const brand = document.createElement('strong');
+      brand.className = 'albatros-ai-notice-brand';
+      brand.textContent = 'ALBATROS AI';
+      const label = document.createElement('span');
+      label.className = 'albatros-ai-notice-label';
+      label.textContent = 'ATENȚIONARE';
+      header.append(dialog.querySelector('.albatros-ai-logo').cloneNode(true), brand, label);
+      const content = document.createElement('div');
+      content.className = 'albatros-ai-notice-body';
+      const title = document.createElement('h3');
+      title.textContent = options.title || 'Verificare necesară';
+      const text = document.createElement('p');
+      text.textContent = String(message ?? '');
+      content.append(title, text);
+      box.append(header, content);
+      return box;
+    },
     notify(message, options = { tone: 'warning' }) {
       const pending = queue.then(() => display(message, options));
       queue = pending.catch(() => {});

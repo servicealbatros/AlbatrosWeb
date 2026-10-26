@@ -15,4 +15,7 @@ def install_messages(html: bytes) -> bytes:
     index = html.lower().find(b'</head>')
     if index >= 0:
         return html[:index] + script + html[index:]
-    return script + html
+    index = html.lower().find(b'<script')
+    if index >= 0:
+        return html[:index] + script + html[index:]
+    return html + script

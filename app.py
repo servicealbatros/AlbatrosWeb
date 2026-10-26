@@ -215,7 +215,7 @@ async def security_rate_limit(request: Request, call_next):
             return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
     response = await call_next(request)
     if ('text/html' in response.headers.get('content-type', '')
-            and request.url.path.startswith(('/cereri', '/oferta/', '/ofertare/', '/tehnician/', '/programator', '/conversatie/', '/acuratete'))):
+            and request.url.path.startswith(('/cereri', '/oferta/', '/ofertare/', '/tehnician/', '/baza-dsm', '/programator', '/conversatie/', '/acuratete'))):
         body = b''.join([chunk async for chunk in response.body_iterator])
         body = install_messages(body)
         extra = b'<a href="/master" style="position:fixed;bottom:8px;right:12px;z-index:9999;background:white;padding:8px;border-radius:8px">Panou master</a>' if str(request.state.dashboard_user or '').startswith('master:') else b''

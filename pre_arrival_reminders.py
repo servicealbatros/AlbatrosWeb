@@ -19,7 +19,7 @@ def settings(root):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else dict(enabled=False, start_date='', send_time='17:00')
 
 
-def configure(root, enabled, start_date, registrations=None):
+def configure(root, enabled, start_date, registrations=None,existing_order_ids=None):
     date.fromisoformat(start_date)
     value=settings(root)
     selected=registrations if registrations is not None else value.get('registrations',[])
@@ -28,8 +28,12 @@ def configure(root, enabled, start_date, registrations=None):
     selected=list(dict.fromkeys(re.sub(r'[^A-Z0-9]','',p.upper()) for p in selected))
     if len(selected)>3 or any(not re.fullmatch(r'[A-Z0-9]{3,12}',p) for p in selected) or enabled and not selected:
         raise ValueError('Alege între una și trei mașini pentru test.')
+    bindings=existing_order_ids if existing_order_ids is not None else {
+        k:v for k,v in value.get('existing_order_ids',{}).items() if k in selected}
+    if not isinstance(bindings,dict) or any(k not in selected or not isinstance(v,str) or not v.isdigit() for k,v in bindings.items()):
+        raise ValueError('Devizele existente trebuie asociate exact mașinilor selectate.')
     value.update(enabled=bool(enabled),start_date=start_date,end_date=start_date,
-                 send_time='17:00',registrations=selected)
+                 send_time='17:00',registrations=selected,existing_order_ids=bindings)
     write_settings(root,value)
     return value
 
@@ -110,6 +114,17 @@ def current_appointments(db_path,target,keys=None,registrations=None):
             and (registrations is None or re.sub(r'[^A-Z0-9]','',str(a.get('registration') or '').upper()) in registrations)]
 
 
+def bind_existing_order(root,data,existing):
+    expected=settings(root).get('existing_order_ids',{}).get(data['registration'])
+    if expected:
+        if len(existing)!=1 or str(existing[0]['id'])!=expected:
+            raise ValueError('Devizul existent autorizat nu mai este singurul deviz activ; verificare consilier, fără creare nouă.')
+        data['appointment_command_id']=expected
+        data['approved_existing_order_id']=expected
+    elif existing:
+        raise ValueError('Există deja deviz/comandă deschisă; verificăm cu consilierul, fără duplicat.')
+
+
 async def preview(db_path, root, target, seed, keys=None,check_orders=None):
     results=[]
     phones=set()
@@ -117,14 +132,16 @@ async def preview(db_path, root, target, seed, keys=None,check_orders=None):
         try:
             data=await seed(appointment)
             existing=await check_orders(data) if check_orders else []
-            if existing:
+            if existing and not settings(root).get('existing_order_ids',{}).get(data['registration']):
                 results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=False,
                     reason='Există deja deviz/comandă deschisă; testul nu creează un duplicat.',existing_orders=existing))
                 continue
+            bind_existing_order(root,data,existing)
             if data['phone'] in phones:
                 raise ValueError('Același număr are mai multe programări; verificare consilier pentru a nu amesteca mașinile.')
             phones.add(data['phone'])
-            results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=True,phone_suffix=data['phone'][-4:]))
+            results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=True,phone_suffix=data['phone'][-4:],
+                                mode='update_existing' if data.get('approved_existing_order_id') else 'create',existing_orders=existing))
         except Exception as exc:
             results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=False,reason=str(exc)[:250]))
     return dict(date=target.isoformat(),candidates=results,eligible=sum(r['eligible'] for r in results))
@@ -154,8 +171,8 @@ async def tick(db_path, root, now, notify, seed, refresh=None, allowed=lambda:Tr
                     result['skipped']+=1;continue
             try:
                 data=await seed(appointment)
-                if check_orders and await check_orders(data):
-                    raise ValueError('Există deja deviz/comandă deschisă; verificăm cu consilierul, fără duplicat.')
+                existing=await check_orders(data) if check_orders else []
+                bind_existing_order(root,data,existing)
                 with db(root) as conn:
                     prior=conn.execute('SELECT data FROM cases WHERE phone=?',(data['phone'],)).fetchone()
                 if prior and json.loads(prior['data']).get('production_optout'):

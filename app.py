@@ -464,7 +464,7 @@ async def pre_arrival_configure(request: Request):
     if not isinstance(body,dict) or type(body.get('enabled')) is not bool:
         raise HTTPException(400,'Configurație invalidă.')
     try:
-        return configure(DATA_DIR,body['enabled'],str(body['start_date']),body.get('registrations'))
+        return configure(DATA_DIR,body['enabled'],str(body['start_date']),body.get('registrations'),body.get('existing_order_ids'))
     except (ValueError,KeyError) as exc:
         raise HTTPException(400,'Verifică data AAAA-LL-ZZ și lista de maximum trei mașini de test.') from exc
 
@@ -530,6 +530,8 @@ async def _pre_reception_write(data, allow_create):
         from pre_arrival_reminders import settings as arrival_settings
         if data['registration'] not in arrival_settings(DATA_DIR).get('registrations',[]):
             raise ValueError('Mașina nu este selectată pentru testul de pre-recepție.')
+        if data.get('approved_existing_order_id') and arrival_settings(DATA_DIR).get('existing_order_ids',{}).get(data['registration'])!=data['approved_existing_order_id']:
+            raise ValueError('Asocierea cu devizul existent necesită reverificare; nu creez altă comandă.')
         with closing(sqlite3.connect(DB_PATH)) as conn:
             conn.row_factory=sqlite3.Row
             appointment=conn.execute('SELECT * FROM scheduler_appointments WHERE id=?',(data.get('appointment_id'),)).fetchone()

@@ -134,7 +134,7 @@ async def existing_orders(data):
     for ident in ids:
         h=(details.get(ident) or {}).get('transaction') or {}
         if (str(h.get('car_body_series') or '').upper()!=data['vin'] or str(h.get('car_id'))!=data['car_id']
-                or str(h.get('transaction_head__type'))!='2'):
+                or str(h.get('contact_id'))!=data['contact_id'] or str(h.get('transaction_head__type'))!='2'):
             raise ValueError('Deviz existent cu identificare neconcordantă; consilierul trebuie să verifice înaintea creării.')
         if h.get('transaction_head__status')=='working':
             result.append(dict(id=ident,code=str(h.get('transaction_head__code') or ident)))

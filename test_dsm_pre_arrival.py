@@ -114,6 +114,17 @@ class ProductionWriterTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):await prod.create_or_find(data,True,Mock())
                 create.assert_not_awaited()
 
+    async def test_authorized_existing_order_is_updated_without_converting_appointment(self):
+        data=self.data();data.update(source_type='3',appointment_id=7,appointment_command_id='20',approved_existing_order_id='20')
+        existing=head();existing.update(transaction_head__id='20',transaction_head__code='PHDEV-20',
+            transaction_head__description=prod.requirements_description(data,'Revizie\n[ALBATROS PRE-RECEPTIE 7]'))
+        with patch.object(prod,'read_appointment',AsyncMock(return_value={'transaction':head('3')})), \
+             patch.object(prod,'call',AsyncMock(return_value={'transaction':existing})), \
+             patch.object(prod,'appointment_call',AsyncMock()) as convert,patch.object(prod,'_create',AsyncMock()) as create, \
+             patch.object(prod,'save_vehicle_details',AsyncMock()),patch.object(prod,'save_client_details',AsyncMock()):
+            result=await prod.create_or_find(data,True,Mock())
+            self.assertEqual(result['code'],'PHDEV-20');convert.assert_not_awaited();create.assert_not_awaited()
+
     async def test_unlinked_open_work_order_prevents_native_creation_even_after_client_confirmation(self):
         self.search.return_value=[dict(transaction_id=20,transaction_type='2',status='working')]
         existing=head();existing.update(transaction_head__id='20',transaction_head__code='PHDEV-20')

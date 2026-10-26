@@ -1,4 +1,4 @@
-"""Restart-safe, opt-in pilot. No production reminder scheduler is enabled here."""
+"""Restart-safe pre-reception for the pilot and explicitly enrolled appointments."""
 import asyncio
 from contextlib import closing, contextmanager
 from datetime import date, datetime, timezone
@@ -43,7 +43,7 @@ def document_summary(data):
 def document_itp_question(data):
     known = data.get('itp')
     previous = data.get('previous_dsm', {}).get('car_itp_expires_date')
-    comparison = f' În DSM era salvată data {previous}; verificăm valabilitatea actuală.' if previous else ''
+    comparison = f' În DSM era salvată data {previous}; verificăm valabilitatea actuală.' if previous and not data.get('production') else ''
     return ('2/3 — ' + (f'Data expirării ITP citită/notată pentru această recepție este {known}. Confirmi? Răspunde DA sau scrie data corectă în format ZZ.LL.AAAA.' if known else
             'Trimite și fotografia clară a rubricii ITP din talon. Dacă data nu se citește, scrie data actuală a expirării în format ZZ.LL.AAAA (nu data efectuării inspecției).') + comparison)
 
@@ -90,11 +90,17 @@ def db(root):
 
 
 def get(root, sender):
-    if phone(sender) not in RECIPIENTS:
-        return None
     with db(root) as conn:
         row = conn.execute('SELECT stage,data FROM cases WHERE phone=?', (phone(sender),)).fetchone()
-    return (row['stage'], json.loads(row['data'])) if row else None
+    if not row:
+        return None
+    data=json.loads(row['data'])
+    if data.get('production'):
+        if data.get('expires_at','') < date.today().isoformat():
+            return None
+    elif phone(sender) not in RECIPIENTS:
+        return None
+    return row['stage'],data
 
 
 def save(root, sender, stage, data):
@@ -106,9 +112,12 @@ def save(root, sender, stage, data):
 
 def status(root):
     with db(root) as conn:
-        rows = conn.execute('SELECT phone,stage,updated FROM cases').fetchall()
-        orders = conn.execute('SELECT state,result FROM orders').fetchall()
-    return {'production_enabled': False, 'flow_version': 3, 'reminder_hour': '17:00', 'registration': 'B101TST',
+        rows = [r for r in conn.execute('SELECT phone,stage,updated,data FROM cases') if not json.loads(r['data']).get('production')]
+        orders = conn.execute("SELECT state,result FROM orders WHERE offer NOT LIKE 'arrival:%'").fetchall()
+    from pre_arrival_reminders import settings
+    config=settings(root)
+    return {'production_enabled': bool(config.get('enabled')), 'production_start_date': config.get('start_date'),
+            'flow_version': 3, 'reminder_hour': '17:00', 'registration': 'B101TST',
             'cases': [{'phone_suffix': r['phone'][-4:], 'stage': r['stage'], 'updated': r['updated']} for r in rows],
             'orders': [{'state': r['state'], 'result': json.loads(r['result']) if r['result'] else None} for r in orders]}
 
@@ -180,6 +189,15 @@ async def restart(root, send, seed, *, run_id=None, recipient=None):
 
 def summary(data):
     expired = date.fromisoformat(data['itp']) < date.today()
+    if data.get('production'):
+        return (f'Verificați datele pentru pregătirea comenzii {data["registration"]}:\n'
+            f'Serie de caroserie: {data["vin"]}\nTitular talon: {data.get("owner_name","—")}\n'
+            f'An fabricație: {data.get("manufacture_year","—")}\nITP până la: {data["itp"]}' + (' — EXPIRAT' if expired else '') + '\n'
+            f'Client: {data.get("client_name","—")}\nAdresă: {data.get("client_address","—")}\nTelefon: {data["phone"]}\n'
+            f'Lucrări: {data["work"]}\nCerințe suplimentare: {data.get("extra","Nu")}\n'
+            'Datele și cerințele vor fi reverificate și confirmate la semnarea comenzii, împreună cu consilierul. '
+            'Nu se aprobă costuri suplimentare prin acest mesaj. Pentru pregătirea comenzii răspundeți CONFIRM DATELE. '
+            'Pentru corecturi: CORECTEAZA CLIENT sau CORECTEAZA.')
     operation = f'actualizarea comenzii de TEST {data["retest_command_code"]}' if data.get('retest_command_id') else 'crearea comenzii REALE'
     return (f'TEST B101TST — verifică datele înainte de {operation}:\nVIN: {data["vin"]}\n'
             f'ITP până la: {data["itp"]} (' + ('declarat de client' if data.get('itp_source') == 'client' else 'citit din talon') + ')' + (' — EXPIRAT' if expired else '') + '\n'
@@ -199,12 +217,13 @@ async def request_missing_client(root, sender, data, send):
     elif not data.get('client_address'):
         save(root, sender, 'client_address', data)
         await send(sender, 'Scrie adresa completă de facturare: localitate, județ/sector, stradă și număr.')
-    elif not data.get('phone'):
+    elif not data.get('phone') or (data.get('production') and not data.get('phone_confirmed')):
         save(root, sender, 'phone', data)
         await send(sender, f'Confirmi numărul de contact +{phone(sender)}? Răspunde DA sau scrie numărul corect.')
     elif 'extra' not in data:
         save(root, sender, 'requirements', data)
-        await send(sender, f'Lucrări din oferta semnată: {data["work"]}\nCe cerințe suplimentare ai? Scrie-le aici sau răspunde NU.')
+        label='Lucrările programate' if data.get('production') else 'Lucrări din oferta semnată'
+        await send(sender, f'{label}: {data["work"]}\nCe cerințe suplimentare ai? Scrie-le aici sau răspunde NU.')
     else:
         save(root, sender, 'confirm', data)
         await send(sender, summary(data))
@@ -216,6 +235,11 @@ async def text(root, sender, body, send, writer):
     async with LOCK:
         stage, data = get(root, sender)
         value = norm(body)
+        if data.get('production') and value in {'stop','dezabonare'}:
+            data['production_optout']=True
+            save(root,sender,'stopped',data)
+            await send(sender,'Am oprit mesajele automate pentru acest număr. Programarea existentă nu a fost anulată.')
+            return True
         if value == 'stop test':
             save(root, sender, 'stopped', data)
             await send(sender, 'Testul este oprit pentru acest număr. Nu anulez comenzi sau programări existente.')
@@ -223,16 +247,23 @@ async def text(root, sender, body, send, writer):
         if stage == 'stopped':
             return False
         if stage == 'done':
+            if data.get('production'):
+                if value=='confirm datele':
+                    await send(sender,f'Comanda {data["order"]["code"]} este deja pregătită. Nu se creează o comandă duplicată.')
+                    return True
+                return False
             await send(sender, f'Comanda de TEST {data["order"]["code"]} există deja. Nu creez o a doua comandă. Pentru încheierea conversației de test: STOP TEST.')
             return True
         if stage in {'attendance', 'invite_failed'}:
             if value in {'nu', 'nu confirm'}:
+                if data.get('production'):
+                    data['attendance_declined']=True
                 save(root, sender, 'stopped', data)
-                await send(sender, 'Am oprit simularea. Nu am anulat oferta sau vreo programare reală.')
+                await send(sender, 'Am notat că nu confirmați venirea. Consilierul va verifica reprogramarea; programarea nu a fost anulată automat.' if data.get('production') else 'Am oprit simularea. Nu am anulat oferta sau vreo programare reală.')
             elif value in {'da', 'confirm', 'confirm participarea'}:
                 await request_document(root, sender, data, send)
             else:
-                await send(sender, 'Pentru testul B101TST răspunde DA sau NU.')
+                await send(sender, 'Pentru confirmarea programării răspundeți DA sau NU.' if data.get('production') else 'Pentru testul B101TST răspunde DA sau NU.')
         elif stage == 'document':
             await send(sender, f'Vă rugăm să ne trimiteți fotografiile clare ale talonului mașinii {data["registration"]}, inclusiv seria de șasiu (VIN) și rubrica privind valabilitatea ITP, pentru actualizarea datelor și scurtarea timpului de așteptare la intrarea în service.')
         elif stage == 'document_check':
@@ -278,7 +309,8 @@ async def text(root, sender, body, send, writer):
                 else:
                     data['document_fields_confirmed'] = True
                     save(root, sender, 'requirements', data)
-                    await send(sender, f'Datele talonului sunt confirmate. În oferta semnată avem: {data["work"]}\nCe cerințe mai ai pentru lucrare? Scrie-le aici sau răspunde NU dacă nu ai completări. Datele și cerințele vor fi reverificate și confirmate la semnarea comenzii, fără acceptarea unor costuri noi prin acest mesaj.')
+                    label='Pentru programare avem' if data.get('production') else 'În oferta semnată avem'
+                    await send(sender, f'Datele talonului sunt confirmate. {label}: {data["work"]}\nCe cerințe mai ai pentru lucrare? Scrie-le aici sau răspunde NU dacă nu ai completări. Datele și cerințele vor fi reverificate și confirmate la semnarea comenzii, fără acceptarea unor costuri noi prin acest mesaj.')
         elif stage == 'client':
             if value == 'da' and data.get('client_name'):
                 save(root, sender, 'client_address', data)
@@ -310,6 +342,7 @@ async def text(root, sender, body, send, writer):
                 await send(sender, 'Scrie un număr mobil românesc valid sau DA pentru numărul acestei conversații.')
             else:
                 data['phone'] = target
+                data['phone_confirmed'] = True
                 data.pop('editing_client', None)
                 await request_missing_client(root, sender, data, send)
         elif stage == 'requirements':
@@ -350,12 +383,12 @@ async def text(root, sender, body, send, writer):
                         conn.execute('UPDATE orders SET state=?,result=? WHERE offer=?', ('done', json.dumps(result), data['offer_id']))
                     data['order'] = result
                     save(root, sender, 'done', data)
-                    await send(sender, f'Comanda de TEST {result["code"]} a fost verificată în DSM pentru B101TST. Data expirării ITP {data["itp"]} a fost salvată și verificată în Date Mașină. Nu am făcut rezervare în programator.')
+                    await send(sender, f'Comanda {result["code"]} pentru {data["registration"]} este pregătită. Vă așteptăm la programarea confirmată. Datele și cerințele vor fi reverificate la semnarea comenzii.' if data.get('production') else f'Comanda de TEST {result["code"]} a fost verificată în DSM pentru B101TST. Data expirării ITP {data["itp"]} a fost salvată și verificată în Date Mașină. Nu am făcut rezervare în programator.')
                 except Exception:
                     save(root, sender, 'review', data)
                     await send(sender, 'Crearea sau verificarea comenzii necesită intervenția consilierului. Nu repet automat crearea și nu declar comanda finalizată.')
             else:
-                await send(sender, 'Pentru crearea comenzii reale de TEST răspunde CONFIRM DATELE sau CORECTEAZA.')
+                await send(sender, 'Pentru pregătirea comenzii răspundeți CONFIRM DATELE sau CORECTEAZA.' if data.get('production') else 'Pentru crearea comenzii reale de TEST răspunde CONFIRM DATELE sau CORECTEAZA.')
         else:
             await send(sender, 'Verificarea comenzii este în curs. Nu se creează o comandă suplimentară.')
     return True
@@ -367,6 +400,9 @@ async def image(root, sender, message, send, download, reader):
         return False
     async with LOCK:
         stage, data = get(root, sender)
+        if data.get('production') and stage=='attendance':
+            await send(sender,'Vă rugăm să confirmați mai întâi venirea răspunzând DA sau NU, apoi să trimiteți fotografiile talonului.')
+            return True
         if stage not in {'document', 'itp', 'document_check', 'document_itp', 'document_year'}:
             await send(sender, 'Fotografia nu modifică datele deja verificate. Pentru reluarea verificării răspunde CORECTEAZA la confirmarea finală.')
             return True
@@ -394,10 +430,11 @@ async def image(root, sender, message, send, download, reader):
             evidence_path.write_text(json.dumps(evidence, ensure_ascii=False), encoding='utf-8')
             os.chmod(evidence_path, 0o600)
             differences = []
+            reference='programare' if data.get('production') else 'oferta semnată'
             if vin and vin != data['vin']:
-                differences.append(f'VIN citit: {vin}; VIN din oferta semnată: {data["vin"]}')
+                differences.append(f'VIN citit: {vin}; VIN din {reference}: {data["vin"]}')
             if plate and plate != data['registration'] and vin != data['vin']:
-                differences.append(f'înmatriculare citită: {plate}; în oferta semnată: {data["registration"]}')
+                differences.append(f'înmatriculare citită: {plate}; în {reference}: {data["registration"]}')
             if differences:
                 data['document_difference'] = differences
                 for key in ('document_verified', 'document_current', 'document_fields_confirmed',

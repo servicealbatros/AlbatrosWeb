@@ -143,6 +143,9 @@ def init_scheduler_db(db_path: Path) -> None:
             conn.execute("ALTER TABLE scheduler_appointments ADD COLUMN completion_note TEXT")
         if "dsm_appointment_id" not in existing:
             conn.execute("ALTER TABLE scheduler_appointments ADD COLUMN dsm_appointment_id TEXT")
+        for column in ('dsm_transaction_id','dsm_transaction_type','pre_arrival_command_id'):
+            if column not in existing:
+                conn.execute('ALTER TABLE scheduler_appointments ADD COLUMN '+column+' TEXT')
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_dsm_appointment
             ON scheduler_appointments(dsm_appointment_id)

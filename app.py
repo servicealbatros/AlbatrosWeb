@@ -453,6 +453,40 @@ def pre_reception_status(request: Request):
     return status(DATA_DIR)
 
 
+@app.get('/api/dashboard/master/pre-arrival')
+def pre_arrival_status(request: Request):
+    _master_access(request)
+    from pre_arrival_reminders import status
+    return status(DATA_DIR)
+
+
+@app.post('/api/dashboard/master/pre-arrival')
+async def pre_arrival_configure(request: Request):
+    _master_access(request)
+    from pre_arrival_reminders import configure
+    body=await request.json()
+    if not isinstance(body,dict) or type(body.get('enabled')) is not bool:
+        raise HTTPException(400,'Configurație invalidă.')
+    try:
+        return configure(DATA_DIR,body['enabled'],str(body['start_date']))
+    except (ValueError,KeyError) as exc:
+        raise HTTPException(400,'Data de începere trebuie să fie AAAA-LL-ZZ.') from exc
+
+
+@app.post('/api/dashboard/master/pre-arrival/preview')
+async def pre_arrival_preview(request: Request):
+    _master_access(request)
+    from pre_arrival_reminders import preview
+    from dsm_pre_arrival import seed
+    body=await request.json()
+    try:
+        target=datetime.fromisoformat(str(body['date'])).date()
+    except (ValueError,KeyError,TypeError) as exc:
+        raise HTTPException(400,'Data trebuie să fie AAAA-LL-ZZ.') from exc
+    await import_dsm_schedule(DB_PATH,target)
+    return await preview(DB_PATH,DATA_DIR,target,seed)
+
+
 @app.post('/api/dashboard/master/pre-reception/pilot')
 async def pre_reception_pilot(request: Request):
     _master_access(request)
@@ -495,6 +529,20 @@ async def _pre_reception_write(data, allow_create):
         with db(DATA_DIR) as conn:
             conn.execute('UPDATE orders SET result=? WHERE offer=? AND state=?',
                          (json.dumps({'id': command_id}), data['offer_id'], 'creating'))
+    if data.get('production'):
+        from dsm_pre_arrival import create_or_find as production_writer
+        with closing(sqlite3.connect(DB_PATH)) as conn:
+            conn.row_factory=sqlite3.Row
+            appointment=conn.execute('SELECT * FROM scheduler_appointments WHERE id=?',(data.get('appointment_id'),)).fetchone()
+            if (not appointment or appointment['status']!='programat'
+                    or appointment['start_at']!=data.get('appointment_start')
+                    or str(appointment['registration'] or '').replace(' ','').upper()!=data['registration']):
+                raise ValueError('Programarea nu mai corespunde confirmării clientului.')
+        result=await production_writer(data,allow_create,record_created)
+        with closing(sqlite3.connect(DB_PATH)) as conn:
+            conn.execute('UPDATE scheduler_appointments SET pre_arrival_command_id=? WHERE id=?',(result['id'],data['appointment_id']))
+            conn.commit()
+        return result
     return await create_or_find(data, allow_create, record_created=record_created)
 
 
@@ -510,9 +558,10 @@ def master_status(request: Request):
     except (OSError, ValueError):
         dsm_session = {}
     from dsm_accepted_offers import state as accepted_offer_state
+    from pre_arrival_reminders import status as arrival_status
     return {'robot_enabled': POLICY.robot_enabled, 'dsm_accepted_offers': accepted_offer_state(DATA_DIR), 'whatsapp_configured': bool(os.getenv('WHATSAPP_ACCESS_TOKEN') and os.getenv('WHATSAPP_PHONE_NUMBER_ID')),
             'cloud': bool(runtime.get('chromium')), 'dsm_import': read_state(DATA_DIR), 'dsm_session': dsm_session,
-            'mechanic_send': _mechanic_send_readiness(),
+            'mechanic_send': _mechanic_send_readiness(), 'pre_arrival': arrival_status(DATA_DIR),
             'device_approval': env_bool('DASHBOARD_DEVICE_APPROVAL', True), 'browser_memory': memory_health(DATA_DIR)}
 
 
@@ -2996,10 +3045,18 @@ async def startup():
     app.state.dsm_schedule_automation_task = asyncio.create_task(_dsm_schedule_automation_loop())
     app.state.dsm_accepted_offers_task = asyncio.create_task(_dsm_accepted_offers_loop())
     app.state.mechanic_schedule_automation_task = asyncio.create_task(_mechanic_schedule_automation_loop())
+    app.state.pre_arrival_task = asyncio.create_task(_pre_arrival_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    arrival_task=getattr(app.state,'pre_arrival_task',None)
+    if arrival_task:
+        arrival_task.cancel()
+        try:
+            await arrival_task
+        except asyncio.CancelledError:
+            pass
     accepted_task = getattr(app.state, 'dsm_accepted_offers_task', None)
     if accepted_task:
         accepted_task.cancel()
@@ -7941,6 +7998,24 @@ async def _dsm_accepted_offers_loop():
         except Exception:
             pass
         await asyncio.sleep(60)
+
+
+async def _pre_arrival_loop():
+    from pre_arrival_reminders import tick, ROMANIA
+    from dsm_pre_arrival import seed
+    async def refresh(target):
+        return await import_dsm_schedule(DB_PATH,target)
+    await asyncio.sleep(5)
+    while True:
+        try:
+            if POLICY.robot_enabled:
+                await tick(DB_PATH,DATA_DIR,datetime.now(ROMANIA),send_whatsapp_notification,seed,
+                           refresh=refresh,allowed=lambda:POLICY.robot_enabled)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            POLICY.logger.write(action='pre_arrival_reminder',result='failed',success=False,error=str(exc)[:300])
+        await asyncio.sleep(30)
 
 
 async def _dsm_schedule_automation_loop() -> None:

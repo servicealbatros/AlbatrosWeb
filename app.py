@@ -86,6 +86,7 @@ ACCURACY_EVALUATIONS_FILE = DATA_DIR / "accuracy_evaluations.json"
 app = FastAPI(title="Albatros AI v1.0.9 - Oferta editabilă")
 from browser_resources import BrowserActivityMiddleware, memory_health
 app.add_middleware(BrowserActivityMiddleware)
+from albatros_messages import install_messages
 from provider_test_console import router as provider_test_router
 app.include_router(provider_test_router)
 from dsm_advisor_packages import router as advisor_packages_router
@@ -214,8 +215,9 @@ async def security_rate_limit(request: Request, call_next):
             return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
     response = await call_next(request)
     if ('text/html' in response.headers.get('content-type', '')
-            and request.url.path.startswith(('/cereri', '/oferta/', '/programator', '/conversatie/', '/acuratete'))):
+            and request.url.path.startswith(('/cereri', '/oferta/', '/ofertare/', '/tehnician/', '/programator', '/conversatie/', '/acuratete'))):
         body = b''.join([chunk async for chunk in response.body_iterator])
+        body = install_messages(body)
         extra = b'<a href="/master" style="position:fixed;bottom:8px;right:12px;z-index:9999;background:white;padding:8px;border-radius:8px">Panou master</a>' if str(request.state.dashboard_user or '').startswith('master:') else b''
         if bridge_user or not local_client:
             extra += b'''<script>setInterval(async()=>{try{const r=await fetch('/api/dashboard/access-check',{cache:'no-store'});if(r.status===401||r.status===403)location.replace('/receptie/login')}catch(e){}},5000);</script>'''
@@ -4818,19 +4820,19 @@ async function sendFullOffer(){{
  const data=await r.json();
  if(!r.ok||data.ok===false){{
    if(status) status.textContent="Eroare";
-   alert(data.detail||data.message||"Nu am putut trimite oferta completă.");
+   await window.AlbatrosAI.notify(data.detail||data.message||"Nu am putut trimite oferta completă.");
    return;
  }}
  if(status) status.textContent="Trimis ✓";
- alert("Oferta completă a fost trimisă pe WhatsApp.");
+ await window.AlbatrosAI.notify("Oferta completă a fost trimisă pe WhatsApp.", {{tone:"success",title:"Ofertă trimisă"}});
 }}
 async function startTech(){{
  const r=await fetch("/api/requests/{request_id}/technician-start",{{method:"POST"}});
  const data=await r.json();
- if(!r.ok){{alert(data.detail||"Eroare");return;}}
- setTimeout(()=>location.reload(),2000);
+ if(!r.ok){{await window.AlbatrosAI.notify(data.detail||"Eroare");return;}}
+ setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),2000);
 }}
-if({str(status == "running").lower()}) setTimeout(()=>location.reload(),2500);
+if({str(status == "running").lower()}) setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),2500);
 </script>
 </body>
 </html>
@@ -6886,7 +6888,7 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
 <script>
 async function startCrawler(){{
  const b=document.getElementById('crawler_search_btn'); b.disabled=true;
- try{{const r=await fetch('/api/requests/{request_id}/crawler-start',{{method:'POST',headers:{{'X-Human-Action':'start-crawler'}}}});const d=await r.json();if(!r.ok)throw Error(d.detail||'Crawlerul nu a pornit.');await loadSearchComparison();}}catch(e){{alert(e.message);}}finally{{b.disabled=false;}}
+ try{{const r=await fetch('/api/requests/{request_id}/crawler-start',{{method:'POST',headers:{{'X-Human-Action':'start-crawler'}}}});const d=await r.json();if(!r.ok)throw Error(d.detail||'Crawlerul nu a pornit.');await loadSearchComparison();}}catch(e){{await window.AlbatrosAI.notify(e.message);}}finally{{b.disabled=false;}}
 }}
 async function loadSearchComparison(){{
  const box=document.getElementById('search_comparison');box.style.display='block';box.replaceChildren();
@@ -7015,7 +7017,7 @@ async function startAllSearches(liveCatalogues=false){{
   messages.push(techData.ok!==false?"⏳ Haynes/TecRMI așteaptă identificarea":"❌ Timpi: "+(techData.detail||techData.message||"eroare"));
   status.innerHTML=messages.join("<br>");
   btn.textContent="Căutare pornită — în lucru…";
-  setTimeout(()=>location.reload(),3500);
+  setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),3500);
 }}
 async function startLabourOnly(){{
   const btn=document.getElementById("labour_only_btn");
@@ -7030,7 +7032,7 @@ async function startLabourOnly(){{
     if(!response.ok||data.ok===false) throw new Error(data.detail||data.message||data.labour?.message||"Căutarea nu a pornit.");
     status.innerHTML="✅ Modul doar manoperă a pornit.<br>⏳ HaynesPro și TecRMI caută în paralel.<br>✅ Nu a fost pornită nicio căutare de piese.";
     btn.textContent="Manoperă pornită — în lucru…";
-    setTimeout(()=>location.reload(),3500);
+    setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),3500);
   }} catch(error) {{
     btn.disabled=false;
     btn.textContent="Reîncearcă doar manopera";
@@ -7071,13 +7073,13 @@ async function saveVehicleData(){{
   }};
   const box=document.getElementById("vehicle_status"); box.style.display="block"; box.textContent="Se salvează și se reia căutarea…";
   const r=await fetch("/api/requests/{request_id}/vehicle-data",{{method:"POST",headers:{{"Content-Type":"application/json","X-Human-Action":"update-vehicle"}},body:JSON.stringify(payload)}});
-  const d=await r.json(); if(!r.ok){{box.textContent=d.detail||"Eroare la salvare.";return;}} box.textContent="Date salvate. Căutarea a fost reluată."; setTimeout(()=>location.reload(),1800);
+  const d=await r.json(); if(!r.ok){{box.textContent=d.detail||"Eroare la salvare.";return;}} box.textContent="Date salvate. Căutarea a fost reluată."; setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),1800);
 }}
 async function startTech(){{
   const r=await fetch("/api/requests/{request_id}/technician-start",{{method:"POST"}});
   const d=await r.json();
-  if(!r.ok||d.ok===false){{alert(d.detail||d.message||"Nu am putut porni calculul de manoperă.");return;}}
-  setTimeout(()=>location.reload(),1600);
+  if(!r.ok||d.ok===false){{await window.AlbatrosAI.notify(d.detail||d.message||"Nu am putut porni calculul de manoperă.");return;}}
+  setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),1600);
 }}
 async function selectProduct(index,button){{
   const row=document.getElementById("product-row-"+index);
@@ -7090,7 +7092,7 @@ async function selectProduct(index,button){{
     body:JSON.stringify({{product_index:index}})
   }});
   const d=await r.json();
-  if(!r.ok){{if(button){{button.disabled=false;button.textContent=wasSelected?"✓ SELECTAT — elimină":"Selectează";}} alert(d.detail||"Nu am putut selecta piesa.");return;}}
+  if(!r.ok){{if(button){{button.disabled=false;button.textContent=wasSelected?"✓ SELECTAT — elimină":"Selectează";}} await window.AlbatrosAI.notify(d.detail||"Nu am putut selecta piesa.");return;}}
   if(row) row.classList.toggle("selected-product",!wasSelected);
   if(button){{button.classList.toggle("blue",wasSelected);button.classList.toggle("selected-button",!wasSelected);button.textContent=wasSelected?"Eliminat ✓":"✓ SELECTAT";}}
   location.reload();
@@ -7100,7 +7102,7 @@ async function changeQuantity(code,value){{
   const input=document.getElementById("qty-"+code); if(input) input.value=quantity;
   const r=await fetch("/api/requests/{request_id}/offer-quantity",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{product_code:code,quantity}})}});
   const d=await r.json();
-  if(!r.ok){{alert(d.detail||"Nu am putut salva cantitatea.");return;}}
+  if(!r.ok){{await window.AlbatrosAI.notify(d.detail||"Nu am putut salva cantitatea.");return;}}
   location.reload();
 }}
 async function addManualPart(){{
@@ -7119,12 +7121,12 @@ async function addManualPart(){{
   const d=await r.json();
   if(!r.ok){{box.textContent=d.detail||"Piesa nu a putut fi adăugată.";return;}}
   box.textContent=d.status==='necesar_intern_magazie'?'Consumabil păstrat în necesarul intern; se adaugă în deviz după cererea mecanicului.':"Piesa a fost adăugată și marcată ca verificată manual.";
-  setTimeout(()=>location.reload(),500);
+  setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),500);
 }}
 async function removeManualPart(code){{
   const r=await fetch("/api/requests/{request_id}/offer-manual-part-remove",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{product_code:code}})}});
   const d=await r.json();
-  if(!r.ok){{alert(d.detail||"Piesa manuală nu a putut fi ștearsă.");return;}}
+  if(!r.ok){{await window.AlbatrosAI.notify(d.detail||"Piesa manuală nu a putut fi ștearsă.");return;}}
   location.reload();
 }}
 function quoteParts(){{
@@ -7142,16 +7144,16 @@ async function recordWorkshopRequest(key){{
  const technician=box.querySelector('.stock-technician').value.trim();
  const quantity=box.querySelector('.stock-quantity').value;
  const price=box.querySelector('.stock-price').value;
- if(!technician||quantity===''||Number(quantity)<=0||price===''){{alert('Completează mecanicul, cantitatea solicitată și prețul.');return;}}
+ if(!technician||quantity===''||Number(quantity)<=0||price===''){{await window.AlbatrosAI.notify('Completează mecanicul, cantitatea solicitată și prețul.');return;}}
  const button=box.querySelector('button');button.disabled=true;
  try{{
   const current=payload();current.labour_reviewed=false;
   const saved=await fetch('/api/requests/{request_id}/offer-draft',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(current)}});
-  if(!saved.ok){{alert((await saved.json()).detail||'Salvează mai întâi oferta.');return;}}
+  if(!saved.ok){{await window.AlbatrosAI.notify((await saved.json()).detail||'Salvează mai întâi oferta.');return;}}
   const r=await fetch('/api/requests/{request_id}/workshop-stock-request',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{
    item_key:key,technician,quantity:Number(quantity),unit_price_ron:Number(price),reference:box.querySelector('.stock-reference').value.trim()
   }})}});
-  const result=await r.json();if(!r.ok){{alert(result.detail||'Cererea nu a putut fi înregistrată.');return;}}
+  const result=await r.json();if(!r.ok){{await window.AlbatrosAI.notify(result.detail||'Cererea nu a putut fi înregistrată.');return;}}
   location.reload();
  }}finally{{button.disabled=false;}}
 }}
@@ -7196,7 +7198,7 @@ function payload(){{
 }}
 async function saveDraft(sendAfter){{
   if(sendAfter && !document.getElementById("labour_reviewed").checked){{
-    alert("Verifică timpii și manopera, apoi bifează confirmarea obligatorie înainte de trimitere.");
+    await window.AlbatrosAI.notify("Verifică timpii și manopera, apoi bifează confirmarea obligatorie înainte de trimitere.");
     return;
   }}
   const r=await fetch("/api/requests/{request_id}/offer-draft",{{
@@ -7205,16 +7207,16 @@ async function saveDraft(sendAfter){{
     body:JSON.stringify(payload())
   }});
   const d=await r.json();
-  if(!r.ok){{alert(d.detail||"Nu am putut salva oferta.");return;}}
-  if(!sendAfter){{alert("Oferta a fost salvată.");return;}}
+  if(!r.ok){{await window.AlbatrosAI.notify(d.detail||"Nu am putut salva oferta.");return;}}
+  if(!sendAfter){{await window.AlbatrosAI.notify("Oferta a fost salvată.", {{tone:"success",title:"Ofertă salvată"}});return;}}
 
   const phone=document.getElementById("talon_phone").value.trim();
-  if(!phone){{alert("Introdu numărul WhatsApp pe care vrei să trimiți oferta.");return;}}
+  if(!phone){{await window.AlbatrosAI.notify("Introdu numărul WhatsApp pe care vrei să trimiți oferta.");return;}}
   const s=await fetch("/api/requests/{request_id}/offer-draft-send-whatsapp",{{method:"POST",headers:{{"Content-Type":"application/json","X-Human-Action":"send-whatsapp"}},body:JSON.stringify({{phone}})}});
   const sd=await s.json();
-  if(!s.ok){{alert(sd.detail||sd.message||"Oferta este incompletă.");return;}}
+  if(!s.ok){{await window.AlbatrosAI.notify(sd.detail||sd.message||"Oferta este incompletă.");return;}}
   if(sd.phone)document.getElementById("talon_phone").value=sd.phone;
-  alert("Oferta a fost trimisă pe WhatsApp.");
+  await window.AlbatrosAI.notify("Oferta a fost trimisă pe WhatsApp.", {{tone:"success",title:"Ofertă trimisă"}});
   location.href="/cereri";
 }}
 </script>
@@ -7444,36 +7446,36 @@ async function startSearch(){{
  messages.push(labour.ok!==false?"Timpi: Haynes și TecRMI pornite":"Timpi: "+(labour.message||"eroare la pornire"));
  if(status) status.innerHTML=messages.map(x=>"✓ "+x).join("<br>");
  if(btn) btn.textContent="Căutare pornită";
- setTimeout(()=>location.reload(),2200);
+ setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),2200);
 }}
 async function approveOffer(){{
  const r=await fetch("/api/requests/{request_id}/offer-approve",{{method:"POST",headers:{{"X-Human-Action":"approve-offer"}}}});
  const data=await r.json();
- if(!r.ok||data.ok===false){{alert(data.detail||data.message||"Nu am putut aproba oferta.");return;}}
- alert("Oferta a primit VERDE. Acum poate fi trimisă clientului.");
+ if(!r.ok||data.ok===false){{await window.AlbatrosAI.notify(data.detail||data.message||"Nu am putut aproba oferta.");return;}}
+ await window.AlbatrosAI.notify("Oferta a primit VERDE. Acum poate fi trimisă clientului.", {{tone:"success",title:"Ofertă aprobată"}});
  location.reload();
 }}
 async function sendOfferWhatsApp(){{
  const status=document.getElementById("waStatus");
  const phone=(document.getElementById("offer_phone")||{{value:""}}).value.trim();
- if(!phone){{alert("Introdu numărul WhatsApp pe care vrei să trimiți oferta.");return;}}
+ if(!phone){{await window.AlbatrosAI.notify("Introdu numărul WhatsApp pe care vrei să trimiți oferta.");return;}}
  if(status) status.textContent="Se trimite...";
  const r=await fetch("/api/requests/{request_id}/offer-send-whatsapp",{{method:"POST",headers:{{"Content-Type":"application/json","X-Human-Action":"send-whatsapp"}},body:JSON.stringify({{phone}})}});
  const data=await r.json();
  if(!r.ok||data.ok===false){{
    if(status) status.textContent="Eroare";
-   alert(data.detail||data.message||"Nu am putut trimite oferta pe WhatsApp.");
+   await window.AlbatrosAI.notify(data.detail||data.message||"Nu am putut trimite oferta pe WhatsApp.");
    return;
  }}
  if(status) status.textContent="Trimis ✓";
- alert("Oferta a fost trimisa pe WhatsApp.");
+ await window.AlbatrosAI.notify("Oferta a fost trimisa pe WhatsApp.", {{tone:"success",title:"Ofertă trimisă"}});
 }}
 async function selectProduct(index){{
  const r=await fetch("/api/requests/{request_id}/offer-select",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{product_index:index}})}});
- if(!r.ok){{alert("Nu am putut selecta produsul.");return;}}
+ if(!r.ok){{await window.AlbatrosAI.notify("Nu am putut selecta produsul.");return;}}
  location.reload();
 }}
-if({str(result_status == "running").lower()}) setTimeout(()=>location.reload(),3000);
+if({str(result_status == "running").lower()}) setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),3000);
 </script>
 </body>
 </html>
@@ -9481,7 +9483,7 @@ async function archiveDashboardRequest(id,button){
 async function sendOfferFromDashboard(requestId, button, currentPhone) {
     const phone = prompt(`Numărul WhatsApp pentru oferta #${requestId}:`, currentPhone || "");
     if (phone === null) return;
-    if (!phone.trim()) { alert("Introdu un număr WhatsApp valid."); return; }
+    if (!phone.trim()) { await window.AlbatrosAI.notify("Introdu un număr WhatsApp valid."); return; }
     if (!confirm(`Trimiți acum oferta #${requestId} la ${phone}?`)) return;
     const original = button.textContent;
     button.disabled = true;
@@ -9495,12 +9497,12 @@ async function sendOfferFromDashboard(requestId, button, currentPhone) {
         const data = await response.json();
         if (!response.ok || data.ok === false) throw new Error(data.detail || data.message || "Oferta nu a putut fi trimisă.");
         button.textContent = "Trimis ✓";
-        alert("Oferta a fost trimisă pe WhatsApp și cererea a trecut în starea Ofertat.");
+        await window.AlbatrosAI.notify("Oferta a fost trimisă pe WhatsApp și cererea a trecut în starea Ofertat.", {tone:"success",title:"Ofertă trimisă"});
         await loadRequests();
     } catch (error) {
         button.disabled = false;
         button.textContent = original;
-        alert(error.message);
+        await window.AlbatrosAI.notify(error.message);
     }
 }
 

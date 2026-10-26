@@ -3429,7 +3429,7 @@ def requests():
         # A scheduler appointment writes ``programat`` transactionally in the
         # database. That authoritative state must repair an older dashboard
         # map entry such as ``ofertat`` left by the offer workflow.
-        if database_status == "programat" or item.get('source') == 'dsm_accepted_offer':
+        if database_status in {"programat", "rezolvat"} or item.get('source') == 'dsm_accepted_offer':
             status = database_status
             if req_id and REQUEST_STATUS.get(int(req_id)) != status:
                 REQUEST_STATUS[int(req_id)] = status
@@ -8331,6 +8331,13 @@ async def _import_dsm_rolling_week():
             errors.append({"date": target.isoformat(), "error": str(exc)})
             if 'Autentificare DSM necesară' in str(exc):
                 break
+    billing = {"checked": 0, "resolved_request_ids": []}
+    if not errors:
+        try:
+            from dsm_billing_sync import reconcile_billed_requests
+            billing = await reconcile_billed_requests(DB_PATH)
+        except Exception as exc:
+            errors.append({"scope": "facturare", "error": str(exc)})
     return {
         "ok": not errors,
         "week_start": monday.date().isoformat(),
@@ -8343,6 +8350,7 @@ async def _import_dsm_rolling_week():
         "skipped": [entry for item in days for entry in (item.get("skipped") or [])],
         "warnings": [entry for item in days for entry in (item.get("warnings") or [])],
         "errors": errors,
+        "billing": billing,
         "dsm_read_only": True,
     }
 

@@ -307,6 +307,8 @@ async def synchronize(db_path, root):
         try:
             snapshot = await read_snapshot(linked_ids(db_path))
             result = await asyncio.to_thread(apply_snapshot, db_path, snapshot)
+            from dsm_billing_sync import reconcile_billed_requests
+            result['billing'] = await reconcile_billed_requests(db_path)
             info.update(status='success', last_success_day=now.date().isoformat(), last_finished=datetime.now(ROMANIA).isoformat(), result=result)
             info.pop('retry_after', None)
             info.pop('error', None)

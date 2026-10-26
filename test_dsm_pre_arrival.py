@@ -12,6 +12,11 @@ def head(kind='2',status='working'):
 
 
 class ProductionWriterTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.search=AsyncMock(return_value=[])
+        mock=patch.object(prod,'_search_transactions',self.search)
+        mock.start();self.addCleanup(mock.stop)
+
     def data(self):
         return dict(production=True,vin=VIN,registration='B112TST',car_id='22',contact_id='33',
             source_transaction_id='10',source_type='2',source_code='PHDEV-10',source_explicit=True,
@@ -108,6 +113,18 @@ class ProductionWriterTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(prod,'_create',AsyncMock()) as create:
                 with self.assertRaises(ValueError):await prod.create_or_find(data,True,Mock())
                 create.assert_not_awaited()
+
+    async def test_unlinked_open_work_order_prevents_native_creation_even_after_client_confirmation(self):
+        self.search.return_value=[dict(transaction_id=20,transaction_type='2',status='working')]
+        existing=head();existing.update(transaction_head__id='20',transaction_head__code='PHDEV-20')
+        data=self.data();data['source_type']='3'
+        with patch.object(prod,'_read_details',AsyncMock(return_value={'20':{'transaction':existing}})), \
+             patch.object(prod,'read_appointment',AsyncMock(return_value={'transaction':head('3')})), \
+             patch.object(prod,'appointment_call',AsyncMock()) as convert,patch.object(prod,'_create',AsyncMock()) as create:
+            with self.assertRaisesRegex(ValueError,'duplicat'):await prod.create_or_find(data,True,Mock())
+            convert.assert_not_awaited();create.assert_not_awaited()
+            existing['car_body_series']='WBA00000000000002'
+            with self.assertRaisesRegex(ValueError,'neconcordantă'):await prod.existing_orders(data)
 
     async def test_native_appointment_identifies_customer_without_history_guessing(self):
         detail=dict(carId=22,clientId=33,carNumber='B112TST',clientPhone='0700100009',

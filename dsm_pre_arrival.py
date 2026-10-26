@@ -123,6 +123,29 @@ async def _create(path, data):
       .replace('__PATH__',json.dumps(path)).replace('__DATA__',json.dumps(data)))
 
 
+async def existing_orders(data):
+    """Read all open work orders and verify vehicle identity before any creation."""
+    refs=await _search_transactions(data['registration'])
+    ids=[str(r['transaction_id']) for r in refs if str(r.get('transaction_type'))=='2' and r.get('status')=='working']
+    if not ids:
+        return []
+    details=await _read_details(ids)
+    result=[]
+    for ident in ids:
+        h=(details.get(ident) or {}).get('transaction') or {}
+        if (str(h.get('car_body_series') or '').upper()!=data['vin'] or str(h.get('car_id'))!=data['car_id']
+                or str(h.get('transaction_head__type'))!='2'):
+            raise ValueError('Deviz existent cu identificare neconcordantă; consilierul trebuie să verifice înaintea creării.')
+        if h.get('transaction_head__status')=='working':
+            result.append(dict(id=ident,code=str(h.get('transaction_head__code') or ident)))
+    return result
+
+
+async def require_no_existing_order(data):
+    if await existing_orders(data):
+        raise ValueError('Există deja deviz/comandă deschisă; nu creez un duplicat. Consilierul trebuie să confirme legătura.')
+
+
 def check_head(head, data, ident, *, kind='2', empty=False):
     if (str(head.get('transaction_head__id'))!=str(ident) or str(head.get('transaction_head__type'))!=kind
         or head.get('transaction_head__status')!='working' or str(head.get('contact_id'))!=data['contact_id']
@@ -158,6 +181,7 @@ async def create_or_find(data, allow_create, record_created):
                 raise ValueError('Programarea nu mai este activă.')
             if not allow_create:
                 raise ValueError('Creare anterioară incertă; nu repet operația.')
+            await require_no_existing_order(data)
             result=await appointment_call('transformappointment',dict(appointment_id=source_id,target_type='2'))
             if result.get('status')!='success':
                 raise ValueError('DSM solicită alegerea unei comenzi existente sau verificarea conversiei; nu forțez un duplicat.')
@@ -179,6 +203,7 @@ async def create_or_find(data, allow_create, record_created):
                 raise ValueError('Oferta nu mai este semnată și activă.')
             if not allow_create:
                 raise ValueError('Creare anterioară incertă; nu repet operația.')
+            await require_no_existing_order(data)
             result=await _create('/special/transaction/offer_accepted/'+source_id,
                 dict(payment_advance='false',advance_value='',transform_type='estimate',transform_type_appointment='0'))
             ident=str(result.get('new_transaction_id') or '')

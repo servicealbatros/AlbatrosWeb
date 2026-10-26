@@ -88,7 +88,7 @@ async def seed(appointment):
     car=await call('/special/car/get_car',{'car_id':car_id})
     if str(car.get('car_body_series') or '').upper()!=vin:
         raise ValueError('VIN neconcordant în datele mașinii.')
-    mobiles=client.get('mobile') or []
+    mobiles=[m for m in client.get('mobile') or [] if isinstance(m,dict)]
     checked=[m for m in mobiles if m.get('checked')=='checked']
     matched=[m for m in mobiles if appointment_phone and phone(m.get('val') or '')==phone(appointment_phone)]
     mobile=matched[0] if len(matched)==1 else checked[0] if len(checked)==1 else mobiles[0] if len(mobiles)==1 else None
@@ -99,7 +99,7 @@ async def seed(appointment):
         raise ValueError('Telefonul din programare diferă de telefonul clientului; verificare necesară.')
     if appointment.get('request_vin') and str(appointment['request_vin']).upper()!=vin:
         raise ValueError('VIN-ul cererii diferă de documentul asociat programării.')
-    addresses=client.get('address') or []
+    addresses=[a for a in client.get('address') or [] if isinstance(a,dict)]
     address=addresses[0].get('address_street_1','') if len(addresses)==1 else ''
     previous=dict(client_name=str(client.get('contact_name') or '').strip(),client_phone=target,
         client_address_street=str(address).strip(),car_manufacture_year=str(car.get('car_manufacture_year') or ''),

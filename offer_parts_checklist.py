@@ -101,9 +101,21 @@ def render_internal_materials(rows):
       a mecanicului către magazie, cu mecanic și cantitate înregistrate. Nu se solicită automat din magazie.</p><ul>''' + ''.join(items) + '</ul></div>'
 
 
+def line_gaps(rows):
+    result = []
+    for row in normalize_lines(rows):
+        missing = [label for field, label in [('code', 'cod piesă'), ('quantity', 'cantitate'),
+                                               ('unit_price_ron', 'preț unitar')]
+                   if row[field] in (None, '')]
+        if not row['confirmed']:
+            missing.append('verificarea consilierului')
+        if missing:
+            result.append(dict(description=row['description'], missing=missing))
+    return result
+
+
 def pending_lines(rows):
-    return [row['description'] for row in normalize_lines(rows)
-            if not row['confirmed'] or row['quantity'] is None or row['unit_price_ron'] is None or not row['code']]
+    return [row['description'] for row in line_gaps(rows)]
 
 
 def subtotal(rows):
@@ -119,8 +131,11 @@ def render_lines(rows, *, engine_oil_separate=True):
         number = lambda key: '' if item[key] is None else str(item[key])
         stock = item.get('stock_request') or {}
         stock_note = escape(f"Cerut din magazie de {stock.get('technician')} la {stock.get('requested_at')}; {stock.get('reference') or ''}") if stock else ''
+        gaps = line_gaps([item])
+        review_note = ('Lipsește: ' + ', '.join(gaps[0]['missing']) if gaps else 'Verificată de consilier')
         body.append(f'''<tr class="quote-part-row" data-source="{e('source')}">
           <td><input class="quote-description" aria-label="Denumire piesă" value="{e('description')}">
+          <small class="quote-review-status" style="color:{'#a12e2e' if gaps else '#13784c'}">{escape(review_note)}</small>
           <small>{e('note')}</small><small>{stock_note}</small><input class="quote-note" type="hidden" value="{e('note')}"></td>
           <td><input class="quote-code" aria-label="Cod piesă" value="{e('code')}"></td>
           <td><input class="quote-quantity" aria-label="Cantitate piesă" type="number" min="0.001" step="any" value="{number('quantity')}" placeholder="De confirmat"></td>

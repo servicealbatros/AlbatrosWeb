@@ -187,10 +187,11 @@ BRAND_PREFIXES = {
 
 
 def _independent_plan(query: str) -> list[dict]:
+    from transmission_service_policy import engine_service_requested
     query = expand_technical_request(query)
     text = unicodedata.normalize("NFKD", query.casefold()).encode("ascii", "ignore").decode("ascii")
     plan = []
-    if "revizie" in text or "filtre" in text or "filtru" in text:
+    if engine_service_requested(query) and ("revizie" in text or "filtre" in text or "filtru" in text):
         plan.extend([
             {"requested_item": "filtru ulei", "search": "filtru ulei", "kind": r"FILTRU\s+ULEI"},
             {"requested_item": "filtru aer", "search": "filtru aer", "kind": r"FILTRU\s+AER"},
@@ -821,8 +822,10 @@ def _find_category(categs: list[dict], wanted: str) -> tuple[str, str] | None:
 
 def _history_search_candidates(vehicle_context: dict, query: str) -> list[dict]:
     """Exact fitted codes are the safest completion path for vehicles in DSM."""
+    from transmission_service_policy import engine_service_requested
+    query = expand_technical_request(query)
     text = query.casefold()
-    is_revision = any(token in text for token in ("revizie", "filtre", "filtru", "ulei"))
+    is_revision = engine_service_requested(query) and any(token in text for token in ("revizie", "filtre", "filtru", "ulei"))
     if not is_revision:
         return []
     rows = []
@@ -876,7 +879,7 @@ def _revision_product_kind(value: str) -> str:
         return "air_filter"
     if any(x in text for x in ("buson", "surub")) and any(x in text for x in ("golire", "baieulei")):
         return "oil_drain_plug"
-    if "ulei" in text and not any(x in text for x in ("cutie", "transmis", "diferential", "haldex")):
+    if "ulei" in text and not any(x in text for x in ("cutie", "cutia", "transmis", "diferential", "haldex", "transfer", "grup")):
         return "engine_oil"
     if "kit" in text and "curea" in text and any(x in text for x in ("accesor", "acessor", "caneluri")):
         return "accessory_belt_kit"
@@ -892,13 +895,15 @@ def _revision_product_kind(value: str) -> str:
 
 
 def _required_product_kinds(query: str) -> set[str]:
+    from transmission_service_policy import engine_service_requested
+    query = expand_technical_request(query)
     plain = unicodedata.normalize("NFKD", str(query or "").casefold()).encode("ascii", "ignore").decode("ascii")
     required: set[str] = set()
     for target in _oe_vin_targets(query):
         kind = _revision_product_kind(target['requested_item'])
         if kind in {'brake_pads', 'brake_pads_rear', 'brake_discs_front', 'brake_discs_rear'}:
             required.add(kind)
-    if any(token in plain for token in ("revizie", "filtre", "filtru", "ulei")):
+    if engine_service_requested(query) and any(token in plain for token in ("revizie", "filtre", "filtru", "ulei")):
         required.update({"oil_filter", "air_filter", "cabin_filter", "fuel_filter", "engine_oil", "oil_drain_plug"})
     if "kit" in plain and "curea" in plain and any(
             token in plain for token in ("accesor", "acessor", "agregat", "auxiliar")):

@@ -1683,6 +1683,8 @@ def _offer_product_kind(product: dict) -> str:
 
 def _required_offer_part_kinds(value: str) -> dict[str, str]:
     """Return physical parts explicitly requested; labour-only terms are ignored."""
+    from timing_chain_policy import chain_replacement
+    from transmission_service_policy import engine_service_requested
     terms = canonical_terms(value)
     required: dict[str, str] = {}
     for term in terms:
@@ -1770,7 +1772,7 @@ def _required_offer_part_kinds(value: str) -> dict[str, str]:
                 "accessory_belt_tensioner": "întinzător curea accesorii",
                 "water_pump": "pompă de apă",
             })
-    if "revizie" in raw or ("ulei" in raw and "filtr" in raw):
+    if engine_service_requested(value) and (chain_replacement(value) or "revizie" in raw or ("ulei" in raw and "filtr" in raw)):
         required.update({
             "oil_filter": "filtru ulei",
             "air_filter": "filtru aer",
@@ -4208,7 +4210,7 @@ def _require_original_oil_selection(request_id: int) -> None:
 def _require_advisor_labour_review(request_id: int) -> dict:
     _require_original_oil_selection(request_id)
     draft = _draft_for_request(request_id)
-    from offer_parts_checklist import pending_lines, is_workshop_consumable
+    from offer_parts_checklist import pending_lines, line_gaps, is_workshop_consumable
     from timing_chain_policy import chain_replacement
     checklist = draft.get('parts_checklist') or []
     if any(is_workshop_consumable(row) and not row.get('stock_request') for row in checklist):
@@ -4218,7 +4220,8 @@ def _require_advisor_labour_review(request_id: int) -> dict:
            for p in selected.get('products') or ([selected['product']] if selected.get('product') else [])):
         raise HTTPException(409, 'Scoate consumabilele din selecția de ofertare și înregistrează cererea efectivă din magazie în deviz.')
     if checklist and pending_lines(checklist):
-        raise HTTPException(409, 'Necesarul de piese are coduri, cantități, prețuri sau verificări neconfirmate.')
+        details = '; '.join(row['description'] + ': ' + ', '.join(row['missing']) for row in line_gaps(checklist))
+        raise HTTPException(409, 'Necesar de piese neconfirmat — ' + details + '.')
     if chain_replacement((_request_by_id(request_id) or {}).get('symptom')):
         from original_oil_policy import is_original_engine_oil
         if not checklist or not is_original_engine_oil({'description': draft.get('oil_product_name')},
@@ -6192,10 +6195,10 @@ def request_unified_offer_page(request_id: int):
     vin = request_row.get("vin") or "—"
     symptom = request_row.get("symptom") or request_row.get("request") or request_row.get("solicitare") or request_row.get("problem") or "—"
     search_query = offer.get("query") or symptom
-    is_service_offer = chain_replacement(symptom) or any(
+    is_service_offer = engine_service_requested(symptom) and (chain_replacement(symptom) or any(
         key in _normalize_text(symptom)
         for key in ("revizie", "filtru", "filtre", "schimb ulei", "ulei motor")
-    )
+    ))
     selected_catalog_plug = next((p for p in selected_products
                                   if _offer_product_kind(p) == "oil_drain_plug"), None)
     if is_service_offer and not selected_catalog_plug:
@@ -6557,9 +6560,13 @@ def request_unified_offer_page(request_id: int):
             + '. Oferta nu poate fi aprobată până nu sunt identificate și selectate.</div>'
         )
 
-    products_html = render_parts_workspace(list(presentation_groups.values()), missing_requested)
+    products_html = render_parts_workspace(list(presentation_groups.values()), missing_requested,
+                                          checklist=draft.get('parts_checklist') or [])
 
     selected_summary_html = '<div class="selection-empty">Nu ai selectat încă nicio piesă.</div>'
+    if draft.get('parts_checklist'):
+        selected_summary_html = ('<div class="selection-empty">Piesele din necesarul editabil sunt în lista de mai sus. '
+                                 'Această secțiune arată numai variantele suplimentare selectate de la furnizori.</div>')
     if selected_products:
         selected_lines = []
         for item in selected_products:

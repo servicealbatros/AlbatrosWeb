@@ -164,7 +164,10 @@ class CloudAccessTests(unittest.TestCase):
         login = self.client.post('/receptie/login', data={'username':'test-user','password':'test-password'}, follow_redirects=False)
         self.assertEqual(login.status_code, 303)
         with patch.dict(os.environ, {'RECEPTION_BRIDGE_URL':''}):
-            self.assertEqual(self.client.get('/baza-dsm/pachete').status_code, 200)
+            redirect = self.client.get('/baza-dsm/pachete', follow_redirects=False)
+            self.assertEqual(redirect.status_code, 303)
+            self.assertEqual(redirect.headers['location'], '/baza-dsm')
+            self.assertEqual(self.client.get('/baza-dsm').status_code, 200)
             with patch('dsm_automatic_codes.vehicles', return_value={'vehicles':[], 'has_more':False}):
                 result = self.client.get('/api/dashboard/parts-packages/vehicles?query=B271')
                 self.assertEqual(result.status_code, 200)

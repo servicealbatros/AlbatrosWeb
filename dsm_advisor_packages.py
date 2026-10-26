@@ -1,7 +1,6 @@
 """Advisor package routes, inside the existing authenticated dashboard boundary."""
-from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import dsm_automatic_codes as codes
 
 router = APIRouter()
@@ -15,7 +14,7 @@ def require_advisor(request):
 @router.get('/baza-dsm/pachete')
 def page(request: Request):
     require_advisor(request)
-    return FileResponse(Path(__file__).parent/'static'/'dsm_automatic_codes.html', headers={'Cache-Control': 'no-store'})
+    return RedirectResponse('/baza-dsm', status_code=303, headers={'Cache-Control': 'no-store'})
 
 
 @router.get('/api/dashboard/parts-packages/vehicles')

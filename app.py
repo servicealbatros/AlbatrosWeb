@@ -8916,7 +8916,6 @@ def requests_dashboard():
             <button onclick="refreshDashboard()" title="Reîncarcă integral dashboardul">Reîncarcă</button>
             <a class="link-button" href="/programator">Programator atelier</a>
             <a class="link-button" href="/baza-dsm">Istoric DSM</a>
-            <a class="link-button" href="/baza-dsm/pachete">Pachete piese</a>
             <a class="link-button" href="/arhiva">Arhivă / curăță cereri</a>
             <a class="link-button" href="/acuratete">Măsurare acuratețe</a>
         </div>

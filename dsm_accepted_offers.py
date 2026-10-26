@@ -268,6 +268,7 @@ def apply_snapshot(db_path, snapshot):
                 (ident, request_id, item['code'], item['signature'], reason, json.dumps(detail, ensure_ascii=False), datetime.now(ROMANIA).isoformat()))
             counts['request_ids'].append(request_id)
         conn.commit()
+    counts['programmed_request_ids'] = reconcile_existing_bookings(db_path)
     return counts
 
 
@@ -348,8 +349,6 @@ def reconcile_existing_bookings(db_path, request_id=None, now=None):
     now = (now or datetime.now(ROMANIA)).astimezone(ROMANIA)
     with connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='dsm_accepted_offer_links'").fetchone():
-            return []
         columns = {r[1] for r in conn.execute('PRAGMA table_info(scheduler_appointments)')}
         if not {'id', 'request_id', 'job_number', 'status', 'source', 'dsm_appointment_id',
                 'registration', 'operations', 'end_at'}.issubset(columns):
@@ -358,11 +357,34 @@ def reconcile_existing_bookings(db_path, request_id=None, now=None):
         rows = conn.execute('''SELECT r.*, l.document_code, l.payload_json, l.signature_state, l.eligibility
             FROM service_requests r JOIN dsm_accepted_offer_links l ON l.request_id=r.id
             WHERE r.source='dsm_accepted_offer' AND r.status IN ('acceptat','ofertat','programat')
-            AND (? IS NULL OR r.id=?)''', (request_id, request_id)).fetchall()
+            AND (? IS NULL OR r.id=?)''', (request_id, request_id)).fetchall() if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='dsm_accepted_offer_links'").fetchone() else []
         appointments = conn.execute("""SELECT * FROM scheduler_appointments
             WHERE source IN ('dsm_schedule_readonly','mechanic_takeover')
             AND dsm_appointment_id IS NOT NULL AND dsm_appointment_id!=''
             AND status NOT IN ('anulat','finalizat')""").fetchall()
+        active = []
+        for appointment in appointments:
+            try:
+                end = datetime.fromisoformat(appointment['end_at'])
+                end = end.replace(tzinfo=ROMANIA) if end.tzinfo is None else end.astimezone(ROMANIA)
+            except (ValueError, TypeError):
+                continue
+            if end >= now:
+                active.append(appointment)
+        linked = set()
+        # A request already attached to an imported APP keeps that identity even
+        # when the calendar description no longer repeats the quote number.
+        for appointment in active:
+            ident = appointment['request_id']
+            if not ident or (request_id is not None and ident != request_id):
+                continue
+            request = conn.execute('SELECT registration,status FROM service_requests WHERE id=?', (ident,)).fetchone()
+            if not request or request['status'] in {'anulat','rezolvat','finalizat'}:
+                continue
+            plate = re.sub(r'[^A-Z0-9]', '', str(request['registration'] or '').upper())
+            if plate and plate == re.sub(r'[^A-Z0-9]', '', str(appointment['registration'] or '').upper()):
+                linked.add(ident)
         proposals = {}
         for row in rows:
             if row['signature_state'] not in {'signed','complete','completed'} or row['eligibility'] not in {'accepted','scheduled'}:
@@ -376,17 +398,10 @@ def reconcile_existing_bookings(db_path, request_id=None, now=None):
             if not code or not plate:
                 continue
             matches = []
-            for appointment in appointments:
+            for appointment in active:
                 if appointment['request_id'] not in (None, row['id']):
                     continue
                 if re.sub(r'[^A-Z0-9]', '', str(appointment['registration'] or '').upper()) != plate:
-                    continue
-                try:
-                    end = datetime.fromisoformat(appointment['end_at'])
-                    end = end.replace(tzinfo=ROMANIA) if end.tzinfo is None else end.astimezone(ROMANIA)
-                except (ValueError, TypeError):
-                    continue
-                if end < now:
                     continue
                 # A bare plate, a similar offer number, or another offer for the
                 # same car is insufficient evidence.
@@ -396,14 +411,14 @@ def reconcile_existing_bookings(db_path, request_id=None, now=None):
                     matches.append(appointment)
             if len(matches) == 1:
                 proposals[row['id']] = matches[0]['id']
-        linked = []
         for ident, appointment_id in proposals.items():
             if list(proposals.values()).count(appointment_id) != 1:
                 continue
             conn.execute('UPDATE scheduler_appointments SET request_id=? WHERE id=? AND request_id IS NULL', (ident, appointment_id))
-            conn.execute("UPDATE service_requests SET status='programat' WHERE id=?", (ident,))
-            linked.append(ident)
-        return linked
+            linked.add(ident)
+        for ident in linked:
+            conn.execute("UPDATE service_requests SET status='programat' WHERE id=? AND status!='programat'", (ident,))
+        return sorted(linked)
 
 
 def rebuild_dashboard(db_path, root, snapshot, *, quoted_ids=(), status_map=None, protected_ids=()):

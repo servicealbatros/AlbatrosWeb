@@ -71,6 +71,12 @@ def offer_validity(record, now=None):
 
 
 def require_valid_for_booking(db_path, request_row, now=None):
+    from dsm_booking_approval import approval_record, valid_approval
+    evidence = approval_record(db_path, request_row['id']) if request_row else None
+    if evidence:
+        if valid_approval(evidence, request_row, now):
+            return
+        raise ValueError('Confirmarea comenzii DSM trebuie reverificată înainte de programare. Reia acțiunea din Dashboard.')
     if not request_row or request_row.get('source') != 'dsm_accepted_offer':
         return
     record = offer_record(db_path, request_row['id'])

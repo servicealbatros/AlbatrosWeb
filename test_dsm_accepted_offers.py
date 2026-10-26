@@ -28,7 +28,7 @@ class SignedOfferTests(unittest.TestCase):
  def status_endpoint(self):
   # Exercise the actual endpoint and persistence functions without starting the robot.
   tree=ast.parse(Path(__file__).with_name('app.py').read_text(encoding='utf-8-sig'))
-  nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'set_request_status','_persist_request_status'}]
+  nodes=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in {'set_request_status','_persist_request_status'}]
   for node in nodes:node.decorator_list=[]
   future=ast.ImportFrom(module='__future__',names=[ast.alias(name='annotations')],level=0)
   def lookup(ident):
@@ -40,8 +40,11 @@ class SignedOfferTests(unittest.TestCase):
        '_confirm_local_dashboard_click':Mock(),'_request_by_id':lookup,
        '_request_has_approved_offer':Mock(return_value=False),'HTTPException':HTTPException,
        'VALID_REQUEST_STATUSES':{'nou','acceptat','programat','rezolvat'},
-       'DB_PATH':self.db,'REQUEST_STATUS':{},'save_request_status':Mock(),'sqlite3':sqlite3,'closing':closing}
+       'DB_PATH':self.db,'REQUEST_STATUS':{},'save_request_status':Mock(),'sqlite3':sqlite3,'closing':closing,
+       '_verify_dsm_booking_approval':AsyncMock(side_effect=lambda row:sync.has_signed_dashboard_offer(self.db,row))}
   exec(compile(ast.fix_missing_locations(ast.Module(body=[future,*nodes],type_ignores=[])),'app.py','exec'),env)
+  endpoint=env['set_request_status']
+  env['set_request_status']=lambda *args,**kwargs:asyncio.run(endpoint(*args,**kwargs))
   return env
  def test_signed_dsm_offer_can_be_marked_programmed_without_local_draft(self):
   data=item();data['detail']['accepted_at']=datetime.now(sync.ROMANIA).isoformat()

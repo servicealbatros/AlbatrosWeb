@@ -3787,8 +3787,21 @@ def canonical_requests():
     return output
 
 
+async def _verify_dsm_booking_approval(request_row: dict) -> bool:
+    from dsm_accepted_offers import has_signed_dashboard_offer
+    if has_signed_dashboard_offer(DB_PATH, request_row):
+        return True
+    from dsm_booking_approval import refresh_approval
+    try:
+        return bool(await asyncio.wait_for(refresh_approval(DB_PATH, request_row), timeout=30))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, 'Nu pot verifica acum acceptul în DSM. Reîncearcă după reconectarea DSM.') from exc
+
+
 @app.post("/api/requests/{request_id}/status")
-def set_request_status(
+async def set_request_status(
     request_id: int,
     data: RequestStatusInput,
     request: Request,
@@ -3807,8 +3820,7 @@ def set_request_status(
         )
 
     if status in {'acceptat', 'programat'} and not _request_has_approved_offer(request_id):
-        from dsm_accepted_offers import has_signed_dashboard_offer
-        if not has_signed_dashboard_offer(DB_PATH, request_row):
+        if not await _verify_dsm_booking_approval(request_row):
             raise HTTPException(status_code=409, detail='Verifică și aprobă oferta, timpii și manopera înainte de acceptare sau programare.')
 
     if status in {'acceptat', 'programat'} and not (status == 'programat' and request_row.get('status') == 'programat'):
@@ -8179,7 +8191,10 @@ async def scheduler_send_delay_notification(
 
 
 @app.post("/api/scheduler/requests/{request_id}/suggest")
-def scheduler_suggest(request_id: int, data: SchedulerSuggestionInput):
+async def scheduler_suggest(request_id: int, data: SchedulerSuggestionInput):
+    row = _request_by_id(request_id)
+    if row and not _request_has_approved_offer(request_id):
+        await _verify_dsm_booking_approval(row)
     draft = _load_offer_drafts().get(str(request_id)) or {}
     technician = _load_technician_result(request_id)
     duration = _float_or_zero(draft.get("booking_hours")) or _float_or_zero(technician.get("booking_hours"))
@@ -8239,6 +8254,9 @@ async def _notify_client_about_appointment(appointment: dict, *, updated: bool =
 
 @app.post("/api/scheduler/requests/{request_id}/auto-schedule")
 async def scheduler_auto_schedule(request_id: int, data: SchedulerSuggestionInput):
+    row = _request_by_id(request_id)
+    if row and not _request_has_approved_offer(request_id):
+        await _verify_dsm_booking_approval(row)
     draft = _load_offer_drafts().get(str(request_id)) or {}
     technician = _load_technician_result(request_id)
     duration = _float_or_zero(draft.get("booking_hours")) or _float_or_zero(technician.get("booking_hours"))
@@ -8338,6 +8356,9 @@ def scheduler_distribute_dsm_capacity(
 
 @app.post("/api/scheduler/appointments")
 async def scheduler_create(data: SchedulerAppointmentInput):
+    row = _request_by_id(data.request_id) if data.request_id else None
+    if row and not _request_has_approved_offer(data.request_id):
+        await _verify_dsm_booking_approval(row)
     try:
         result = scheduler_create_appointment(DB_PATH, data.model_dump())
         result["client_notification"] = await _notify_client_about_appointment(result)

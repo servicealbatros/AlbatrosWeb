@@ -1,4 +1,4 @@
-"""Resolve local requests only from exact, read-only DSM work-order billing."""
+"""Resolve requests from exact, read-only DSM work-order closure or billing."""
 import json
 import re
 import sqlite3
@@ -81,19 +81,22 @@ def billed_evidence(binding, details):
     if not order_ids:
         return None
     order_codes = []
+    order_statuses = {}
     for ident in sorted(order_ids):
         order = (details.get(ident) or {}).get('transaction') or {}
-        # An advance invoice or a merely closed order must not resolve the job.
+        # Closure is sufficient; an advance invoice on a working order is not.
         if (str(order.get('transaction_head__id')) != ident
                 or str(order.get('transaction_head__type')) != '2'
-                or order.get('transaction_head__status') != 'billed'
+                or order.get('transaction_head__status') not in {'billed', 'completed', 'closed'}
                 or order.get('car_body_series') != binding['vin']
                 or order.get('parent_transaction_code') != code
                 or str(order.get('parent_transaction_type')) != '1'):
             return None
         order_codes.append(str(order.get('transaction_head__code') or ''))
+        order_statuses[ident] = order['transaction_head__status']
     return dict(offer_id=binding['offer_id'], offer_code=code, vin=binding['vin'],
-                order_ids=sorted(order_ids), order_codes=order_codes, basis='DSM work order status billed')
+                order_ids=sorted(order_ids), order_codes=order_codes, order_statuses=order_statuses,
+                basis='DSM work order closed or billed')
 
 
 async def reconcile_billed_requests(db_path):

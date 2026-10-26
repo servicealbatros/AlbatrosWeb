@@ -75,10 +75,21 @@ class BillingSyncTests(unittest.IsolatedAsyncioTestCase):
              patch.object(app,'_draft_for_request',return_value={}):
             self.assertEqual(app.requests()[0]['desktop_status'],'rezolvat')
 
-    async def test_closed_open_cancelled_wrong_vin_and_unrelated_orders_do_not_resolve(self):
+    async def test_closed_exact_order_without_invoice_also_resolves(self):
+        binding=billing.bindings(self.db)[0]
+        for status in ('completed','closed'):
+            p=details();p['11']['transaction']['transaction_head__status']=status
+            with self.subTest(status=status):
+                proof=billing.billed_evidence(binding,p)
+                self.assertEqual(proof['order_statuses'],{'11':status})
+        p=details();p['11']['transaction']['transaction_head__status']='completed'
+        self.assertEqual((await self.run_sync(p))['resolved_request_ids'],[57])
+        self.assertEqual(self.statuses(),('rezolvat','finalizat'))
+
+    async def test_open_cancelled_wrong_vin_and_unrelated_orders_do_not_resolve(self):
         cases=[]
-        for field,value in [('transaction_head__status','working'),('transaction_head__status','completed'),
-            ('transaction_head__status','canceled'),('car_body_series','WBA00000000000002'),
+        for field,value in [('transaction_head__status','working'),('transaction_head__status','unknown'),
+            ('transaction_head__status','canceled'),('transaction_head__status','cancelled'),('car_body_series','WBA00000000000002'),
             ('parent_transaction_code','OFERTA-OLD'),('parent_transaction_type','2')]:
             p=details();p['11']['transaction'][field]=value;cases.append(p)
         p=details();p['10']['transaction']['car_body_series']='WBA00000000000002';cases.append(p)
@@ -87,13 +98,13 @@ class BillingSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.run_sync(p))['resolved_request_ids'],[])
             self.assertEqual(self.statuses(),('programat','programat'))
 
-    async def test_partially_billed_split_order_stays_open_until_all_orders_are_billed(self):
+    async def test_split_order_stays_open_until_all_orders_are_closed_or_billed(self):
         p=details()
         p['10']['transaction_head_childs'].append(dict(transaction_id='12',transaction_head__type='2',transaction_status='0'))
         p['12']=json.loads(json.dumps(p['11']))
         p['12']['transaction'].update(transaction_head__id=12,transaction_head__code='PHDEV-12',transaction_head__status='working')
         self.assertEqual((await self.run_sync(p))['resolved_request_ids'],[])
-        p['12']['transaction']['transaction_head__status']='billed'
+        p['12']['transaction']['transaction_head__status']='completed'
         self.assertEqual((await self.run_sync(p))['resolved_request_ids'],[57])
 
     async def test_cancelled_request_is_preserved_and_disconnection_does_not_resolve(self):

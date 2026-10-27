@@ -1,16 +1,17 @@
 """Narrow DSM writer for the explicitly authorised B101TST pilot only."""
 import json
+import os
 import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from dsm_open_orders_readonly import _evaluate
 from dsm_accepted_offers import eligibility
 
-OFFER = '19527'
-VIN = 'WBA00000000000002'
-PLATE = 'B101TST'
-RETEST_COMMAND = '19529'
-NEW_TEST_MARKER = '[TEST PRE-RECEPTIE B101TST]'
+OFFER = os.getenv('PRE_RECEPTION_PILOT_OFFER_ID', '19527')
+VIN = os.getenv('PRE_RECEPTION_PILOT_VIN', 'WBA00000000000002')
+PLATE = os.getenv('PRE_RECEPTION_PILOT_REGISTRATION', 'B101TST')
+RETEST_COMMAND = os.getenv('PRE_RECEPTION_PILOT_RETEST_ORDER_ID', '19529')
+NEW_TEST_MARKER = f'[TEST PRE-RECEPTIE {PLATE}]'
 LEGACY_MARKER = '[ALBATROS PRE-RECEPTIE TEST OFERTA-3415]'
 RECHECK_NOTICE = 'CERINȚELE CLIENTULUI TREBUIE REVERIFICATE ȘI CONFIRMATE ÎMPREUNĂ CU CONSILIERUL LA SEMNAREA COMENZII.'
 

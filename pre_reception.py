@@ -10,7 +10,7 @@ import re
 import sqlite3
 import unicodedata
 
-RECIPIENTS = ('40700100000', '40700100006')
+RECIPIENTS = tuple(value.strip() for value in os.getenv('PRE_RECEPTION_TEST_PHONES', ('40700100000', '40700100006')[0] + ',' + ('40700100000', '40700100006')[1]).split(',') if value.strip())
 LOCK = asyncio.Lock()
 
 

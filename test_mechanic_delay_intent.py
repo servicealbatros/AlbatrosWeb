@@ -68,5 +68,25 @@ class MechanicDelayIntentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(conn.execute('SELECT status FROM scheduler_appointments WHERE id=1').fetchone()[0],'programat')
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_mechanic_messages').fetchone()[0],0)
 
+    async def test_authorized_beta_sender_can_report_delay_by_unique_plate(self):
+        with patch.object(app,'_is_beta_test_phone',return_value=True),patch.object(app,'send_whatsapp_text',AsyncMock()) as send:
+            self.assertTrue(await app._route_mechanic_message('40700100012','B117TST INTRAZIERE 1h'))
+            self.assertIn('întârzierea de 1 ore',send.await_args.args[1])
+        with closing(sqlite3.connect(self.path)) as conn:
+            self.assertEqual(conn.execute('SELECT status FROM scheduler_appointments WHERE id=1').fetchone()[0],'neterminat')
+
+    async def test_authorized_beta_sender_does_not_guess_between_duplicate_bookings(self):
+        with closing(sqlite3.connect(self.path)) as conn,conn:
+            conn.execute("""INSERT INTO scheduler_appointments
+                (id,technician_id,start_at,end_at,status,registration,job_number,operations,estimated_hours)
+                SELECT 2,technician_id,start_at,end_at,status,registration,'APP-1972',operations,estimated_hours
+                FROM scheduler_appointments WHERE id=1""")
+        with patch.object(app,'_is_beta_test_phone',return_value=True),patch.object(app,'send_whatsapp_text',AsyncMock()) as send:
+            self.assertTrue(await app._route_mechanic_message('40700100012','B117TST INTRAZIERE 1h'))
+            self.assertIn('nu am găsit o singură programare',send.await_args.args[1])
+        with closing(sqlite3.connect(self.path)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM scheduler_appointments WHERE status='programat'").fetchone()[0],2)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM scheduler_mechanic_messages').fetchone()[0],0)
+
 
 if __name__=='__main__':unittest.main()

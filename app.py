@@ -10727,8 +10727,10 @@ async def _route_mechanic_message(sender: str, body: str) -> bool:
             _record_mechanic_message(int(technician['id']),sender,body,None,'command_missing_reference','awaiting_reference')
             await send_whatsapp_text(sender,'Pentru ce mașină este mesajul? Trimite numărul de înmatriculare sau codul APP/devizului.')
             return True
-    # Numărul de înmatriculare + GATA este o comandă de mecanic, nu un mesaj de client.
-    ready_plate = _extract_plate(body) if re.search(r"\b(gata|terminat|finalizat)\b", normalized) else None
+    # Explicitly authorized test senders can identify a staff job by its plate,
+    # just as they already can by APP/deviz. Ordinary customers remain excluded.
+    ready_plate = _extract_plate(body) if (re.search(r"\b(gata|terminat|finalizat)\b", normalized)
+                  or beta_test and _looks_like_mechanic_delay(body)) else None
     if ready_plate and (technician or beta_test) and not appointment:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row

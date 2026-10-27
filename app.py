@@ -10489,8 +10489,13 @@ def _technician_for_sender(sender: str) -> dict | None:
     )
 
 
+def _normalize_mechanic_text(text: str) -> str:
+    return ''.join(c for c in unicodedata.normalize('NFKD',_normalize_text(text))
+                   if not unicodedata.combining(c))
+
+
 def _mechanic_duration_hours(text: str) -> float | None:
-    normalized = _normalize_text(text)
+    normalized = _normalize_mechanic_text(text)
     match = re.search(r"\b(\d+(?:[\.,]\d+)?)\s*(?:h|ora|ore)\b", normalized)
     if not match:
         match = re.search(r"\b(\d+)\s*(?:min|minut|minute)\b", normalized)
@@ -10501,8 +10506,10 @@ def _mechanic_duration_hours(text: str) -> float | None:
 
 
 def _looks_like_mechanic_delay(text: str) -> bool:
-    normalized = _normalize_text(text)
-    return bool(re.search(r"\b[iî]nt[aâ]rzi\w*|\bneterminat\w*", normalized))
+    normalized = _normalize_mechanic_text(text)
+    # A common transposition, "intraziere", must not send staff reports
+    # into customer intake. Sender identity is still checked by the router.
+    return bool(re.search(r"\b(?:intarzi\w*|intrazi\w*|intirzi\w*|neterminat\w*)", normalized))
 
 
 def _normalize_job_reference(value: object) -> str:

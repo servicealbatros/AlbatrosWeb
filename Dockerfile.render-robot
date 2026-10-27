@@ -14,7 +14,7 @@ COPY scripts/render_robot_runtime.py ./scripts/render_robot_runtime.py
 COPY scripts/render_single_app.py ./scripts/render_single_app.py
 COPY scripts/restore_cloud_migration.py ./scripts/restore_cloud_migration.py
 COPY scripts/dsm_session_keeper.py ./scripts/dsm_session_keeper.py
-RUN python -m unittest test_browser_resources.py test_render_runtime.py test_reception_bridge.py test_cloud_access.py test_cloud_migration.py test_provider_console.py test_schedule_import_control.py test_mechanic_schedule_clock.py test_dsm_session_vault.py test_autototal_oe_price_identity.py test_workshop_consumables.py test_transmission_service_policy.py test_offer_scope_validation.py test_customer_offer_text.py test_dsm_booking_approval.py test_dsm_accepted_offers.py test_dsm_billing_sync.py test_pre_reception.py test_pre_arrival_reminders.py test_dsm_pre_arrival.py
+RUN python -m unittest test_browser_resources.py test_render_runtime.py test_reception_bridge.py test_cloud_access.py test_cloud_migration.py test_provider_console.py test_schedule_import_control.py test_mechanic_schedule_clock.py test_dsm_session_vault.py test_autototal_oe_price_identity.py test_workshop_consumables.py test_transmission_service_policy.py test_offer_scope_validation.py test_customer_offer_text.py test_dsm_booking_approval.py test_dsm_accepted_offers.py test_dsm_billing_sync.py test_pre_reception.py test_pre_arrival_reminders.py test_dsm_pre_arrival.py test_mechanic_delay_intent.py
 RUN useradd --create-home --uid 10001 albatros \
     && mkdir -p /var/data/albatros /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
     && chown -R albatros:albatros /var/data/albatros /app

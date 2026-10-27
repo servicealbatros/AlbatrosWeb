@@ -460,6 +460,22 @@ def pre_arrival_status(request: Request):
     return status(DATA_DIR)
 
 
+@app.post('/api/dashboard/master/request-revisions')
+async def master_request_revision(request: Request):
+    _master_access(request)
+    from request_revisions import link_completion
+    body=await request.json()
+    try:
+        if not isinstance(body,dict) or type(body.get('apply',False)) is not bool:
+            raise ValueError('Date invalide.')
+        result=link_completion(DB_PATH,int(body['new_request_id']),int(body['old_request_id']),apply=body.get('apply',False))
+        if not result:
+            raise ValueError('Cererile nu pot fi asociate.')
+        return result
+    except (ValueError,KeyError,TypeError) as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
 @app.post('/api/dashboard/master/pre-arrival')
 async def pre_arrival_configure(request: Request):
     _master_access(request)
@@ -3478,11 +3494,14 @@ def requests():
     rows = list_requests(include_dsm_accepted=True)
     archived_ids = _archive_ids()
     rows = [row for row in rows if int(row["id"]) not in archived_ids]
+    from request_revisions import metadata as revision_metadata
+    revision_links=revision_metadata(DB_PATH)
 
     result = []
     status_map_changed = False
     for row in rows:
         item = dict(row)
+        item.update(revision_links.get(int(row['id']),{}))
         req_id = item.get("id") or item.get("request_id") or item.get("req_id")
 
         raw_priority = str(item.get("priority") or "").lower()
@@ -3584,7 +3603,10 @@ def dashboard_archive(request: Request, before: str | None = None):
             conn.row_factory=sqlite3.Row
             rows=[dict(r) for r in conn.execute('SELECT s.* FROM service_requests s JOIN request_archive a ON a.request_id=s.id ORDER BY s.id DESC')]
     from dsm_accepted_offers import offer_record, dashboard_dates
+    from request_revisions import metadata as revision_metadata
+    revision_links=revision_metadata(DB_PATH)
     for row in rows:
+        row.update(revision_links.get(int(row['id']),{}))
         if row.get('source') == 'dsm_accepted_offer':
             row.update(dashboard_dates(offer_record(DB_PATH, row['id'])))
     return {'rows':rows,'count':len(rows)}
@@ -3630,6 +3652,9 @@ def dashboard_archive_restore(request_id: int, request: Request):
     with sqlite3.connect(DB_PATH) as conn:
         _archive_init(conn)
         conn.execute('DELETE FROM request_archive WHERE request_id=?',(request_id,))
+        from request_revisions import schema as revision_schema
+        revision_schema(conn)
+        conn.execute('UPDATE request_revisions SET active=0 WHERE old_request_id=?',(request_id,))
     return {'ok':True}
 
 
@@ -9726,7 +9751,7 @@ function render() {
             }
         });
         tr.innerHTML = `
-            <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
+            <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}${row.replaces_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replaces_request_id)}">Completare #${esc(row.replaces_request_id)}</a>` : ''}${row.replacement_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replacement_request_id)}">Înlocuită de #${esc(row.replacement_request_id)}</a>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
             <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}${row.source === 'dsm_accepted_offer' ? `<br><strong style="color:${row.offer_validity === 'expired' ? '#b91c1c' : row.offer_validity === 'valid' ? '#166534' : '#92400e'}">${esc(row.offer_validity_message || 'Valabilitate de verificat')}</strong>` : ''}</td>
             <td>${esc(customer || "—")}</td>
             <td>${esc(phone || "—")}</td>
@@ -12028,6 +12053,7 @@ def _latest_request_context_for_sender(sender: str, case_id: str | None = None) 
 
     return (
         "[CONTEXT PERSISTENT ULTIMA CERERE]\\n"
+        f"ID cerere existentă: {request_row.get('id')}\\n"
         f"Client: {customer}\\n"
         f"VIN: {vin}\\n"
         f"Solicitare deja exprimată: {symptom}\\n"
@@ -12223,6 +12249,8 @@ async def _send_to_agent(
                     f"DSM AUTO IDENTIFIED: request_id={dsm_pending['id']}, "
                     f"registration={dsm_vehicle.get('registration')}, vin={dsm_vehicle.get('vin')}"
                 )
+                from request_revisions import link_completion
+                link_completion(DB_PATH,int(dsm_pending['id']))
 
     # Cazurile cu un VIN sigur din istoricul DSM pornesc singure căutarea
     # codurilor pentru lucrarea cerută. Oferta rămâne la verificare până când

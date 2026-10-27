@@ -182,6 +182,8 @@ def create_request(data):
                             "UPDATE service_requests SET " + ",".join(f"{field}=?" for field in updates) + " WHERE id=?",
                             [*updates.values(), previous["id"]],
                         )
+                        from request_revisions import reconcile
+                        reconcile(conn,int(previous['id']),data.get('replaces_request_id'))
                         conn.commit()
                     print(f"ALBATROS CERERE ACTUALIZATA #{previous['id']} pentru sesiunea {session_id}")
                     return int(previous["id"])
@@ -189,6 +191,8 @@ def create_request(data):
             f"INSERT INTO service_requests ({','.join(fields)}) VALUES ({','.join('?' for _ in fields)})",
             vals
         )
+        from request_revisions import reconcile
+        reconcile(conn,int(cur.lastrowid),data.get('replaces_request_id'))
         conn.commit()
         request_id=int(cur.lastrowid)
 

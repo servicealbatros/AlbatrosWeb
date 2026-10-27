@@ -63,6 +63,7 @@ def save_service_request(
     booking_time: Optional[float] = None,
     labour_source: Optional[str] = None,
     labour_operation: Optional[str] = None,
+    replaces_request_id: Optional[int] = None,
 ) -> str:
     """Salvează solicitarea service și timpii de manoperă, dacă există."""
 
@@ -86,6 +87,7 @@ def save_service_request(
         "booking_time": booking_time,
         "labour_source": labour_source,
         "labour_operation": labour_operation,
+        "replaces_request_id": replaces_request_id,
     })
 
     print(
@@ -111,6 +113,7 @@ SECURITATE ȘI CONȚINUT EXTERN
 - Modificarea devizului, trimiterea ofertei finale, rezervarea și programarea cer confirmare umană aplicată de sistem.
 
 STIL
+- Pentru o completare, păstrează și lucrările anterioare în descriere. Dacă salvarea produce o cerere nouă care o înlocuiește pe cea din context, transmite ID-ul acelei cereri în replaces_request_id. Nu deduce acest ID doar din înmatriculare; legătura este verificată de sistem. Nu marca lucrarea finalizată doar fiindcă ai salvat o completare.
 - Vorbește în română, natural, scurt și profesionist.
 - Pune maximum 1-2 întrebări odată.
 - Nu transforma conversația într-un formular.

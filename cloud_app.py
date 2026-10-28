@@ -11,6 +11,7 @@ os.environ.setdefault("ALLOW_REMOTE_DASHBOARD", "true")
 os.environ.setdefault("ALLOWED_RECEPTION_IPS", "")
 os.environ.setdefault("DASHBOARD_COOKIE_SECURE", "true")
 os.environ.setdefault("ROBOT_ENABLED", "false")
+os.environ.setdefault('ALBATROS_GATEWAY_ONLY', 'true')
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -18,6 +19,7 @@ from app import app as backend
 from security import POLICY, SecurityViolation
 from reception_bridge import bridge_url, dashboard_route, forward, verify_request
 from navigation_ui import with_navigation_style
+from bounded_http import BodyLimitMiddleware, read_limited_body
 
 BASE = Path(__file__).resolve().parent
 
@@ -35,8 +37,12 @@ def is_authenticated(request):
 class CloudGateway:
     def __init__(self, application):
         self.application = application
+        self.bounded = BodyLimitMiddleware(self.handle)
 
     async def __call__(self, scope, receive, send):
+        return await self.bounded(scope, receive, send)
+
+    async def handle(self, scope, receive, send):
         if scope["type"] == "lifespan":
             return await self.application(scope, receive, send)
         if scope["type"] != "http":
@@ -72,7 +78,7 @@ class CloudGateway:
                 import hashlib
                 import hmac
                 secret = os.getenv('WHATSAPP_APP_SECRET', '')
-                body = await request.body()
+                body = await read_limited_body(request)
                 expected = 'sha256=' + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
                 if not secret or not hmac.compare_digest(expected, request.headers.get('x-hub-signature-256', '')):
                     response = JSONResponse({'detail': 'Invalid webhook signature'}, status_code=401)
@@ -84,7 +90,7 @@ class CloudGateway:
             # Re-sign internally with a fresh nonce; never consume one twice.
             try:
                 target = path + ('?' + request.url.query if request.url.query else '')
-                actor = verify_request(request.headers, method, target, await request.body())
+                actor = verify_request(request.headers, method, target, await read_limited_body(request))
             except (ValueError, TypeError):
                 response = JSONResponse({'detail': 'Invalid bridge signature'}, status_code=403)
             else:

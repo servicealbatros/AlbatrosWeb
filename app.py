@@ -29,6 +29,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from navigation_ui import with_navigation_style
+from bounded_http import BodyLimitMiddleware, read_limited_body
 from pydantic import BaseModel, Field
 
 from agent import chat
@@ -150,9 +151,7 @@ async def security_rate_limit(request: Request, call_next):
     if request.headers.get('x-albatros-signature'):
         from reception_bridge import dashboard_route, verify_request, MAX_BODY
         try:
-            body = await request.body()
-            if len(body) > MAX_BODY:
-                return JSONResponse({'detail': 'Payload too large'}, status_code=413)
+            body = await read_limited_body(request, MAX_BODY)
             target = request.url.path + ('?' + request.url.query if request.url.query else '')
             bridge_user = verify_request(request.headers, request.method, target, body)
             if not (dashboard_route(request.url.path) or
@@ -985,72 +984,31 @@ def _conversation_digits(value: str) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
 def _log_conversation(phone: str, direction: str, text: str, case_id: str | None = None) -> None:
+    from conversation_log_index import ConversationLog
     try:
-        row = {
+        ConversationLog(CONVERSATION_LOG_FILE).append({
             "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "phone": _conversation_digits(phone),
-            "direction": direction,
-            "text": str(text or ""),
-            "case_id": str(case_id or ""),
-        }
-        with CONVERSATION_LOG_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            "phone": _conversation_digits(phone), "direction": direction,
+            "text": str(text or ""), "case_id": str(case_id or ""),
+        })
     except Exception as exc:
         print("CONVERSATION LOG ERROR:", repr(exc))
 
 
 def _has_open_whatsapp_window(phone: str, *, hours: int = 24) -> bool:
-    """A free-form outbound message is allowed only after a recent inbound reply."""
-    def canonical(value: str) -> str:
-        value_digits = _conversation_digits(value)
-        if len(value_digits) == 10 and value_digits.startswith("0"):
-            return "40" + value_digits[1:]
-        if len(value_digits) == 9 and value_digits.startswith("7"):
-            return "40" + value_digits
-        return value_digits
-
-    digits = canonical(phone)
-    if not digits or not CONVERSATION_LOG_FILE.exists():
-        return False
-    cutoff = datetime.now() - timedelta(hours=hours)
+    from conversation_log_index import ConversationLog
     try:
-        lines = CONVERSATION_LOG_FILE.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    for line in reversed(lines):
-        try:
-            item = json.loads(line)
-            if canonical(item.get("phone")) != digits or item.get("direction") != "client":
-                continue
-            timestamp = datetime.fromisoformat(str(item.get("timestamp") or ""))
-            return timestamp >= cutoff
-        except (ValueError, TypeError, json.JSONDecodeError):
-            continue
-    return False
+        return ConversationLog(CONVERSATION_LOG_FILE).has_window(phone, hours=hours)
+    except (OSError, sqlite3.Error):
+        return False  # An unavailable history cannot authorize a free-form send.
 
-def _load_conversation_for_request(request_row: dict) -> tuple[list[dict], bool]:
-    if not CONVERSATION_LOG_FILE.exists():
-        return [], False
-    phone = _conversation_digits(request_row.get("phone") or request_row.get("telefon") or "")
-    session_id = str(request_row.get("session_id") or "").strip()
-    all_rows = []
+
+def _load_conversation_for_request(request_row: dict, *, before=None, limit=100) -> tuple[list[dict], bool]:
+    from conversation_log_index import ConversationLog
     try:
-        for line in CONVERSATION_LOG_FILE.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except Exception:
-                continue
-            all_rows.append(item)
-    except Exception:
+        return ConversationLog(CONVERSATION_LOG_FILE).page(request_row, before=before, limit=limit)
+    except (OSError, sqlite3.Error):
         return [], False
-    if session_id:
-        strict = [r for r in all_rows if str(r.get("case_id") or "").strip() == session_id]
-        if strict:
-            return strict, True
-    rows = [r for r in all_rows if _conversation_digits(r.get("phone")) == phone]
-    return rows, False
 
 
 # ---------------------------------------------------------
@@ -3055,8 +3013,13 @@ async def startup():
     init_db()
     init_scheduler_db(DB_PATH)
     ensure_automation_tables(DB_PATH)
+    from provider_test_console import DRIVER
+    await DRIVER.start()
+    app.state.resource_cleanup_task = asyncio.create_task(_resource_cleanup_loop())
     if env_bool('ALBATROS_GATEWAY_ONLY', False):
         return
+    from conversation_log_index import ConversationLog
+    await asyncio.to_thread(ConversationLog(CONVERSATION_LOG_FILE).sync)
     app.state.robot_reaper_task = asyncio.create_task(_robot_reaper_loop())
     app.state.delay_notification_task = asyncio.create_task(_delay_notification_loop())
     app.state.dsm_schedule_automation_task = asyncio.create_task(_dsm_schedule_automation_loop())
@@ -3065,55 +3028,33 @@ async def startup():
     app.state.pre_arrival_task = asyncio.create_task(_pre_arrival_loop())
 
 
+async def _resource_cleanup_loop():
+    from provider_test_console import cleanup_access_tokens
+    while True:
+        POLICY.cleanup_expired()
+        cleanup_access_tokens()
+        await asyncio.sleep(60)
+
+
 @app.on_event("shutdown")
 async def shutdown():
-    arrival_task=getattr(app.state,'pre_arrival_task',None)
-    if arrival_task:
-        arrival_task.cancel()
-        try:
-            await arrival_task
-        except asyncio.CancelledError:
-            pass
-    accepted_task = getattr(app.state, 'dsm_accepted_offers_task', None)
-    if accepted_task:
-        accepted_task.cancel()
-        try:
-            await accepted_task
-        except asyncio.CancelledError:
-            pass
-    for task in list(globals().get("_whatsapp_processing_tasks", set())):
-        task.cancel()
-    buffered = list(globals().get("_buffer_task_by_sender", {}).values())
-    for task in buffered:
-        task.cancel()
-    task = getattr(app.state, "robot_reaper_task", None)
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    delay_task = getattr(app.state, "delay_notification_task", None)
-    if delay_task:
-        delay_task.cancel()
-        try:
-            await delay_task
-        except asyncio.CancelledError:
-            pass
-    schedule_task = getattr(app.state, "dsm_schedule_automation_task", None)
-    if schedule_task:
-        schedule_task.cancel()
-        try:
-            await schedule_task
-        except asyncio.CancelledError:
-            pass
-    mechanic_task = getattr(app.state, 'mechanic_schedule_automation_task', None)
-    if mechanic_task:
-        mechanic_task.cancel()
-        try:
-            await mechanic_task
-        except asyncio.CancelledError:
-            pass
+    from provider_test_console import shutdown_browser
+    names = ('pre_arrival_task', 'dsm_accepted_offers_task', 'robot_reaper_task',
+             'delay_notification_task', 'dsm_schedule_automation_task',
+             'mechanic_schedule_automation_task', 'resource_cleanup_task')
+    tasks = {task for name in names if (task := getattr(app.state, name, None))}
+    tasks.update(globals().get('_whatsapp_processing_tasks', set()))
+    tasks.update(globals().get('_buffer_task_by_sender', {}).values())
+    crawler = globals().get('_crawler_task')
+    if crawler is not None:
+        tasks.add(crawler)
+    try:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await shutdown_browser()
 
 
 @app.get("/")
@@ -3391,7 +3332,7 @@ async def api_talon(
             detail="Folosește JPG, PNG sau WEBP."
         )
 
-    image = await file.read()
+    image = await file.read(12 * 1024 * 1024 + 1)
 
     if len(image) > 12 * 1024 * 1024:
         raise HTTPException(
@@ -3939,12 +3880,12 @@ async def set_request_status(
 # ---------------------------------------------------------
 
 @app.get("/conversatie/{request_id}", response_class=HTMLResponse)
-def request_conversation_page(request_id: int):
+def request_conversation_page(request_id: int, before: int | None = None, limit: int = 100):
     request_row = _request_by_id(request_id)
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost găsită.")
 
-    messages, strict_match = _load_conversation_for_request(request_row)
+    messages, strict_match = _load_conversation_for_request(request_row, before=before, limit=limit)
     customer = request_row.get("customer_name") or request_row.get("name") or request_row.get("client") or "—"
     customer_phone = request_row.get("phone") or request_row.get("telefon") or ""
     phone = request_row.get("phone") or request_row.get("telefon") or "—"
@@ -3962,6 +3903,9 @@ def request_conversation_page(request_id: int):
         ts = _escape_html(msg.get("timestamp") or "")
         bubbles.append(f'<div class="msg {cls}"><div class="meta">{who} · {ts}</div><div class="bubble">{body}</div></div>')
 
+    pagination = f'<a href="/conversatie/{request_id}">Cele mai recente mesaje</a>'
+    if messages:
+        pagination += f' · <a href="/conversatie/{request_id}?before={messages[0]["_message_id"]}&limit={max(1, min(limit, 200))}">Mesaje mai vechi</a>'
     history_html = "".join(bubbles) if bubbles else '<div class="empty">Nu există încă mesaje salvate pentru această cerere.</div>'
     note = "Istoric pe sesiunea cererii." if strict_match else "Istoric după numărul de telefon; pentru cererile noi se salvează și sesiunea."
 
@@ -3978,7 +3922,7 @@ body{{font-family:Arial;background:#f4f6f8;color:#18212b;margin:0}}.wrap{{width:
 .empty{{background:#fff;border:1px dashed #cbd5e1;border-radius:10px;padding:18px;color:#64748b}}@media(max-width:650px){{.grid{{grid-template-columns:1fr}}.bubble{{max-width:92%}}}}
 </style></head><body><div class="wrap"><div class="top"><div><h1>Conversație cerere #{request_id}</h1><div style="color:#6b7280">Pentru verificare de către consilier.</div></div><a class="back" href="/cereri">Înapoi</a></div>
 <div class="card"><div class="grid"><div><div class="label">Client</div><div class="value">{_escape_html(customer)}</div></div><div><div class="label">Telefon</div><div class="value">{_escape_html(phone)}</div></div><div><div class="label">Nr. auto</div><div class="value">{_escape_html(registration)}</div></div><div><div class="label">Solicitare</div><div class="value">{_escape_html(symptom)}</div></div></div><div class="note">{_escape_html(note)}</div></div>
-<div style="margin-top:18px">{history_html}</div></div></body></html>
+<div class="note">{pagination}</div><div style="margin-top:18px">{history_html}</div></div></body></html>
 """
 
 # ---------------------------------------------------------
@@ -13321,7 +13265,7 @@ async def receive_whatsapp_webhook(request: Request):
         POLICY.logger.write(action="whatsapp_webhook", result="ignored", success=True,
                             website="graph.facebook.com", error="robot_disabled")
         return JSONResponse({"status": "ignored", "reason": "robot_disabled"}, status_code=503)
-    body = await request.body()
+    body = await read_limited_body(request)
     signature = request.headers.get("X-Hub-Signature-256")
     if not POLICY.verify_meta_signature(body, signature):
         POLICY.metrics.inc("blocked_actions")
@@ -13372,3 +13316,6 @@ async def dsm_vehicle_lookup(registration: str, request: Request):
 # Orice flux viitor care muta cererea in "acceptat" trebuie sa verifice:
 #     _request_has_approved_offer(request_id) == True
 # inainte de schimbarea statusului.
+
+
+app.add_middleware(BodyLimitMiddleware)

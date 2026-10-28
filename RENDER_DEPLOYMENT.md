@@ -142,12 +142,112 @@ Cloud device management and robot administrator endpoints are never delegated.
 Mutations require same-origin requests and are never automatically retried.
 
 All operational records remain in the worker's existing database to avoid diverging
-requests or schedules. If the laptop or tunnel is offline, operations return 503;
-there is no writable stale fallback. ROBOT_ENABLED stays false on Render, so its
-background automations cannot duplicate those on the worker. The Meta webhook can
+requests or schedules. If the worker or tunnel is offline, operations return 503;
+there is no writable stale fallback. Gateway-only mode suppresses operational
+background automations; ROBOT_ENABLED alone does not select a runtime role. The Meta webhook can
 be relayed after its signature is verified, preserving the original signature.
 
 POST /api/admin/worker-backup requires the cloud administrator bearer token and a
 SHA256 checksum. It stores a private validated recovery archive on the persistent
 disk, without extracting it or replacing live databases. SQLite files are copied
 using the SQLite backup API; snapshots are not a second active robot.
+
+## Resource lifecycle and runtime roles
+
+The source changes below have been tested locally; they do not change a live
+Render service, plan, customer record or messaging configuration.
+
+| Entry point / role | Processes and intended work |
+| --- | --- |
+| `render.yaml`: `cloud_app:app`, role `gateway` | One gateway application; no Chromium/Xvfb/session keeper. `ALBATROS_GATEWAY_ONLY=true` suppresses operational background tasks. |
+| Docker supervisor, role `robot` | Existing single application with two listeners, plus managed Chromium/Xvfb and one session-maintenance helper. The helper keeps sessions and performs idle housekeeping even without a vault key. |
+| Docker supervisor, role `probe` | Synthetic compatibility browser probe. It is not a lightweight gateway or an operational messaging robot. |
+
+Set `ALBATROS_RUNTIME_ROLE` explicitly for a supervisor deployment. If omitted,
+the previous `ALBATROS_RENDER_MODE=production` selects `robot`; other modes select
+`probe`. `ROBOT_ENABLED=false` keeps its existing business-processing meaning:
+the robot role still pays the browser's resource cost and maintains supplier
+sessions. Choosing the gateway role avoids starting that browser entirely.
+The existing single-application-process deployment has been preserved.
+
+Keepalive requests now copy only response metadata and dispose the Playwright
+response in `finally`, before any login navigation. Application-owned CDP drivers
+serialize initialization, stop failed/stale drivers and stop at application
+shutdown. They never close the Chromium instance to which they attach.
+
+Request limits apply to actual ASGI bytes before multipart parsing, including
+chunked requests and false/missing Content-Length. The default limit is 20 MiB;
+the authenticated backup route retains its 256 MiB limit. Talon uploads read
+at most 12 MiB + 1 byte. HMAC checks still use the original request bytes.
+Bridge replies stream in bounded chunks; HTML style injection buffers at most
+64 KiB of the head and closes the upstream connection on completion, error or
+disconnect. Expiring rate-limit, confirmation and console-access maps are
+cleaned periodically. Capacity limits reject new keys instead of evicting live
+rate-limit buckets or authorizations.
+
+Conversation reads use `conversation_log_index.sqlite3` beside the original
+JSONL recovery log. Import checkpoints commit every 500 records and resume
+without duplicating those records. Every legacy line is retained verbatim,
+including malformed lines; incomplete trailing records wait for completion.
+Truncation/rotation retains previously imported history. Imports stream one
+record at a time, so an unusually large individual legacy record can still
+allocate that record's size. Pages use indexed phone/case predicates and keyset
+pagination, default 100 and maximum 200 records, in original chronology.
+The 24-hour WhatsApp window uses indexed valid inbound timestamps only.
+The first index build needs additional disk space and startup time; keep the
+JSONL and index together in backups if logs are rotated.
+
+Housekeeping retains activity leases, idle/safe-page checks and login/CAPTCHA
+protection. `browser_memory_health.json` and the existing master status expose
+`enabled`, actual fresh `running`, `heartbeat_at`, `last_checked_at`, `pid` and
+`stale`. An absent or invalid vault key does not disable housekeeping; invalid
+keys appear as `vault_error` in DSM session health. A stale heartbeat expires
+after 120 seconds, so configuration alone never proves the helper is running.
+
+### Reproducing local resource checks
+
+Use the pinned `requirements.txt` dependencies. The Dockerfile runs the existing
+resource/runtime/provider/bridge/security suites plus the new regressions.
+The opt-in synthetic probe owns only fresh local browser fixtures:
+
+```powershell
+python -m unittest test_resource_lifecycle test_resource_bounds test_conversation_log_index test_browser_resources test_render_runtime test_provider_sessions test_provider_console test_reception_bridge test_cloud_access
+python scripts/resource_regression_probe.py --requests 100 --failures 15 --records 30000 --chromium
+```
+
+The probe compares undisposed/disposed 1 MiB responses, checks owned processes
+after repeated real CDP failures and reconnects, verifies cookies survive driver
+shutdown/reconnect and response disposal, and imports a synthetic conversation
+history. Its JSON report includes every process in the owned descendant tree,
+summed RSS, Windows private commit, and cgroup memory when available. Summed RSS
+can count shared pages more than once; it is not unique physical memory.
+Windows runs cannot validate Linux cgroup limits, Xvfb or real `flock` behavior.
+A fresh browser fixture also excludes authenticated supplier pages, live traffic
+and concurrent jobs. It cannot establish that a 512 MiB deployment fits.
+
+Measured on Windows with Python 3.14.7 and all 12 direct pinned package versions
+matching `requirements.txt` (2026-10-28):
+
+| Synthetic workload | Complete owned-tree measurement |
+| --- | --- |
+| 100 undisposed 1 MiB responses | RSS 158.54 → 258.96 MiB; private commit 132.42 → 230.90 MiB. |
+| 100 disposed 1 MiB responses | RSS samples 160.30, 168.34, 174.01, 168.67, 174.73 MiB; private commit 134.79 → 147.16 MiB. Non-monotonic allocations remain; response bodies no longer accumulate one per request. |
+| 15 real CDP connection failures | One Python process after every failure; no remaining driver processes. |
+| 10 real CDP driver reconnects | Exactly one owned Node driver after each reconnect; external Chromium and both fixture cookies survived. Chromium's own process count varied normally. |
+| Fresh Chromium fixture | 733.89 MiB summed tree RSS / 434.66 MiB private commit at the baseline sample. This is not a full robot or Linux capacity measurement. |
+| Import 30,000 JSONL records (18,203,400 bytes) | 4.91 seconds; Python RSS increased about 1.50 MiB. |
+
+Raw measurements are produced under `test_runtime_data/resource-probe.json` and
+include per-process samples. Docker/Python 3.13 Linux container execution and
+cgroup measurements still need to be run in that environment; neither Docker
+nor Python 3.13 is installed on this workstation.
+
+Final verification ran all 26 modules named by `Dockerfile.render-robot`: 264
+tests completed, 263 passed and the real Linux-only flock test was skipped.
+A focused run covering the affected provider/bridge/security behavior plus
+WhatsApp intake and crawler regressions passed 94 tests. All 38 new regression
+tests also passed with ResourceWarnings enabled and emitted none.
+The broader suite exposes existing unclosed-SQLite-connection ResourceWarnings
+in older database/scheduler code and fixtures; these remain a follow-up beyond
+the six resource paths addressed here. The final full-run log is
+`test_runtime_data/final-full-resource-suite.log`.

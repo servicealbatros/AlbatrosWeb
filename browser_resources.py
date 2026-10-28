@@ -1,8 +1,8 @@
 """Idle-only Chromium housekeeping; never clear cookies or restart the browser.
 
 Linux flock leases prevent maintenance racing with HTTP actions, supplier
-workers and the crawler. The existing session keeper runs this code, so no
-additional browser/Playwright process is needed.
+workers and the crawler. The shared maintenance process runs with or without
+credential-vault configuration; it never launches a second Chromium.
 """
 import asyncio
 from contextlib import asynccontextmanager, contextmanager, closing
@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 def enabled():
     return (os.name == 'posix' and os.getenv('ALBATROS_RENDER_MODE') == 'production'
+            and os.getenv('ALBATROS_RUNTIME_ROLE', 'robot') != 'gateway'
             and os.getenv('ALBATROS_BROWSER_MEMORY_GUARD', 'true') == 'true')
 
 
@@ -115,7 +116,14 @@ def memory_health(root):
         result = json.loads((Path(root) / 'browser_memory_health.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         result = {'status': 'waiting'}
-    return {**result, 'memory': memory_sample(), 'enabled': enabled()}
+    if not isinstance(result, dict):
+        result = {'status': 'state_unreadable'}
+    heartbeat = result.get('heartbeat_at')
+    running = bool(enabled() and result.get('running') and isinstance(heartbeat, (int, float))
+                   and 0 <= time.time() - heartbeat < 120)
+    return {**result, 'memory': memory_sample(), 'enabled': enabled(),
+            'running': running, 'stale': bool(enabled() and not running),
+            'last_checked_at': result.get('checked_at')}
 
 
 def busy_reason(root):
@@ -176,12 +184,18 @@ class BrowserMemoryGuard:
         self.last_gc = self.last_reload = self.idle_since = None
         self.reload_disabled = False
         self.last_action = None
+        self.last_checked_at = None
 
     def record(self, status, **details):
         sample = memory_sample()
         if status in {'collected', 'duplicate_closed', 'home_reloaded', 'session_needs_check'}:
             self.last_action = {'status': status, 'at': time.time(), 'after': sample, **details}
-        result = {'checked_at': time.time(), 'status': status, 'memory': sample, **details}
+        now = time.time()
+        if status not in {'starting', 'stopped'}:
+            self.last_checked_at = now
+        result = {'checked_at': self.last_checked_at, 'heartbeat_at': now,
+                  'running': enabled() and status != 'stopped', 'pid': os.getpid(),
+                  'status': status, 'memory': sample, **details}
         if self.last_action:
             result['last_action'] = self.last_action
         path = self.root / 'browser_memory_health.json'

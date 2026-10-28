@@ -207,15 +207,23 @@ def probe_browser(keep_provider_tabs=False):
             finally:
                 if not keep_provider_tabs:
                     page.close()
-        if state_key:
-            os.environ.setdefault('ALBATROS_BROWSER_PROFILE_DIR', str(profile))
-            spawn([sys.executable, str(BASE / 'scripts/dsm_session_keeper.py')])
+        start_maintenance(profile)
         REPORT.update(phase='browser_ready', chromium=True, cdp=True, intercars_extension=True,
                       provider_sessions='unverified', public_provider_pages=reachability)
         print(json.dumps(REPORT), flush=True)
         if os.getenv('ALBATROS_RENDER_MODE') == 'production':
             path = Path(os.environ['ALBATROS_DATA_DIR']) / 'render_runtime_health.json'
             path.write_text(json.dumps(REPORT), encoding='utf-8')
+
+
+def start_maintenance(profile):
+    key = os.getenv('ALBATROS_PROVIDER_STATE_KEY')
+    if os.getenv('ALBATROS_RENDER_MODE') == 'production' or key:
+        os.environ.setdefault('ALBATROS_BROWSER_PROFILE_DIR', str(profile))
+        process = spawn([sys.executable, str(BASE / 'scripts/dsm_session_keeper.py')])
+        REPORT['maintenance_process_started'] = True
+        REPORT['credential_vault_configured'] = bool(key)
+        return process
 
 
 def core_environment():
@@ -256,12 +264,29 @@ def prepare_operational_data():
         (target / 'migration_validation.json').read_text())['counts'])
 
 
+def runtime_role():
+    role = os.getenv('ALBATROS_RUNTIME_ROLE') or (
+        'robot' if os.getenv('ALBATROS_RENDER_MODE', 'probe') == 'production' else 'probe')
+    if role not in {'gateway', 'robot', 'probe'}:
+        raise ValueError('ALBATROS_RUNTIME_ROLE must be gateway, robot or probe')
+    return role
+
+
 def main():
     print('Starting isolated Render runtime', flush=True)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    production = os.getenv('ALBATROS_RENDER_MODE', 'probe') == 'production'
-    if production:
+    role = runtime_role()
+    production = role == 'robot'
+    REPORT.update(runtime_role=role, browser_required=role != 'gateway',
+                  business_robot_env_enabled=os.getenv('ROBOT_ENABLED', 'false').lower() == 'true')
+    if role == 'gateway':
+        env = os.environ.copy()
+        env.update(ALBATROS_GATEWAY_ONLY='true', ALBATROS_RUNTIME_ROLE='gateway')
+        spawn([sys.executable, '-m', 'uvicorn', 'cloud_app:app', '--host', '0.0.0.0',
+               '--port', os.getenv('PORT', '10000'), '--workers', '1'], env)
+    elif production:
+        os.environ['ALBATROS_RENDER_MODE'] = 'production'
         os.environ.setdefault('ALBATROS_DATA_DIR', '/var/data/albatros')
         prepare_operational_data()
         if not os.getenv('RECEPTION_BRIDGE_SECRET'):
@@ -272,13 +297,14 @@ def main():
         server = ThreadingHTTPServer(('0.0.0.0', int(os.getenv('PORT', '10000'))), ProbeHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print('Compatibility probe HTTP endpoint is ready', flush=True)
-    try:
-        probe_browser(keep_provider_tabs=production and os.getenv('ALBATROS_KEEP_PROVIDER_TABS', 'true') == 'true')
-    except Exception as error:
-        REPORT.update(phase='failed', error=type(error).__name__ + ': ' + str(error)[:250])
-        print(json.dumps(REPORT), flush=True)
-        if production:
-            stop()
+    if role != 'gateway':
+        try:
+            probe_browser(keep_provider_tabs=production and os.getenv('ALBATROS_KEEP_PROVIDER_TABS', 'true') == 'true')
+        except Exception as error:
+            REPORT.update(phase='failed', error=type(error).__name__ + ': ' + str(error)[:250])
+            print(json.dumps(REPORT), flush=True)
+            if production:
+                stop()
     while True:
         if any(process.poll() is not None for process in CHILDREN):
             print('An owned component exited; stopping the service', flush=True)

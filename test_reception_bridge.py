@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from starlette.requests import Request
@@ -52,13 +52,14 @@ class BridgeTests(unittest.TestCase):
             async def receive():
                 return {'type':'http.request','body':b'{}','more_body':False}
             client = AsyncMock()
-            client.request.side_effect = httpx.ConnectError('unavailable')
-            client.__aenter__.return_value = client
+            client.build_request = Mock(return_value=object())
+            client.send.side_effect = httpx.ConnectError('unavailable')
             with patch('reception_bridge.httpx.AsyncClient', return_value=client):
                 response = await forward(Request(scope, receive), 'counselor')
             self.assertEqual(response.status_code,503)
-            self.assertEqual(client.request.call_count,1)
-            headers = client.request.call_args.kwargs['headers']
+            self.assertEqual(client.send.call_count,1)
+            client.aclose.assert_awaited_once()
+            headers = client.build_request.call_args.kwargs['headers']
             self.assertNotIn('authorization', headers)
             self.assertNotIn('cookie', headers)
         asyncio.run(run())

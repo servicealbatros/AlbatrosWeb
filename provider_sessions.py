@@ -157,9 +157,20 @@ async def reconnect(page, credentials, provider):
     return 'login_failed'
 
 
+async def session_response_metadata(request, url, *, timeout):
+    """Copy only metadata; release the Playwright-owned response body first."""
+    response = None
+    try:
+        response = await request.get(url, timeout=timeout)
+        return response.status, response.url, response.ok
+    finally:
+        if response is not None:
+            await response.dispose()
+
+
 class ProviderSessionKeeper:
-    def __init__(self, profile, key):
-        self.vaults = {p: ProviderLoginVault(profile, key, p) for p in DOMAINS if p != 'DSM'}
+    def __init__(self, profile, key=None):
+        self.vaults = {p: ProviderLoginVault(profile, key, p) if key else None for p in DOMAINS if p != 'DSM'}
         self.attempts = {}
         self.error_reloads = {}
         self.last_keepalive = {}
@@ -179,25 +190,26 @@ class ProviderSessionKeeper:
             return None
         self.last_keepalive['AutoTotal'] = now
         try:
-            response = await page.request.get(AUTOTOTAL_HOME, timeout=10000)
+            status, url, ok = await session_response_metadata(page.request, AUTOTOTAL_HOME, timeout=10000)
         except Exception:
             self.last_keepalive['AutoTotal'] = now - 540
             return 'upstream_unavailable'
-        if response.status in {401, 403} or urlparse(response.url).path.rstrip('/') == '/login':
+        if status in {401, 403} or urlparse(url).path.rstrip('/') == '/login':
             return 'login_required'
-        return 'ok' if response.ok else 'upstream_unavailable'
+        return 'ok' if ok else 'upstream_unavailable'
 
     async def check(self, context):
         result = {}
         for provider, vault in self.vaults.items():
+            configured = bool(vault and vault.path.exists())
             try:
-                state = {'auto_login_configured': vault.path.exists(), 'status': 'tab_missing', 'checked_at': time.time()}
+                state = {'auto_login_configured': configured, 'status': 'tab_missing', 'checked_at': time.time()}
                 if provider == 'Haynes':
                     state['status'] = 'standby'
                     result[provider] = state
                     continue
                 pages = [p for p in context.pages if not p.is_closed() and provider_url(provider, p.url)]
-                if (provider == 'AutoTotal' and not pages and vault.path.exists() and self.idle()
+                if (provider == 'AutoTotal' and not pages and configured and self.idle()
                         and time.monotonic() - self.last_restore.get(provider, -60) >= 60):
                     self.last_restore[provider] = time.monotonic()
                     page = await context.new_page()
@@ -248,7 +260,7 @@ class ProviderSessionKeeper:
                         state['status'] = 'unverified'
                         continue
                     state['status'] = 'login_required'
-                    if not vault.path.exists():
+                    if not configured:
                         continue
                     if not self.idle():
                         state['status'] = 'retry_wait'
@@ -268,5 +280,5 @@ class ProviderSessionKeeper:
                     break
                 result[provider] = state
             except Exception:
-                result[provider] = {"auto_login_configured": vault.path.exists(), "status": "browser_unavailable", "checked_at": time.time()}
+                result[provider] = {"auto_login_configured": configured, "status": "browser_unavailable", "checked_at": time.time()}
         return result

@@ -171,19 +171,49 @@ class Metrics:
 
 
 class RateLimiter:
-    def __init__(self):
+    def __init__(self, max_keys=10000):
         self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._expires = {}
+        self._windows = {}
+        self.max_keys = max_keys
+        self._next_cleanup = 0.0
         self._lock = threading.Lock()
 
+    def _cleanup(self, now):
+        for key, expiry in list(self._expires.items()):
+            if expiry <= now:
+                self._events.pop(key, None)
+                self._windows.pop(key, None)
+                del self._expires[key]
+        self._next_cleanup = now + 1
+
+    def cleanup(self):
+        with self._lock:
+            self._cleanup(time.monotonic())
+
     def allow(self, key: str, limit: int, window_seconds: int) -> bool:
+        if limit <= 0 or window_seconds <= 0:
+            return False
+        if len(key) > 256:
+            key = sha256(key.encode()).hexdigest()
         now = time.monotonic()
         with self._lock:
+            if now >= self._next_cleanup or (key not in self._events and len(self._events) >= self.max_keys):
+                self._cleanup(now)
+            # Never evict an active client's bucket to admit a new identity:
+            # doing so would let rotating identities reset an existing limit.
+            if key not in self._events and len(self._events) >= self.max_keys:
+                return False
             q = self._events[key]
-            while q and q[0] <= now - window_seconds:
+            window = max(window_seconds, self._windows.get(key, 0))
+            self._windows[key] = window
+            while q and q[0] <= now - window:
                 q.popleft()
-            if len(q) >= limit:
+            self._expires[key] = (q[-1] if q else now) + window
+            if sum(stamp > now - window_seconds for stamp in q) >= limit:
                 return False
             q.append(now)
+            self._expires[key] = now + window
             return True
 
 
@@ -206,6 +236,8 @@ class SecurityPolicy:
         self.metrics = Metrics()
         self.rate_limiter = RateLimiter()
         self._confirmations: dict[str, Confirmation] = {}
+        self._confirmation_lock = threading.RLock()
+        self.max_confirmations = 4096
         self._robot_override: bool | None = None
         self._robot_state_file = self.data_dir / "robot_enabled.state.json"
         self.devices = DashboardDevices(self.data_dir / 'dashboard_access.db')
@@ -343,10 +375,23 @@ class SecurityPolicy:
         if ACTION_LEVEL[action] != AccessLevel.CONFIRMATION_REQUIRED:
             raise SecurityViolation("Confirmation is valid only for Level 2 actions")
         token = secrets.token_urlsafe(32)
-        self._confirmations[token] = Confirmation(token, action.value, str(resource_id), user, time.time() + ttl_seconds)
+        with self._confirmation_lock:
+            self.cleanup_expired()
+            if len(self._confirmations) >= self.max_confirmations:
+                raise SecurityViolation('Too many pending confirmations; retry after expiry')
+            self._confirmations[token] = Confirmation(token, action.value, str(resource_id), user,
+                                                      time.time() + ttl_seconds)
         self.metrics.inc("human_confirmations")
         self.logger.write(action=action.value, result="confirmed", success=True, confirmation_required=True, confirmation_user=user)
         return token
+
+    def cleanup_expired(self):
+        self.rate_limiter.cleanup()
+        with self._confirmation_lock:
+            now = time.time()
+            for token, item in list(self._confirmations.items()):
+                if item.used or item.expires_at <= now:
+                    del self._confirmations[token]
 
     def authorize(self, action: Action, *, resource_id: str = "", confirmation_token: str | None = None,
                   session_id: str | None = None, vin: str | None = None) -> None:
@@ -356,13 +401,16 @@ class SecurityPolicy:
             self.logger.write(action=action.value, result="blocked", success=False, session_id=session_id, vin=vin, error="human_only_or_beta_block")
             raise SecurityViolation("Action is human-only and blocked")
         if level == AccessLevel.CONFIRMATION_REQUIRED:
-            item = self._confirmations.get(confirmation_token or "")
-            valid = bool(item and not item.used and item.expires_at >= time.time() and item.action == action.value and item.resource_id == str(resource_id))
+            with self._confirmation_lock:
+                self.cleanup_expired()
+                item = self._confirmations.get(confirmation_token or "")
+                valid = bool(item and item.expires_at > time.time() and item.action == action.value and item.resource_id == str(resource_id))
+                if valid:
+                    del self._confirmations[confirmation_token]
             if not valid:
                 self.metrics.inc("blocked_actions")
                 self.logger.write(action=action.value, result="confirmation_required", success=False, session_id=session_id, vin=vin, confirmation_required=True)
                 raise ConfirmationRequired("Valid human confirmation required")
-            item.used = True
 
     def require_robot(self, action: Action, **context: Any) -> None:
         if not self.robot_enabled:

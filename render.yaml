@@ -53,6 +53,10 @@ services:
         value: /var/data/albatros/offering
       - key: ROBOT_ENABLED
         value: "false"
+      - key: ALBATROS_RUNTIME_ROLE
+        value: gateway
+      - key: ALBATROS_GATEWAY_ONLY
+        value: "true"
       - key: BETA_MODE
         value: "true"
       - key: ALLOW_REMOTE_DASHBOARD

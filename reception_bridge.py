@@ -14,11 +14,13 @@ import time
 from urllib.parse import urlparse
 
 import httpx
-from starlette.responses import JSONResponse, Response
+import anyio
+from starlette.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
+from bounded_http import MAX_BODY, read_limited_body
 
 _used = {}
 _lock = threading.Lock()
-MAX_BODY = 20 * 1024 * 1024
 
 
 def dashboard_route(path):
@@ -56,6 +58,8 @@ def verify_request(headers, method, target, body):
                 del _used[key]
         if nonce in _used:
             raise ValueError('replayed_bridge_request')
+        if len(_used) >= 10000:
+            raise ValueError('bridge_replay_cache_full')
         _used[nonce] = now
     return actor
 
@@ -73,14 +77,14 @@ def bridge_url():
 
 
 async def forward(request, actor):
+    client = result = None
+    transferred = False
     try:
         origin = bridge_url()
         secret = os.getenv('RECEPTION_BRIDGE_SECRET', '')
         if not origin or len(secret) < 32:
             raise ValueError('Bridge is not configured')
-        body = await request.body()
-        if len(body) > MAX_BODY:
-            return JSONResponse({'detail': 'Fișierul depășește limita de 20 MB.'}, status_code=413)
+        body = await read_limited_body(request, MAX_BODY)
         target = request.url.path + ('?' + request.url.query if request.url.query else '')
         stamp, nonce = str(int(time.time())), secrets.token_hex(20)
         headers = {key: value for key, value in request.headers.items()
@@ -90,16 +94,61 @@ async def forward(request, actor):
             'x-albatros-nonce': nonce,
             'x-albatros-signature': signature(secret, stamp, nonce, actor, request.method, target, body),
             'ngrok-skip-browser-warning': 'true'})
-        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10), follow_redirects=False) as client:
-            result = await client.request(request.method, origin + target, headers=headers, content=body)
+        client = httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10), follow_redirects=False)
+        outbound = client.build_request(request.method, origin + target, headers=headers, content=body)
+        result = await client.send(outbound, stream=True)
         response_headers = {key: value for key, value in result.headers.items()
-                            if key.lower() in {'content-type', 'content-disposition', 'location', 'accept-ranges', 'content-range'}}
+                            if key.lower() in {'content-type', 'content-disposition', 'location', 'accept-ranges',
+                                               'content-range', 'content-length', 'content-encoding'}}
         location = response_headers.get('location', '')
         if location.startswith(origin + '/'):
             response_headers['location'] = location[len(origin):]
         response_headers.update({'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
                                  'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer'})
-        return Response(result.content, result.status_code, headers=response_headers)
+        closed = False
+
+        async def close():
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            with anyio.CancelScope(shield=True):
+                try:
+                    await result.aclose()
+                finally:
+                    await client.aclose()
+
+        async def chunks():
+            try:
+                async for chunk in result.aiter_raw(chunk_size=64 * 1024):
+                    yield chunk
+            finally:
+                await close()
+
+        reply = OwnedBridgeResponse(chunks(), result.status_code, headers=response_headers,
+                                    background=BackgroundTask(close), close=close)
+        transferred = True
+        return reply
     except (httpx.HTTPError, ValueError):
         # A failed worker call is never retried here: mutations may have succeeded.
         return JSONResponse({'detail': 'Legătura cu robotul nu este disponibilă. Verifică laptopul principal.'}, status_code=503)
+    finally:
+        if client is not None and not transferred:
+            with anyio.CancelScope(shield=True):
+                try:
+                    if result is not None:
+                        await result.aclose()
+                finally:
+                    await client.aclose()
+
+
+class OwnedBridgeResponse(StreamingResponse):
+    def __init__(self, *args, close, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.close = close
+
+    async def __call__(self, scope, receive, send):
+        try:
+            return await super().__call__(scope, receive, send)
+        finally:
+            await self.close()

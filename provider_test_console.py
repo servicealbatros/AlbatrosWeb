@@ -10,21 +10,27 @@ import os
 from pathlib import Path
 import secrets
 import time
+import threading
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from playwright_lifecycle import CdpDriver
 
 router = APIRouter()
 GRANTS, SESSIONS = {}, {}
 LOCK = asyncio.Lock()
+ACCESS_LOCK = threading.RLock()
+MAX_GRANTS = 1024
+MAX_SESSIONS = 1024
+DRIVER = CdpDriver()
 PROVIDERS = {'DSM': 'https://apps.dsmpro.ro/',
              'Inter Cars': 'https://ro.e-cat.intercars.eu/',
              'AutoTotal': 'https://www3.eoriginal.ro/',
              'Haynes': 'https://www.workshopdata.com/touch/site/layout/makesOverview'}
 DOMAINS = ('dsmpro.ro', 'q-service.ro', 'intercars.eu', 'eoriginal.ro', 'workshopdata.com', 'microsoftonline.com')
-_playwright = _browser = _page = None
+_browser = _page = None
 _page_id = ''
 _provider_pages = {}
 
@@ -52,11 +58,22 @@ def same_origin(request):
         raise HTTPException(403, 'Same-origin action required')
 
 
+def cleanup_access_tokens(now=None):
+    now = time.time() if now is None else now
+    with ACCESS_LOCK:
+        for entries in (GRANTS, SESSIONS):
+            for token, deadline in list(entries.items()):
+                if deadline <= now:
+                    del entries[token]
+
+
 def session(request):
     enabled()
     token = request.cookies.get('albatros_provider_test', '')
-    if SESSIONS.get(token, 0) < time.time():
-        raise HTTPException(403, 'Access expired; request a new administrator grant')
+    with ACCESS_LOCK:
+        cleanup_access_tokens()
+        if token not in SESSIONS:
+            raise HTTPException(403, 'Access expired; request a new administrator grant')
 
 
 def allowed_url(url):
@@ -104,7 +121,11 @@ def inside_region(x, y, regions):
 async def grant(request: Request):
     admin(request)
     token = secrets.token_urlsafe(32)
-    GRANTS[token] = time.time() + 120
+    with ACCESS_LOCK:
+        cleanup_access_tokens()
+        if len(GRANTS) >= MAX_GRANTS:
+            raise HTTPException(503, 'Too many active grants; retry after expiry')
+        GRANTS[token] = time.time() + 120
     # URL fragment is consumed via POST; it never goes into server request logs.
     return {'url': str(request.base_url).rstrip('/') + '/provider-auth#' + token, 'expires_in': 120}
 
@@ -117,10 +138,14 @@ class Unlock(BaseModel):
 async def unlock(body: Unlock, request: Request):
     enabled()
     same_origin(request)
-    if GRANTS.pop(body.token, 0) < time.time():
-        raise HTTPException(403, 'Invalid or expired grant')
     token = secrets.token_urlsafe(32)
-    SESSIONS[token] = time.time() + 1800
+    with ACCESS_LOCK:
+        cleanup_access_tokens()
+        if len(SESSIONS) >= MAX_SESSIONS:
+            raise HTTPException(503, 'Too many active sessions; retry after expiry')
+        if GRANTS.pop(body.token, 0) <= time.time():
+            raise HTTPException(403, 'Invalid or expired grant')
+        SESSIONS[token] = time.time() + 1800
     response = JSONResponse({'ok': True})
     response.set_cookie('albatros_provider_test', token, httponly=True, secure=True,
                         samesite='strict', max_age=1800)
@@ -136,14 +161,33 @@ async def panel():
 
 
 async def context():
-    global _playwright, _browser, _page, _page_id
-    if _browser is None or not _browser.is_connected():
-        from playwright.async_api import async_playwright
-        _playwright = await async_playwright().start()
-        _browser = await _playwright.chromium.connect_over_cdp('http://127.0.0.1:9222', timeout=30000)
+    global _browser, _page, _page_id
+    try:
+        ctx = await DRIVER.context()
+    except BaseException:
+        # Do not retain stale page/connection object graphs after a failed reconnect.
+        _browser = _page = None
+        _page_id = ''
+        _provider_pages.clear()
+        raise
+    if _browser is not DRIVER.browser:
+        _browser = DRIVER.browser
         _provider_pages.clear()
         _page, _page_id = None, ''
-    return _browser.contexts[0]
+    return ctx
+
+
+async def shutdown_browser():
+    global _browser, _page, _page_id
+    try:
+        await DRIVER.shutdown()
+    finally:
+        _browser = _page = None
+        _page_id = ''
+        _provider_pages.clear()
+        with ACCESS_LOCK:
+            GRANTS.clear()
+            SESSIONS.clear()
 
 
 async def snapshot():

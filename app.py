@@ -8030,20 +8030,28 @@ async def _dsm_accepted_offers_loop():
         await asyncio.sleep(60)
 
 
-async def _pre_arrival_loop():
+async def _pre_arrival_tick(now=None):
+    """One production iteration; keep every provider dependency in this scope."""
     from pre_arrival_reminders import tick, ROMANIA
-    from dsm_pre_arrival import seed
+    from dsm_pre_arrival import seed, existing_orders
     async def refresh(target):
-        return await import_dsm_schedule(DB_PATH,target)
+        return await import_dsm_schedule(DB_PATH, target)
+    return await tick(DB_PATH, DATA_DIR, now or datetime.now(ROMANIA),
+                      send_whatsapp_notification, seed, refresh=refresh,
+                      allowed=lambda: POLICY.robot_enabled, check_orders=existing_orders)
+
+
+async def _pre_arrival_loop():
+    from pre_arrival_reminders import record_run
     await asyncio.sleep(5)
     while True:
         try:
-            if POLICY.robot_enabled:
-                await tick(DB_PATH,DATA_DIR,datetime.now(ROMANIA),send_whatsapp_notification,seed,
-                           refresh=refresh,allowed=lambda:POLICY.robot_enabled,check_orders=existing_orders)
+            result = await _pre_arrival_tick()
+            record_run(DATA_DIR, result, paused=not POLICY.robot_enabled)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            record_run(DATA_DIR, error=str(exc)[:300])
             POLICY.logger.write(action='pre_arrival_reminder',result='failed',success=False,error=str(exc)[:300])
         await asyncio.sleep(30)
 

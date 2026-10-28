@@ -44,6 +44,19 @@ def write_settings(root,value):
     temporary.write_text(json.dumps(value),encoding='utf-8');temporary.replace(path)
 
 
+
+def record_run(root, result=None, *, error='', paused=False):
+    value=settings(root)
+    value['worker_health']={**value.get('worker_health',{}),
+        'checked_at':datetime.now(ROMANIA).isoformat(),
+        'state':'error' if error else 'paused' if paused else 'running',
+        'error':error,
+    }
+    if result is not None:
+        value['worker_health']['last_result']=result
+    write_settings(root,value)
+
+
 def due(root, now):
     now=now.astimezone(ROMANIA)
     config=settings(root)

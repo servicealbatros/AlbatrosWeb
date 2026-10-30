@@ -22,9 +22,14 @@ def case():
 
 
 def payload(**changes):
-    result = dict(transaction=head('10', status='working'), electronic={'has_qrcode': '1'},
+    result = dict(transaction=head('10', status='working'), electronic={'has_qrcode': '1', 'has_gdpr': '0'},
                   sms_or_qrcode_sended={})
     result.update(changes)
+    states = result.get('sms_or_qrcode_sended') or {}
+    if any(key.endswith('statement_of_agreement') and
+           str(value.get('record_status__code') if isinstance(value, dict) else value) in gdpr.SIGNED
+           for key, value in states.items()):
+        result['electronic']['has_gdpr'] = '1'
     return result
 
 
@@ -150,6 +155,7 @@ class NativeAgreementTests(unittest.IsolatedAsyncioTestCase):
                 response['transaction']['transaction_head__type'] = kind
                 expected = kind
             response['sms_or_qrcode_sended'] = {expected + '_statement_of_agreement': 'signed'}
+            response['electronic']['has_gdpr'] = '1'
             with patch.object(gdpr, 'call', AsyncMock(return_value=response)) as read, \
                     patch.object(gdpr, 'generate', AsyncMock()) as create:
                 result = await gdpr.prepare(value, Mock())
@@ -166,12 +172,52 @@ class NativeAgreementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await gdpr.prepare(value, Mock(), check_only=True))['reason'], 'signature_no_longer_confirmed')
             create.assert_not_awaited()
 
-    async def test_non_production_and_no_photo_path_have_no_supplier_effect(self):
-        for key, val in [('production', False), ('document_source', 'dsm')]:
-            value = case(); value[key] = val
-            with patch.object(gdpr, 'call', AsyncMock()) as read:
-                self.assertEqual(await gdpr.prepare(value, Mock()), {})
-                read.assert_not_awaited()
+    async def test_non_production_has_no_supplier_effect(self):
+        value = case(); value['production'] = False
+        with patch.object(gdpr, 'call', AsyncMock()) as read:
+            self.assertEqual(await gdpr.prepare(value, Mock()), {})
+            read.assert_not_awaited()
+
+    async def test_uploaded_agreement_is_not_assumed_unsigned_or_automatically_resent(self):
+        response = payload(); response['electronic']['has_gdpr'] = '1'
+        with patch.object(gdpr, 'call', AsyncMock(return_value=response)), patch.object(gdpr, 'generate', AsyncMock()) as create:
+            record = await gdpr.prepare(case(), Mock())
+            self.assertEqual(record['state'], 'review')
+            self.assertEqual(record['reason'], 'uploaded_agreement_requires_review')
+            self.assertNotIn('link', record)
+            create.assert_not_awaited()
+
+    async def test_missing_or_malformed_presence_flag_does_not_prove_no_agreement(self):
+        for flag in [None, '', 'unknown', {}, []]:
+            response = payload(); response['electronic']['has_gdpr'] = flag
+            with patch.object(gdpr, 'call', AsyncMock(return_value=response)), patch.object(gdpr, 'generate', AsyncMock()) as create:
+                self.assertEqual((await gdpr.prepare(case(), Mock()))['reason'], 'agreement_presence_unverified')
+                create.assert_not_awaited()
+
+    async def test_native_pending_request_without_recoverable_link_never_generates_a_duplicate(self):
+        for state in ['sent', 'pending', 'opened', 'failed']:
+            response = payload(sms_or_qrcode_sended={'2_statement_of_agreement': state})
+            with patch.object(gdpr, 'call', AsyncMock(return_value=response)), patch.object(gdpr, 'generate', AsyncMock()) as create:
+                self.assertEqual((await gdpr.prepare(case(), Mock()))['reason'], 'existing_request_requires_review')
+                create.assert_not_awaited()
+
+    async def test_explicit_absence_allows_link_for_each_native_flag_representation(self):
+        for flag in [0, '0', False]:
+            response = payload(); response['electronic']['has_gdpr'] = flag
+            with patch.object(gdpr, 'call', AsyncMock(return_value=response)), \
+                    patch.object(gdpr, 'generate', AsyncMock(return_value=dict(status='1', link=LINK))) as create:
+                self.assertEqual((await gdpr.prepare(case(), Mock()))['state'], 'pending')
+                create.assert_awaited_once()
+
+    async def test_old_signing_event_cannot_satisfy_new_client_without_matching_native_file(self):
+        response = payload(sms_or_qrcode_sended={'2_statement_of_agreement': 'signed'})
+        response['electronic']['has_gdpr'] = '0'
+        with patch.object(gdpr, 'call', AsyncMock(return_value=response)), patch.object(gdpr, 'generate', AsyncMock()) as create:
+            value = case()
+            self.assertEqual((await gdpr.prepare(value, Mock()))['reason'], 'signature_file_disagreement')
+            response['electronic']['has_gdpr'] = '1'
+            self.assertEqual((await gdpr.prepare(value, Mock(), check_only=True))['state'], 'signed')
+            create.assert_not_awaited()
 
     async def test_transport_only_calls_observed_native_route_never_sms_or_signature(self):
         with patch.object(gdpr, '_evaluate', AsyncMock(return_value={})) as evaluate:
@@ -265,13 +311,55 @@ class AgreementFlowTests(unittest.IsolatedAsyncioTestCase):
             await flow.request_document(self.root, PHONE, flow.get(self.root, PHONE)[1], self.send, agreement=gdpr.prepare)
             self.assertNotIn(LINK, self.send.await_args.args[1]); create.assert_awaited_once()
 
-    async def test_recent_dsm_reuse_path_never_requests_gdpr_or_photos(self):
+    async def test_recent_vehicle_still_checks_client_agreement_without_requesting_photo(self):
         value = data(date.today().isoformat())
-        agreement = AsyncMock()
         flow.save(self.root, PHONE, 'attendance', value)
-        await flow.text(self.root, PHONE, 'DA', self.send, self.writer, agreement=agreement)
-        agreement.assert_not_awaited()
-        self.assertNotIn('GDPR', self.send.await_args.args[1])
+        with patch.object(gdpr, 'call', AsyncMock(return_value=payload(sms_or_qrcode_sended={'2_statement_of_agreement': 'signed'}))) as read, \
+                patch.object(gdpr, 'generate', AsyncMock()) as create:
+            await flow.text(self.root, PHONE, 'DA', self.send, self.writer, agreement=gdpr.prepare)
+            read.assert_awaited_once()
+            create.assert_not_awaited()
+            self.assertNotIn('GDPR', self.send.await_args.args[1])
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'signed')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['document_source'], 'dsm')
+
+    async def test_first_client_of_recent_vehicle_receives_link_and_can_confirm_signature(self):
+        value = data(date.today().isoformat())
+        # Vehicle history is reusable, but the current client has no GDPR yet.
+        value['contact_id'] = '44'
+        response = payload(); response['transaction']['contact_id'] = '44'
+        with patch.object(gdpr, 'call', AsyncMock(return_value=response)) as read, \
+                patch.object(gdpr, 'generate', AsyncMock(return_value=dict(status='1', link=LINK))) as create:
+            await self.handle('DA', value)
+            self.assertIn(LINK, self.send.await_args.args[1])
+            self.assertNotIn('fotografi', self.send.await_args.args[1])
+            self.assertEqual(flow.get(self.root, PHONE)[0], 'phone')
+            response['sms_or_qrcode_sended'] = {'2_statement_of_agreement': 'signed'}
+            response['electronic']['has_gdpr'] = '1'
+            await self.handle('AM SEMNAT')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'signed')
+            self.assertEqual(flow.get(self.root, PHONE)[0], 'phone')
+            self.writer.assert_not_awaited(); create.assert_awaited_once()
+
+    async def test_photo_request_for_client_already_signed_does_not_include_signing_link(self):
+        response = payload(sms_or_qrcode_sended={'2_statement_of_agreement': 'signed'})
+        with patch.object(gdpr, 'call', AsyncMock(return_value=response)), patch.object(gdpr, 'generate', AsyncMock()) as create:
+            await self.handle('DA', case())
+            self.assertIn('fotografie', self.send.await_args.args[1])
+            self.assertNotIn('linkul securizat', self.send.await_args.args[1])
+            self.assertNotIn('AM SEMNAT', self.send.await_args.args[1])
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'signed')
+            create.assert_not_awaited()
+
+    async def test_absent_transaction_for_recent_vehicle_defers_until_confirmed_order(self):
+        value = data(date.today().isoformat()); value.update(source_type='3', source_transaction_id='694')
+        with patch.object(gdpr, 'call', AsyncMock()) as read, patch.object(gdpr, 'generate', AsyncMock()) as create:
+            await self.handle('DA', value)
+            self.assertEqual(flow.get(self.root, PHONE)[1]['document_source'], 'dsm')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'awaiting_order')
+            self.assertIn('după confirmarea datelor', self.send.await_args.args[1])
+            self.assertNotIn('fotografi', self.send.await_args.args[1])
+            read.assert_not_awaited(); create.assert_not_awaited(); self.writer.assert_not_awaited()
 
     async def test_done_order_can_verify_signature_without_creating_another_order(self):
         value = case(); value['order'] = {'id': '10', 'code': 'PHDEV-10'}

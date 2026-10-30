@@ -52,7 +52,7 @@ def document_itp_question(data):
 async def send_with_agreement(root, sender, data, send, message, stage, agreement):
     """One customer message, with a restart-safe native GDPR link when ready."""
     include_link = False
-    if agreement and data.get('production') and data.get('document_source') == 'document':
+    if agreement and data.get('production'):
         try:
             record = await agreement(data, lambda: save(root, sender, stage, data))
         except Exception:
@@ -265,23 +265,24 @@ def summary(data):
             'Pentru modificarea datelor clientului scrie CORECTEAZA CLIENT. Pentru corectarea talonului răspunde CORECTEAZA.')
 
 
-async def request_missing_client(root, sender, data, send):
+async def request_missing_client(root, sender, data, send, *, agreement=None):
     if not data.get('client_name'):
-        save(root, sender, 'client', data)
-        await send(sender, 'Scrie doar numele complet al clientului sau denumirea firmei. Îți cer doar datele lipsă. Nu trimite CNP.')
+        stage = 'client'
+        message = 'Scrie doar numele complet al clientului sau denumirea firmei. Îți cer doar datele lipsă. Nu trimite CNP.'
     elif not data.get('client_address'):
-        save(root, sender, 'client_address', data)
-        await send(sender, 'Scrie adresa completă de facturare: localitate, județ/sector, stradă și număr.')
+        stage = 'client_address'
+        message = 'Scrie adresa completă de facturare: localitate, județ/sector, stradă și număr.'
     elif not data.get('phone') or (data.get('production') and not data.get('phone_confirmed')):
-        save(root, sender, 'phone', data)
-        await send(sender, f'Confirmi numărul de contact +{phone(sender)}? Răspunde DA sau scrie numărul corect.')
+        stage = 'phone'
+        message = f'Confirmi numărul de contact +{phone(sender)}? Răspunde DA sau scrie numărul corect.'
     elif 'extra' not in data:
-        save(root, sender, 'requirements', data)
+        stage = 'requirements'
         label='Lucrările programate' if data.get('production') else 'Lucrări din oferta semnată'
-        await send(sender, f'{label}: {data["work"]}\nCe cerințe suplimentare ai? Scrie-le aici sau răspunde NU.')
+        message = f'{label}: {data["work"]}\nCe cerințe suplimentare ai? Scrie-le aici sau răspunde NU.'
     else:
-        save(root, sender, 'confirm', data)
-        await send(sender, summary(data))
+        stage, message = 'confirm', summary(data)
+    save(root, sender, stage, data)
+    await send_with_agreement(root, sender, data, send, message, stage, agreement)
 
 
 async def text(root, sender, body, send, writer, *, refresh_policy=None, agreement=None):
@@ -301,7 +302,7 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None, agreeme
             return True
         if stage == 'stopped':
             return False
-        if (agreement and data.get('production') and data.get('document_source') == 'document'
+        if (agreement and data.get('production')
                 and value in {'refuz gdpr', 'nu semnez gdpr', 'nu doresc sa semnez gdpr'}):
             record = data.get('gdpr') or {}
             already_signed = record.get('state') == 'signed'
@@ -322,7 +323,7 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None, agreeme
                 message += ' Pentru pregătirea comenzii, răspundeți CONFIRM DATELE.'
             await send(sender, message)
             return True
-        if (agreement and data.get('production') and data.get('document_source') == 'document'
+        if (agreement and data.get('production')
                 and value in {'am semnat', 'semnat', 'verifica gdpr'}):
             try:
                 record = await agreement(data, lambda: save(root, sender, stage, data), check_only=True)
@@ -368,7 +369,7 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None, agreeme
                 return True
         if (stage=='document' or stage=='review' and policy_review) and can_reuse(data):
             load_stored_vehicle(data)
-            await request_missing_client(root,sender,data,send)
+            await request_missing_client(root,sender,data,send,agreement=agreement)
             return True
         if stage in {'attendance', 'invite_failed'}:
             if value in {'nu', 'nu confirm'}:
@@ -379,7 +380,7 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None, agreeme
             elif value in {'da', 'confirm', 'confirm participarea'}:
                 if can_reuse(data):
                     load_stored_vehicle(data)
-                    await request_missing_client(root,sender,data,send)
+                    await request_missing_client(root,sender,data,send,agreement=agreement)
                 elif data.get('production') and (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
                     save(root,sender,'review',data)
                     await send(sender,'Consilierul va verifica data ultimei vizite și datele mașinii. Nu vă solicităm talonul până la clarificare.')

@@ -64,7 +64,9 @@ async def prepare(data, checkpoint, *, check_only=False):
     associated offer/order, defer until the normal confirmed writer returns an
     order. Existing paper/file flags alone are not proof of remote signing.
     """
-    if not data.get('production') or data.get('document_source') != 'document':
+    # GDPR belongs to the identified client, independently of the vehicle's
+    # annual certificate refresh. A new owner can bring a recently seen car.
+    if not data.get('production'):
         return {}
     previous = data.get('gdpr') or {}
     if (previous.get('state') == 'declined' and not check_only
@@ -100,7 +102,13 @@ async def prepare(data, checkpoint, *, check_only=False):
             or str(head.get('car_body_series') or '').upper() != data['vin']):
         raise ValueError('Documentul GDPR nu poate fi asociat sigur clientului și mașinii.')
     record = {**previous, 'binding': binding, 'transaction_id': ident, 'transaction_type': expected_kind}
-    if signature(payload, expected_kind) in SIGNED:
+    native_signature = signature(payload, expected_kind)
+    file_flag = (payload.get('electronic') or {}).get('has_gdpr')
+    if native_signature in SIGNED and file_flag not in (True, 1, '1'):
+        # The transaction might retain an old signing event after its client
+        # changed. Require the current client's GDPR file flag as well.
+        record.update(state='review', reason='signature_file_disagreement')
+    elif native_signature in SIGNED:
         record.update(state='signed', verified_at=datetime.now(timezone.utc).isoformat(),
                       verification_source='dsm.sms_or_qrcode_sended.' + expected_kind + '_' + DOCUMENT)
         record.pop('link', None)
@@ -119,6 +127,14 @@ async def prepare(data, checkpoint, *, check_only=False):
         record.pop('verification_source', None)
     elif previous.get('state') == 'signed':
         record.update(state='review', reason='signature_no_longer_confirmed')
+    elif file_flag in (True, 1, '1'):
+        # DSM may contain an uploaded paper agreement. Neither presume it is
+        # unsigned and resend nor claim its signature has been verified.
+        record.update(state='review', reason='uploaded_agreement_requires_review')
+    elif file_flag not in (False, 0, '0'):
+        record.update(state='review', reason='agreement_presence_unverified')
+    elif native_signature:
+        record.update(state='review', reason='existing_request_requires_review')
     elif check_only:
         record.update(state='review', reason='no_signing_link')
     elif (payload.get('electronic') or {}).get('has_qrcode') not in (True, 1, '1'):

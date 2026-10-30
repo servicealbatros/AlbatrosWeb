@@ -189,16 +189,25 @@ The broader deployment regression run completed 246 tests with one Linux-only
 lease test skipped on Windows. No live DSM/WhatsApp writes or deployment were
 performed during this verification.
 
-# Native DSM GDPR request during certificate refresh
+# Native DSM GDPR verification for pre-reception clients
 
-The pre-arrival WhatsApp handler now requests the native DSM **Acord GDPR Client**
-(`statement_of_agreement`) alongside the certificate photograph when there is an
-explicitly associated active offer/work order. It uses DSM's observed
+The pre-arrival WhatsApp handler checks the identified client's native DSM
+**Acord GDPR Client** (`statement_of_agreement`) independently of the vehicle's
+annual certificate-photo policy. A first-time client can bring a recently seen
+car; reusable vehicle data does not establish that client's GDPR status. When
+there is an explicitly associated active offer/work order, confirmed native
+signature evidence together with that current client's GDPR-file flag suppresses
+duplicate requests; a signing event conflicting with a missing client file
+requires review instead of reusing a potentially stale signature. An explicit
+`electronic.has_gdpr=0` with no existing GDPR request permits generating the
+missing agreement. Uploaded-file flags, unknown flags or an existing pending
+request without a recoverable link require adviser verification, with no
+automatic regeneration or claims that an uploaded paper is signed. It uses DSM's observed
 `POST /special/transaction/generate_qr_code/{transaction_id}/statement_of_agreement`
 contract and its returned HTTPS signing link; it never sends DSM SMS or signs for
 the customer. Native appointment IDs are a separate namespace and are never sent
 to that transaction route. For appointments without a bound transaction, the
-certificate request explains that GDPR will follow the normal confirmed order
+preparation message explains that GDPR will follow the normal confirmed order
 creation. It does not create an early/dummy order to obtain a link.
 
 Link generation is checkpointed in the existing private SQLite case before the
@@ -216,7 +225,8 @@ Changes to the client's identity after generation, an unavailable/native QR-only
 signing link, an untrusted signing host or a DSM outage require adviser review.
 Only native HTTPS signing hosts under `servicemanager.q-service.ro` or `dsmpro.ro`
 are accepted. Existing pilot/recipient selections and the recent-visit no-photo
-path are unchanged. This feature does not enable sending or expand enrollment.
+rule are unchanged; a GDPR link can accompany the data-confirmation message even
+when a photo is unnecessary. This feature does not enable sending or expand enrollment.
 
 Protocol evidence was inspected in saved DSM frontend sources. On 30 October
 2026, read-only inspection of the authenticated DSM document UI confirmed the
@@ -235,8 +245,8 @@ have **not** been exercised against live DSM. No live document was generated,
 customer message sent, customer data modified or Render deployment performed.
 Regression coverage is in `test_dsm_gdpr.py`; existing pre-arrival, document-policy
 and pre-reception suites also pass locally. The broader deployment regression
-command ran 268 tests: 267 passed and one Linux-only lease test was skipped.
-The 28 new GDPR tests pass separately without resource warnings; some existing
+command ran 276 tests: 275 passed and one Linux-only lease test was skipped.
+The 36 new GDPR tests pass separately without resource warnings; some existing
 suites emit SQLite unclosed-connection ResourceWarnings on Python 3.14.
 The runtime is Windows Python 3.14;
 the Linux Docker build remains unexecuted in this environment.

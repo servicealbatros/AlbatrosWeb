@@ -12468,8 +12468,9 @@ async def _route_buffered_message(
         return
     from pre_reception import text as pre_reception_text
     from dsm_pre_arrival import document_requirements
+    from dsm_gdpr import prepare as prepare_gdpr
     if await pre_reception_text(DATA_DIR, sender, body, send_whatsapp_text, _pre_reception_write,
-                                refresh_policy=document_requirements):
+                                refresh_policy=document_requirements, agreement=prepare_gdpr):
         return
     if _is_beta_test_phone(sender) and _starts_beta_test_conversation(body):
         _reset_beta_test_conversation(sender)

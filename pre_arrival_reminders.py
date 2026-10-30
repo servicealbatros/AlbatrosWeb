@@ -123,7 +123,12 @@ def status(root):
                 cases.append(dict(appointment_id=data.get('appointment_id'),registration=data.get('registration'),
                     phone_suffix=case['phone'][-4:],stage=case['stage'],command_code=(data.get('order') or {}).get('code'),
                     document_source=data.get('document_source'),document_policy=(data.get('document_policy') or {}).get('decision'),
-                    last_visit=(data.get('document_policy') or {}).get('last_visit')))
+                    last_visit=(data.get('document_policy') or {}).get('last_visit'),
+                    gdpr_state=(data.get('gdpr') or {}).get('state'),
+                    gdpr_delivery=(data.get('gdpr') or {}).get('delivery')))
+                if (data.get('gdpr') or {}).get('state') == 'review' or (data.get('gdpr') or {}).get('delivery') in {'sending', 'uncertain'}:
+                    errors.append(dict(appointment_id=data.get('appointment_id'),start_at=data.get('appointment_start'),
+                        state='review',error='Acordul GDPR sau trimiterea linkului necesită verificarea consilierului.'))
             if data.get('production') and (data.get('attendance_declined') or case['stage']=='review'):
                 errors.append(dict(appointment_id=data.get('appointment_id'),start_at=data.get('appointment_start'),
                     state=case['stage'],error='Clientul nu confirmă venirea; verifică reprogramarea.' if data.get('attendance_declined') else 'Datele sau comanda necesită verificarea consilierului.'))

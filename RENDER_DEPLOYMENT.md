@@ -188,3 +188,44 @@ Local verification passed 27 policy tests and 88 focused pre-reception tests.
 The broader deployment regression run completed 246 tests with one Linux-only
 lease test skipped on Windows. No live DSM/WhatsApp writes or deployment were
 performed during this verification.
+
+# Native DSM GDPR request during certificate refresh
+
+The pre-arrival WhatsApp handler now requests the native DSM **Acord GDPR Client**
+(`statement_of_agreement`) alongside the certificate photograph when there is an
+explicitly associated active offer/work order. It uses DSM's observed
+`POST /special/transaction/generate_qr_code/{transaction_id}/statement_of_agreement`
+contract and its returned HTTPS signing link; it never sends DSM SMS or signs for
+the customer. Native appointment IDs are a separate namespace and are never sent
+to that transaction route. For appointments without a bound transaction, the
+certificate request explains that GDPR will follow the normal confirmed order
+creation. It does not create an early/dummy order to obtain a link.
+
+Link generation is checkpointed in the existing private SQLite case before the
+POST; timeouts, process interruption and uncertain WhatsApp submissions require
+review rather than automatic regeneration/resending. Completed remote signature
+states are read from the exact GDPR entry in `sms_or_qrcode_sended`, not from
+offer signatures, uploaded-file flags, link generation or the client's WhatsApp
+claim. `AM SEMNAT` performs a read-only DSM check and does not create another
+order. The current flow stage is preserved, so certificate/data collection can
+continue. Signature verification is triggered by that reply, not background
+polling. Order completion and GDPR completion remain distinct: admin status
+exposes `gdpr_state` and `gdpr_delivery` without exposing signing URLs.
+
+Changes to the client's identity after generation, an unavailable/native QR-only
+signing link, an untrusted signing host or a DSM outage require adviser review.
+Only native HTTPS signing hosts under `servicemanager.q-service.ro` or `dsmpro.ro`
+are accepted. Existing pilot/recipient selections and the recent-visit no-photo
+path are unchanged. This feature does not enable sending or expand enrollment.
+
+Protocol evidence was inspected in saved DSM frontend sources and document UI;
+the current authenticated signing-link response and an actual customer signature
+have **not** been exercised against live DSM. No live document was generated,
+customer message sent, customer data modified or Render deployment performed.
+Regression coverage is in `test_dsm_gdpr.py`; existing pre-arrival, document-policy
+and pre-reception suites also pass locally. The broader deployment regression
+command ran 265 tests: 264 passed and one Linux-only lease test was skipped.
+The 25 new GDPR tests pass separately without resource warnings; some existing
+suites emit SQLite unclosed-connection ResourceWarnings on Python 3.14.
+The runtime is Windows Python 3.14;
+the Linux Docker build remains unexecuted in this environment.

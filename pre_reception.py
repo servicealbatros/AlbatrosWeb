@@ -49,7 +49,48 @@ def document_itp_question(data):
             'Trimite și fotografia clară a rubricii ITP din talon. Dacă data nu se citește, scrie data actuală a expirării în format ZZ.LL.AAAA (nu data efectuării inspecției).') + comparison)
 
 
-async def request_document(root, sender, data, send):
+async def send_with_agreement(root, sender, data, send, message, stage, agreement):
+    """One customer message, with a restart-safe native GDPR link when ready."""
+    include_link = False
+    if agreement and data.get('production') and data.get('document_source') == 'document':
+        try:
+            record = await agreement(data, lambda: save(root, sender, stage, data))
+        except Exception:
+            record = {**(data.get('gdpr') or {}), 'state': 'review', 'reason': 'dsm_unavailable'}
+            data['gdpr'] = record
+        if record.get('state') == 'pending' and record.get('delivery') not in {'submitted', 'sending', 'uncertain'}:
+            from dsm_gdpr import signing_link
+            try:
+                link = signing_link(record.get('link'))
+            except ValueError:
+                record.update(state='review', reason='invalid_link')
+            else:
+                message += ('\n\nVă rugăm să citiți și să semnați personal «Acord GDPR Client», '
+                            'deschis din linkul securizat DSM:\n' + link +
+                            '\nDupă semnare, răspundeți AM SEMNAT. Vom verifica semnarea în sistem; '
+                            'răspunsul din WhatsApp nu ține locul semnăturii.')
+                record['delivery'] = 'sending'
+                include_link = True
+        if record.get('state') == 'awaiting_order':
+            message += ('\nAcordul GDPR pentru semnare va fi trimis după confirmarea datelor și '
+                        'pregătirea comenzii, când documentul este disponibil în sistem.')
+        elif record.get('state') == 'review':
+            message += '\nConsilierul va verifica acordul GDPR și linkul pentru semnare.'
+        save(root, sender, stage, data)
+    try:
+        await send(sender, message)
+    except Exception:
+        if include_link:
+            data['gdpr']['delivery'] = 'uncertain'
+            save(root, sender, stage, data)
+        raise
+    if include_link:
+        # Successful API submission is not proof of delivery or signature.
+        data['gdpr']['delivery'] = 'submitted'
+        save(root, sender, stage, data)
+
+
+async def request_document(root, sender, data, send, *, agreement=None):
     # Confirmation from a previous reception must never satisfy this request.
     for key in ('document_verified', 'document_current', 'document_fields_confirmed',
                 'identity_fields_confirmed', 'itp_confirmed', 'final_confirmed',
@@ -63,7 +104,9 @@ async def request_document(root, sender, data, send):
                if data.get('test_run_id') and data.get('retest_command_code') else '')
     if data.get('manual_test') and not context:
         context = f'TEST ALBATROS A — {data["registration"]}, fără rezervare în programator.\n'
-    await send(sender, context + f'Vă rugăm să ne trimiteți o fotografie clară a talonului mașinii {data["registration"]}, pentru a ne ajuta să actualizăm datele și să scurtăm timpul de așteptare la intrarea mașinii în service. Vă rugăm să includeți seria de șasiu (VIN) și rubrica privind valabilitatea ITP. Dacă sunt pe fețe diferite, trimiteți fotografii cu ambele fețe. Nu este nevoie de CNP.')
+    await send_with_agreement(root, sender, data, send,
+        context + f'Vă rugăm să ne trimiteți o fotografie clară a talonului mașinii {data["registration"]}, pentru a ne ajuta să actualizăm datele și să scurtăm timpul de așteptare la intrarea mașinii în service. Vă rugăm să includeți seria de șasiu (VIN) și rubrica privind valabilitatea ITP. Dacă sunt pe fețe diferite, trimiteți fotografii cu ambele fețe. Nu este nevoie de CNP.',
+        'document', agreement)
 
 
 def document_year_question(data):
@@ -239,7 +282,7 @@ async def request_missing_client(root, sender, data, send):
         await send(sender, summary(data))
 
 
-async def text(root, sender, body, send, writer, *, refresh_policy=None):
+async def text(root, sender, body, send, writer, *, refresh_policy=None, agreement=None):
     if not get(root, sender):
         return False
     async with LOCK:
@@ -256,6 +299,22 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None):
             return True
         if stage == 'stopped':
             return False
+        if (agreement and data.get('production') and data.get('document_source') == 'document'
+                and value in {'am semnat', 'semnat', 'verifica gdpr'}):
+            try:
+                record = await agreement(data, lambda: save(root, sender, stage, data), check_only=True)
+            except Exception:
+                record = {**(data.get('gdpr') or {}), 'state': 'review', 'reason': 'dsm_unavailable'}
+                data['gdpr'] = record
+            save(root, sender, stage, data)
+            message = ('Semnarea acordului GDPR este confirmată în DSM.' if record.get('state') == 'signed'
+                       else 'Semnarea acordului GDPR nu este încă verificată în sistem. Nu am înregistrat răspunsul din WhatsApp ca semnătură.')
+            if stage == 'document':
+                message += ' Așteptăm fotografiile clare ale talonului, inclusiv rubrica ITP.'
+            elif stage == 'confirm':
+                message += ' Pentru pregătirea comenzii, răspundeți CONFIRM DATELE.'
+            await send(sender, message)
+            return True
         if stage == 'done':
             if data.get('production'):
                 if value=='confirm datele':
@@ -282,7 +341,7 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None):
                 await send(sender,'Consilierul va verifica data ultimei vizite și datele mașinii. Nu vă solicităm talonul până la clarificare.')
                 return True
             if stage=='review' and not can_reuse(data):
-                await request_document(root,sender,data,send)
+                await request_document(root,sender,data,send,agreement=agreement)
                 return True
         if (stage=='document' or stage=='review' and policy_review) and can_reuse(data):
             load_stored_vehicle(data)
@@ -302,7 +361,7 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None):
                     save(root,sender,'review',data)
                     await send(sender,'Consilierul va verifica data ultimei vizite și datele mașinii. Nu vă solicităm talonul până la clarificare.')
                 else:
-                    await request_document(root, sender, data, send)
+                    await request_document(root, sender, data, send, agreement=agreement)
             else:
                 await send(sender, 'Pentru confirmarea programării răspundeți DA sau NU.' if data.get('production') else 'Pentru testul B101TST răspunde DA sau NU.')
         elif stage == 'document':
@@ -399,14 +458,14 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None):
                 save(root, sender, 'client', data)
                 await send(sender, f'Numele salvat: {data.get("client_name") or "lipsește"}. Răspunde DA dacă este corect sau scrie numele corect. Verificăm apoi adresa și telefonul.')
             elif value == 'corecteaza':
-                await request_document(root, sender, data, send)
+                await request_document(root, sender, data, send, agreement=agreement)
             elif value == 'confirm datele':
                 if not preparation_ready(data):
                     if data.get('production') and (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
                         save(root,sender,'review',data)
                         await send(sender,'Data ultimei vizite trebuie verificată înaintea pregătirii comenzii. Nu solicităm încă talonul.')
                         return True
-                    await request_document(root, sender, data, send)
+                    await request_document(root, sender, data, send, agreement=agreement)
                     return True
                 if not data.get('client_name') or not data.get('client_address'):
                     data.pop('final_confirmed', None)
@@ -428,7 +487,9 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None):
                         conn.execute('UPDATE orders SET state=?,result=? WHERE offer=?', ('done', json.dumps(result), data['offer_id']))
                     data['order'] = result
                     save(root, sender, 'done', data)
-                    await send(sender, f'Comanda {result["code"]} pentru {data["registration"]} este pregătită. Vă așteptăm la programarea confirmată. Datele și cerințele vor fi reverificate la semnarea comenzii.' if data.get('production') else f'Comanda de TEST {result["code"]} a fost verificată în DSM pentru {data["registration"]}. Data expirării ITP {data["itp"]} a fost salvată și verificată în Date Mașină. Nu am făcut rezervare în programator.')
+                    await send_with_agreement(root, sender, data, send,
+                        f'Comanda {result["code"]} pentru {data["registration"]} este pregătită. Vă așteptăm la programarea confirmată. Datele și cerințele vor fi reverificate la semnarea comenzii.' if data.get('production') else f'Comanda de TEST {result["code"]} a fost verificată în DSM pentru {data["registration"]}. Data expirării ITP {data["itp"]} a fost salvată și verificată în Date Mașină. Nu am făcut rezervare în programator.',
+                        'done', agreement)
                 except Exception:
                     save(root, sender, 'review', data)
                     await send(sender, 'Crearea sau verificarea comenzii necesită intervenția consilierului. Nu repet automat crearea și nu declar comanda finalizată.')

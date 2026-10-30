@@ -460,6 +460,28 @@ def pre_arrival_status(request: Request):
     return status(DATA_DIR)
 
 
+@app.post('/api/dashboard/master/requests/{request_id}/brake-clarification')
+async def master_brake_clarification(request_id: int, request: Request):
+    _master_access(request)
+    if not POLICY.robot_enabled:
+        raise HTTPException(409, 'STOP SAFE activ.')
+    try:
+        return await _ask_request_brake_scope(request_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/dashboard/master/requests/{request_id}/brake-clarification')
+def master_brake_clarification_status(request_id: int, request: Request):
+    _master_access(request)
+    from brake_scope import record
+    result = record(DB_PATH, request_id)
+    if not result:
+        raise HTTPException(404, 'Nu există încă o clarificare pentru această cerere.')
+    receipt = WHATSAPP_DELIVERY_STATUS.get(result.get('message_id')) or {}
+    return {**result, 'delivery_status': receipt.get('status') or result['delivery_status']}
+
+
 @app.post('/api/dashboard/master/request-revisions')
 async def master_request_revision(request: Request):
     _master_access(request)
@@ -2584,6 +2606,7 @@ def _catalog_vin_candidate(vin: str, vehicle_hints: dict) -> tuple[str, str | No
 
 
 def _start_offer_worker(request_id: int, request_row: dict, search_query: str | None = None) -> dict:
+    _require_brake_axle(request_row)
     if _crawler_task and not _crawler_task.done():
         return {'ok':False,'message':'Așteaptă terminarea crawlerului înainte de repornirea workerului.'}
     """
@@ -4010,6 +4033,7 @@ def request_technician_start(request_id: int, live_catalogues: bool = False):
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost gasita.")
 
+    _require_brake_axle(request_row)
     vin = str(request_row.get("vin") or "").strip()
     symptom = str(
         request_row.get("symptom")
@@ -4330,6 +4354,7 @@ def _require_original_oil_selection(request_id: int) -> None:
 
 
 def _require_advisor_labour_review(request_id: int) -> dict:
+    _require_brake_axle(_request_by_id(request_id) or {})
     _require_original_oil_selection(request_id)
     draft = _draft_for_request(request_id)
     from offer_parts_checklist import pending_lines, line_gaps, is_workshop_consumable
@@ -5712,6 +5737,7 @@ def request_offer_approve(request_id: int, request: Request,
     request_row = _request_by_id(request_id)
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost gasita.")
+    _require_brake_axle(request_row)
     result = _load_request_offer_result(request_id)
     selected_entry = _load_offer_selections().get(str(request_id), {})
     selected = selected_entry.get("product")
@@ -5799,6 +5825,7 @@ async def request_crawler_start(request_id: int, request: Request):
     row = _request_by_id(request_id)
     if not row:
         raise HTTPException(404, 'Cererea nu există.')
+    _require_brake_axle(row)
     if _crawler_task and not _crawler_task.done():
         raise HTTPException(409, 'Crawlerul rulează deja. Așteaptă rezultatul curent.')
     if any(j.get('status') in {'QUEUED','RUNNING'} for j in _load_robot_jobs()):
@@ -10320,7 +10347,8 @@ def _remember_whatsapp_acceptance(result: dict, to_number: str, kind: str) -> st
 
 async def send_whatsapp_text(
     to_number: str,
-    text: str
+    text: str,
+    *, case_id: str | None = None,
 ):
 
     phone_number_id = os.getenv(
@@ -10391,11 +10419,12 @@ async def send_whatsapp_text(
         result = response.json()
         message_id = _remember_whatsapp_acceptance(result, to_number, "free_form")
         print(f"WHATSAPP MESSAGE ACCEPTED BY META: id={message_id or 'unknown'}")
-        try:
-            case_map = globals().get("_active_case_by_sender", {})
-            case_id = case_map.get(to_number) or case_map.get(_conversation_digits(to_number))
-        except Exception:
-            case_id = None
+        if case_id is None:
+            try:
+                case_map = globals().get("_active_case_by_sender", {})
+                case_id = case_map.get(to_number) or case_map.get(_conversation_digits(to_number))
+            except Exception:
+                case_id = None
         _log_conversation(to_number, "robot", text, case_id)
         await _maybe_send_voice_reply(to_number, text)
         return result
@@ -11249,9 +11278,60 @@ def _new_vehicle_states() -> dict:
 
 
 def _save_new_vehicle_states(states: dict) -> None:
-    NEW_VEHICLE_STATE_FILE.write_text(
+    temporary = NEW_VEHICLE_STATE_FILE.with_name(NEW_VEHICLE_STATE_FILE.name + f'.{uuid4().hex}.tmp')
+    temporary.write_text(
         json.dumps(states, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    temporary.replace(NEW_VEHICLE_STATE_FILE)
+
+
+def _require_brake_axle(row):
+    from brake_scope import needs_clarification
+    if needs_clarification(row.get('symptom') or ''):
+        raise HTTPException(409, 'Precizați dacă plăcuțele sunt pentru față, spate sau ambele punți înainte de ofertare.')
+
+
+async def _ask_request_brake_scope(request_id):
+    from brake_scope import ask, phone
+    row = _request_by_id(request_id)
+    if not row or request_id in _archive_ids():
+        raise ValueError('Cererea lipsește sau este arhivată.')
+    target = phone(row.get('phone'))
+    from pre_reception import get as pre_reception_case
+    reception = pre_reception_case(DATA_DIR, target)
+    if reception and reception[0] not in {'done', 'stopped', 'invite_failed'}:
+        raise ValueError('Clientul are deja un alt flux de pre-recepție activ; verifică conversația.')
+    existing = _new_vehicle_states().get(target) or {}
+    if (existing.get('case_id') != row.get('session_id')
+            and existing.get('stage') not in {None, 'request_created'}):
+        raise ValueError('Clientul are deja o altă identificare în curs; verifică conversația.')
+
+    async def send(target, text, case_id):
+        # Persist the exact request/case before sending. A short reply must not
+        # be interpreted as acceptance of another offer or a new request.
+        states = _new_vehicle_states()
+        base = states.get(target) or {}
+        if base.get('case_id') != case_id:
+            base = {}
+        states[target] = {**base, 'stage': 'awaiting_brake_axle',
+            'case_id': case_id, 'request_id': request_id, 'registration': row['registration'],
+            'vin': row.get('vin'), 'vehicle': row.get('vehicle'), 'pending_symptom': row.get('symptom')}
+        _save_new_vehicle_states(states)
+        _active_case_by_sender[target] = case_id
+        _plate_by_sender[target] = row['registration']
+        response = await send_whatsapp_text(target, text, case_id=case_id)
+        ident = str(((response.get('messages') or [{}])[0]).get('id') or '')
+        deadline = time.monotonic() + 2.5
+        receipt = {}
+        while ident and time.monotonic() < deadline:
+            receipt = WHATSAPP_DELIVERY_STATUS.get(ident) or {}
+            if receipt.get('status') in {'delivered', 'read', 'failed'}:
+                break
+            await asyncio.sleep(0.2)
+        response['delivery_status'] = receipt.get('status') or 'accepted_by_meta'
+        return response
+
+    return await ask(DB_PATH, request_id, send, _has_open_whatsapp_window)
 
 
 def _is_vague_revision_request(body: str) -> bool:
@@ -11439,6 +11519,26 @@ async def _route_new_vehicle_intake(sender: str, body: str) -> bool:
         return False
 
     stage = flow.get("stage")
+    if stage == 'awaiting_brake_axle':
+        from brake_scope import reply_axle, apply_reply, LABELS, question
+        answer = re.sub(r'\b' + re.escape(str(flow.get('registration') or '')) + r'\b', '', body, flags=re.I).strip()
+        axle = reply_axle(answer)
+        if axle is None:
+            if re.search(r'\b(?:nu stiu|verificati|constatare)\b', normalized):
+                await send_whatsapp_text(sender, 'Am notat că puntea trebuie stabilită împreună cu consilierul. Nu voi presupune ce plăcuțe se schimbă.', case_id=flow.get('case_id'))
+            else:
+                await send_whatsapp_text(sender, question(flow.get('registration') or ''), case_id=flow.get('case_id'))
+            return True
+        try:
+            symptom = apply_reply(DB_PATH, int(flow['request_id']), sender, str(flow['case_id']), str(flow['registration']), axle)
+        except (ValueError, KeyError) as exc:
+            await send_whatsapp_text(sender, 'Solicitarea s-a modificat între timp; consilierul va verifica această completare. Nu deschid o cerere nouă.', case_id=flow.get('case_id'))
+            return True
+        flow.update(stage='request_created', pending_symptom=symptom, brake_axle_answer=axle)
+        states[sender] = flow
+        _save_new_vehicle_states(states)
+        await send_whatsapp_text(sender, f'Am notat plăcuțele de frână {LABELS[axle]} la cererea #{flow["request_id"]}. Revenim cu oferta pentru confirmare, după verificarea pieselor și manoperei.', case_id=flow.get('case_id'))
+        return True
     if stage == 'awaiting_registration_document' and incoming_plate:
         flow['stage'] = 'awaiting_registration'
         flow['registration'] = incoming_plate
@@ -11573,6 +11673,10 @@ async def _route_new_vehicle_intake(sender: str, body: str) -> bool:
         return await _route_new_vehicle_intake(sender, symptom)
 
     if stage == "request_created":
+        from brake_scope import reply_axle, LABELS
+        if flow.get('brake_axle_answer') and reply_axle(body) == flow['brake_axle_answer']:
+            await send_whatsapp_text(sender, f'Am notat deja plăcuțele de frână {LABELS[flow["brake_axle_answer"]]} la această cerere.')
+            return True
         # Follow-up details belong to the request just created.  Previously the
         # intake state was discarded, so "ulei Liqui Moly sau Motul" started a
         # second intake and could overwrite the complete revision description.
@@ -11619,6 +11723,10 @@ async def _route_new_vehicle_intake(sender: str, body: str) -> bool:
                 flow["pending_symptom"] = _append_request_symptom(request_id, addition)
                 states[sender] = flow
                 _save_new_vehicle_states(states)
+                from brake_scope import needs_clarification
+                if needs_clarification(flow['pending_symptom']):
+                    await _ask_request_brake_scope(request_id)
+                    return True
                 await send_whatsapp_text(sender, "Am adăugat lucrarea la cererea existentă.")
             else:
                 await send_whatsapp_text(sender, "Cererea este deja înregistrată cu aceste lucrări.")
@@ -11713,6 +11821,10 @@ async def _route_new_vehicle_intake(sender: str, body: str) -> bool:
         })
         states[sender] = flow
         _save_new_vehicle_states(states)
+        from brake_scope import needs_clarification
+        if needs_clarification(symptom):
+            await _ask_request_brake_scope(request_id)
+            return True
         await send_whatsapp_text(
             sender,
             f"Am înregistrat cererea pentru {symptom.lower()}, la mașina "
@@ -12281,6 +12393,10 @@ async def _send_to_agent(
             (case_id,),
         ).fetchone()
     if current_request and current_request["vin"] and current_request["registration"]:
+        from brake_scope import needs_clarification
+        if needs_clarification(current_request['symptom'] or ''):
+            await _ask_request_brake_scope(int(current_request['id']))
+            return
         symptom = _normalize_text(current_request["symptom"] or "")
         wanted_brakes = bool(re.search(r"fr[aâ]n|disc|pl[aă]cu", symptom))
         wanted_service = bool(re.search(r"revizie|filtru|ulei", symptom))

@@ -48,7 +48,8 @@ class OfferScopeValidationTests(unittest.TestCase):
         html = render_lines(rows)
         self.assertIn('Lipsește: cod piesă, preț unitar', html)
         self.assertIn('placeholder="De confirmat"', html)
-        with patch('app._require_original_oil_selection'), patch('app._load_offer_selections', return_value={}), \
+        with patch('app._request_by_id', return_value={'symptom':'Schimb O-ring injector'}), \
+             patch('app._require_original_oil_selection'), patch('app._load_offer_selections', return_value={}), \
              patch('app._draft_for_request', return_value={'parts_checklist': rows}):
             from fastapi import HTTPException
             with self.assertRaises(HTTPException) as error:

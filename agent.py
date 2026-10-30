@@ -67,6 +67,11 @@ def save_service_request(
 ) -> str:
     """Salvează solicitarea service și timpii de manoperă, dacă există."""
 
+    from brake_scope import needs_clarification
+    if needs_clarification(symptom):
+        return ('CLARIFICARE NECESARĂ: nu am salvat încă această solicitare. '
+                'Întreabă clientul dacă plăcuțele sunt pentru față, spate sau ambele punți. '
+                'Nu presupune puntea față și nu interpreta un răspuns Da ca alegere a punții.')
     POLICY.authorize(Action.CREATE_REQUEST, session_id=ctx.context.session_id, vin=vin)
     req_id = create_request({
         "session_id": ctx.context.session_id,
@@ -154,6 +159,10 @@ DACĂ RĂSPUNDE NU
   și nu mai cere VIN-ul dacă este deja prezent.
 
 PROBLEMA MAȘINII
+Alegerea punții pentru plăcuțele de frână este obligatorie înainte de ofertare.
+Dacă nu este precizată lângă plăcuțe, întreabă: „Pe față, pe spate sau pe ambele punți?”
+Nu presupune față și nu deduce puntea din altă lucrare: „discuri spate și plăcuțe” nu precizează puntea plăcuțelor.
+Un răspuns față/spate/ambele completează cererea curentă; nu este accept de ofertă și nu creează o cerere nouă.
 Află natural:
 - ce lucrare dorește sau ce simptom are;
 - când apare;

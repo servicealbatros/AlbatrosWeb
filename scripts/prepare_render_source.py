@@ -16,7 +16,7 @@ FILES = (
     'dsm_accepted_offers.py', 'dsm_booking_approval.py', 'dsm_billing_sync.py', 'dsm_open_orders_readonly.py', 'dsm_history_import.py', 'dsm_history_cache.py', 'pre_reception.py', 'dsm_pre_reception.py', 'pre_arrival_reminders.py', 'dsm_pre_arrival.py',
     'autototal_request_worker.py', 'technician_request_worker_v6_time_parse_fix.py',
     'tecrmi_request_worker.py', 'robot_cdp_health.py', 'runtime_control.py',
-    'pre_arrival_policy.py', 'dsm_gdpr.py', 'requirements.txt', 'render.yaml', 'Dockerfile', '.dockerignore', '.gitignore',
+    'pre_arrival_policy.py', 'dsm_gdpr.py', 'brake_scope.py', 'requirements.txt', 'render.yaml', 'Dockerfile', '.dockerignore', '.gitignore',
     '.env.example', 'RENDER_DEPLOYMENT.md', 'test_cloud_access.py',
 )
 

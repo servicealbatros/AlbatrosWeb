@@ -148,7 +148,8 @@ class ProductionWriterTests(unittest.IsolatedAsyncioTestCase):
             data=await prod.seed(dict(registration='B112TST',dsm_transaction_id='10',dsm_transaction_type='3',operations='Revizie'))
         self.assertEqual(data['phone'],'40700100009');self.assertEqual(data['source_type'],'3')
         self.assertEqual(data['client_address'],'')
-        search.assert_not_awaited()
+        search.assert_awaited_once_with('B112TST')
+        self.assertEqual(data['document_policy']['decision'],'review')
 
 
 if __name__=='__main__':unittest.main()

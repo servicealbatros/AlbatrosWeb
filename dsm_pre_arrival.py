@@ -10,6 +10,44 @@ from dsm_open_orders_readonly import _evaluate
 from dsm_pre_reception import (call, children, client_fields, vehicle_fields,
     save_client_details, save_vehicle_details, requirements_description)
 from pre_reception import phone
+from pre_arrival_policy import evaluate as document_policy, saved_date, can_reuse, preparation_ready
+import pre_arrival_policy as document_rules
+
+
+async def document_requirements(data, *, checked_on=None):
+    """Read real completed visits for this VIN/car, never offers or appointments."""
+    if data.get('vehicle_missing'):
+        return dict(document_policy(vehicle_exists=False, checked_on=checked_on),
+                    vin=data.get('vin') or '', car_id=data.get('car_id') or '')
+    refs = await _search_transactions(data['registration'])
+    ids = list(dict.fromkeys(str(row['transaction_id']) for row in refs
+               if str(row.get('transaction_type')) == '2'
+               and row.get('status') not in {'canceled', 'cancelled'}))
+    details = await _read_details(ids) if ids else {}
+    visits, unknown_date = [], False
+    current = checked_on or document_rules.today()
+    for ident in ids:
+        head = (details.get(ident) or {}).get('transaction') or {}
+        if str(head.get('transaction_head__id')) != ident or str(head.get('transaction_head__type')) != '2':
+            raise ValueError('Istoricul vizitelor DSM este incomplet; verificare consilier necesară.')
+        if str(head.get('car_body_series') or '').upper() != data['vin']:
+            if str(head.get('car_id')) == data['car_id']:
+                raise ValueError('VIN neconcordant în istoricul vizitelor; nu reutilizăm datele altei mașini.')
+            continue  # A former holder of this plate is a different vehicle.
+        if head.get('transaction_head__status') not in {'billed', 'completed', 'closed'}:
+            continue
+        visit = saved_date(head.get('transaction_head__datetime_appointment') or head.get('transaction_start'))
+        if visit is None or visit > current:
+            unknown_date = True
+        else:
+            visits.append((visit, ident))
+    latest = max(visits) if visits else None
+    policy = document_policy(vehicle_exists=True, last_visit=latest[0] if latest else None, checked_on=current)
+    if unknown_date and policy['decision']!='reuse_dsm':
+        policy = document_policy(vehicle_exists=True, last_visit=latest[0] if latest else None,
+                                 checked_on=current, history_complete=False)
+    return dict(policy, vin=data['vin'], car_id=data['car_id'],
+                visit_order_id=latest[1] if latest else None)
 
 
 def plate(value):
@@ -31,16 +69,17 @@ async def appointment_call(action,data):
 async def read_appointment(ident):
     result=await appointment_call('getappointment',dict(appointment_id=ident))
     detail=result.get('detail') or {}
-    if result.get('status')!='success' or not detail.get('carId') or not detail.get('clientId'):
-        raise ValueError('Programarea nu are o mașină și un client identificați.')
-    car=await call('/special/car/get_car',{'car_id':str(detail['carId'])})
+    if result.get('status')!='success' or not detail.get('clientId'):
+        raise ValueError('Programarea nu are un client identificat.')
+    car_id=str(detail.get('carId') or '')
+    car=await call('/special/car/get_car',{'car_id':car_id}) if car_id.isdigit() and int(car_id)>1 else {}
     order_id=str(detail.get('estimateId') or '')
     linked=order_id.isdigit() and int(order_id)>0 and str(detail.get('estimateType'))=='2'
     return dict(transaction=dict(transaction_head__id=str(ident),transaction_head__type='3',
         transaction_head__code=str(detail.get('code') or ''),
         transaction_head__status='completed' if linked else 'working' if detail.get('canCancel') or detail.get('canTransform') else 'inactive',
         car_body_series=str(car.get('car_body_series') or '').upper(),car_auto_number=detail.get('carNumber'),
-        car_id=str(detail['carId']),contact_id=str(detail['clientId'])),
+        car_id=car_id,contact_id=str(detail['clientId'])),
         transaction_head_childs=[dict(transaction_id=order_id,transaction_head__type='2',transaction_status='0')] if linked else [],
         appointment_phone=detail.get('clientPhone'),appointment_start=detail.get('start'))
 
@@ -74,7 +113,9 @@ async def seed(appointment):
     if len(groups)!=1 or (explicit and len(heads)!=1):
         raise ValueError('Mai multe mașini, clienți sau documente posibile; consilierul trebuie să confirme destinatarul.')
     vin,car_id,contact_id=groups.pop()
-    if not re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}',vin) or not car_id.isdigit() or not contact_id.isdigit() or min(int(car_id),int(contact_id))<=1:
+    vehicle_missing = source_kind=='3' and source_id.isdigit() and (not car_id or car_id in {'0','1'})
+    if (not contact_id.isdigit() or int(contact_id)<=1 or not vehicle_missing and
+            (not re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}',vin) or not car_id.isdigit() or int(car_id)<=1)):
         raise ValueError('VIN-ul, mașina sau clientul nu sunt identificați complet.')
     h=heads[0]
     if source_id.isdigit() and (str(h.get('transaction_head__type'))!=source_kind or h.get('transaction_head__status') in {'canceled','cancelled','billed'}
@@ -85,7 +126,7 @@ async def seed(appointment):
         h=active[0] if len(active)==1 else heads[0]
     ident=str(h['transaction_head__id'])
     client=await call('/special/contact/get_client',{'contact_id':contact_id,'transaction_id':ident})
-    car=await call('/special/car/get_car',{'car_id':car_id})
+    car=await call('/special/car/get_car',{'car_id':car_id}) if not vehicle_missing else {}
     if str(car.get('car_body_series') or '').upper()!=vin:
         raise ValueError('VIN neconcordant în datele mașinii.')
     mobiles=[m for m in client.get('mobile') or [] if isinstance(m,dict)]
@@ -104,13 +145,15 @@ async def seed(appointment):
     previous=dict(client_name=str(client.get('contact_name') or '').strip(),client_phone=target,
         client_address_street=str(address).strip(),car_manufacture_year=str(car.get('car_manufacture_year') or ''),
         car_itp_expires_date=str(car.get('car_itp_expires_date') or ''))
-    return dict(vin=vin,registration=registration,phone=target,client_name=previous['client_name'],
+    data = dict(production=True,vin=vin,registration=registration,phone=target,client_name=previous['client_name'],
         client_address=previous['client_address_street'],previous_dsm=previous,
         work=str(appointment.get('operations') or 'Lucrările programate'),car_id=car_id,contact_id=contact_id,
         source_transaction_id=ident,source_type=str(h['transaction_head__type']),source_code=str(h.get('transaction_head__code') or ''),
         source_explicit=bool(explicit or source_id.isdigit()),requires_order_review=bool(active and not explicit and not source_id.isdigit()),
         appointment_command_id=str(appointment.get('pre_arrival_command_id') or ''),
-        source_appointment_start=(payloads.get(source_id) or {}).get('appointment_start',''))
+        source_appointment_start=(payloads.get(source_id) or {}).get('appointment_start',''),vehicle_missing=vehicle_missing)
+    data['document_policy'] = await document_requirements(data)
+    return data
 
 
 async def _create(path, data):
@@ -130,6 +173,8 @@ async def existing_orders(data):
     if not ids:
         return []
     details=await _read_details(ids)
+    if data.get('vehicle_missing') and ids:
+        raise ValueError('Există o comandă pentru această înmatriculare; identitatea mașinii trebuie verificată înaintea legării.')
     result=[]
     for ident in ids:
         h=(details.get(ident) or {}).get('transaction') or {}
@@ -154,12 +199,24 @@ def check_head(head, data, ident, *, kind='2', empty=False):
 
 
 async def create_or_find(data, allow_create, record_created):
-    if not data.get('production') or not all(data.get(k) for k in ('final_confirmed','document_verified','document_current','document_fields_confirmed','phone_confirmed')):
+    if not data.get('production') or not preparation_ready(data) or not all(data.get(k) for k in ('final_confirmed','phone_confirmed')):
         raise ValueError('Datele finale ale clientului nu sunt confirmate.')
-    vehicle_fields(data);client_fields(data)
+    reuse = can_reuse(data) and data.get('document_source')=='dsm'
+    if not reuse:
+        vehicle_fields(data)
+    client_fields(data)
     source_id=data['source_transaction_id']
     source=await read_appointment(source_id) if data['source_type']=='3' else await call('/special/transaction/get_transaction/'+source_id)
     h=source.get('transaction') or {}
+    if data.get('vehicle_missing'):
+        # Collecting a new customer's document is allowed; inventing a DSM
+        # vehicle-creation API or binding a generic car is not.
+        new_car_id=str(h.get('car_id') or '')
+        if (not new_car_id.isdigit() or int(new_car_id)<=1
+                or str(h.get('car_body_series') or '').upper()!=data['vin']):
+            raise ValueError('Mașina nouă trebuie înregistrată și asociată în DSM înaintea comenzii; nu folosim o mașină generică.')
+        data['car_id']=new_car_id
+        data['vehicle_missing']=False
     if (str(h.get('transaction_head__id'))!=source_id or str(h.get('transaction_head__type'))!=data['source_type']
             or h.get('transaction_head__status') not in {'working','completed'}
             or str(h.get('car_body_series') or '').upper()!=data['vin'] or str(h.get('car_id'))!=data['car_id']
@@ -169,6 +226,15 @@ async def create_or_find(data, allow_create, record_created):
         raise ValueError('Programarea a fost mutată după confirmarea clientului.')
     if data.get('requires_order_review'):
         raise ValueError('Există o comandă în lucru fără legătură explicită cu programarea; nu creez un duplicat.')
+    if reuse:
+        fresh_policy = await document_requirements(data)
+        if fresh_policy['decision']!='reuse_dsm':
+            raise ValueError('Ultima vizită nu mai permite reutilizarea datelor; este necesară actualizarea prin talon.')
+        car=await call('/special/car/get_car',{'car_id':data['car_id']})
+        if (str(car.get('car_body_series') or '').upper()!=data['vin'] or any(
+                str(car.get(key) or '').strip()!=str(data.get('previous_dsm',{}).get(key) or '').strip()
+                for key in ('car_itp_expires_date','car_manufacture_year'))):
+            raise ValueError('Datele mașinii s-au modificat în DSM; reverificare necesară, fără suprascriere.')
     ident=str(data.get('_created_command_id') or data.get('appointment_command_id') or '')
     if not ident and data['source_explicit'] and data['source_type']=='3':
         ids=children(source)
@@ -233,7 +299,8 @@ async def create_or_find(data, allow_create, record_created):
     check_head(head,data,ident)
     if data['source_explicit'] and data['source_type']=='1' and head.get('parent_transaction_code')!=data['source_code']:
         raise ValueError('Comanda nu aparține ofertei confirmate.')
-    await save_vehicle_details(data,head,ident)
+    if not reuse:
+        await save_vehicle_details(data,head,ident)
     await save_client_details(data,head,ident)
     desired=requirements_description(data,str(head.get('transaction_head__description') or ''))
     marker='[ALBATROS PRE-RECEPTIE '+str(data.get('appointment_id') or source_id)+']'
@@ -246,4 +313,5 @@ async def create_or_find(data, allow_create, record_created):
         check=await call('/special/transaction/get_transaction/'+ident)
         if (check.get('transaction') or {}).get('transaction_head__description')!=desired:
             raise ValueError('Cerințele salvate nu au putut fi verificate.')
-    return dict(id=ident,code=str(head.get('transaction_head__code') or ident),itp=data['itp'],test=False)
+    return dict(id=ident,code=str(head.get('transaction_head__code') or ident),itp=data.get('itp'),test=False,
+                data_source='dsm' if reuse else 'document')

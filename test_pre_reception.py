@@ -244,6 +244,7 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     async def test_two_phones_one_order_restart_safe(self):
         data = {**self.seed, 'client': 'Test', 'client_name': 'Test', 'client_address': 'București, Str. Test 1', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01', 'extra': 'Nu', 'document_verified': True}
         data['document_current'] = True
+        data['document_fields_confirmed'] = True
         for sender in p.RECIPIENTS:
             p.save(self.root, sender, 'confirm', data)
         await asyncio.gather(*(p.text(self.root, sender, 'CONFIRM DATELE', self.send, self.writer) for sender in p.RECIPIENTS))
@@ -255,6 +256,7 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     async def test_uncertain_write_is_reconciled_not_recreated(self):
         data = {**self.seed, 'client': 'Test', 'client_name': 'Test', 'client_address': 'București, Str. Test 1', 'phone': p.RECIPIENTS[0], 'itp': '2027-01-01', 'extra': 'Nu', 'document_verified': True}
         data['document_current'] = True
+        data['document_fields_confirmed'] = True
         p.save(self.root, p.RECIPIENTS[0], 'confirm', data)
         self.writer.side_effect = RuntimeError('timeout after POST')
         await p.text(self.root, p.RECIPIENTS[0], 'CONFIRM DATELE', self.send, self.writer)

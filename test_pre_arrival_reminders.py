@@ -28,6 +28,8 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
                 VALUES (1,?,?,'programat','B112TST','Revizie',2,'APP-1')""",(str(self.target)+'T08:30',str(self.target)+'T10:30'))
         self.data=dict(vin=VIN,registration='B112TST',phone=PHONE,client_name='Client',
                        client_address='Ploiesti Str. Test 1',work='Revizie',previous_dsm={})
+        from pre_arrival_policy import evaluate
+        self.data['document_policy']=evaluate(vehicle_exists=True,last_visit='2000-01-01',checked_on=self.now.date())
         self.seed=AsyncMock(return_value=self.data.copy())
         self.notify=AsyncMock(return_value={'messages':[{'id':'wamid.fixture'}]})
 

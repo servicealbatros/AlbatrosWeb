@@ -151,3 +151,40 @@ POST /api/admin/worker-backup requires the cloud administrator bearer token and 
 SHA256 checksum. It stores a private validated recovery archive on the persistent
 disk, without extracting it or replacing live databases. SQLite files are copied
 using the SQLite backup API; snapshots are not a second active robot.
+
+## Registration-certificate refresh during pre-arrival
+
+Production pre-reception requests the registration certificate when the vehicle
+is absent from the native DSM appointment, or one calendar year has elapsed
+since its latest verified completed/closed/invoiced work order. On February 29,
+the following anniversary falls on February 28. Estimates, cancelled documents,
+future dates and new open pre-orders never reset this clock. Historical work
+orders must match the verified VIN; a former vehicle with the same plate does
+not qualify. History is read again when the customer confirms attendance and
+before creating an order using stored data.
+
+For a recent visit the customer confirms attendance, contact details and any
+additional requirements, then gives final confirmation. The flow uses existing
+vehicle data without OCR, without claiming a document was received and without
+updating saved ITP/year values. Missing saved values remain missing; client
+details are requested separately as before. Concurrent DSM changes cause review
+instead of overwriting a newer record. The existing duplicate-order checks and
+exact approved-order bindings still apply to both paths.
+
+An unknown/unreadable last-visit date requires adviser review, not an automatic
+photo request. A first-time customer with a native appointment but no vehicle
+can send the certificate; its VIN must match the appointment's plate. Before a
+real order can be opened, that vehicle must be registered and linked in DSM.
+This change deliberately does not guess a vehicle-creation endpoint or attach
+the order to a generic vehicle. Explicit manual document/OCR tests retain their
+document requirement.
+
+The policy changes no enrolment, recipient list, 17:00 schedule, messaging
+enablement or live record. Existing pilot restrictions remain in place.
+Regression tests: `python -m unittest test_pre_arrival_policy test_pre_reception
+test_pre_arrival_reminders test_dsm_pre_arrival test_manual_pre_reception
+test_pre_arrival_worker` (run the command on one line).
+Local verification passed 27 policy tests and 88 focused pre-reception tests.
+The broader deployment regression run completed 246 tests with one Linux-only
+lease test skipped on Windows. No live DSM/WhatsApp writes or deployment were
+performed during this verification.

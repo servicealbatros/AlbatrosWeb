@@ -9,6 +9,7 @@ from contextlib import closing
 from zoneinfo import ZoneInfo
 
 from pre_reception import db, get, save, phone
+from pre_arrival_policy import can_reuse
 
 ROMANIA = ZoneInfo('Europe/Bucharest')
 LOCK = asyncio.Lock()
@@ -87,12 +88,18 @@ def appointments(db_path, target):
 
 def invitation(data):
     start=datetime.fromisoformat(data['appointment_start'])
+    documents = ('Avem deja datele mașinii de la ultima vizită în service, din ultimul an. '
+                 'Vom pregăti comanda folosind aceste date; nu este necesară o fotografie a talonului.\n\n'
+                 if can_reuse(data) else
+                 'Pentru pregătirea comenzii și reducerea timpului de așteptare, trimiteți fotografii clare ale talonului, '
+                 'cu seria de caroserie și rubrica ITP vizibile. Dacă sunt pe fețe diferite, fotografiați ambele fețe.\n\n')
+    if data.get('production') and (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
+        documents = 'Consilierul va verifica ultima vizită și datele existente înainte de pregătirea comenzii.\n\n'
     return (f'Bună ziua, {data.get("client_name") or "stimate client"}!\n'
         f'Vă reamintim programarea la ALBATROS A pentru mașina {data["registration"]}, '
         f'mâine, {start:%d.%m.%Y}, la ora {start:%H:%M}.\n\n'
         'Vă rugăm să confirmați venirea răspunzând DA sau NU.\n\n'
-        'Pentru pregătirea comenzii și reducerea timpului de așteptare, trimiteți fotografii clare ale talonului, '
-        'cu seria de caroserie și rubrica ITP vizibile. Dacă sunt pe fețe diferite, fotografiați ambele fețe.\n\n'
+        + documents +
         'Vom verifica împreună datele mașinii, datele de contact și eventualele cerințe suplimentare pentru lucrare. '
         'Datele și cerințele vor fi reverificate și confirmate la semnarea comenzii. Mulțumim!')
 
@@ -114,7 +121,9 @@ def status(root):
             data=json.loads(case['data'])
             if data.get('production'):
                 cases.append(dict(appointment_id=data.get('appointment_id'),registration=data.get('registration'),
-                    phone_suffix=case['phone'][-4:],stage=case['stage'],command_code=(data.get('order') or {}).get('code')))
+                    phone_suffix=case['phone'][-4:],stage=case['stage'],command_code=(data.get('order') or {}).get('code'),
+                    document_source=data.get('document_source'),document_policy=(data.get('document_policy') or {}).get('decision'),
+                    last_visit=(data.get('document_policy') or {}).get('last_visit')))
             if data.get('production') and (data.get('attendance_declined') or case['stage']=='review'):
                 errors.append(dict(appointment_id=data.get('appointment_id'),start_at=data.get('appointment_start'),
                     state=case['stage'],error='Clientul nu confirmă venirea; verifică reprogramarea.' if data.get('attendance_declined') else 'Datele sau comanda necesită verificarea consilierului.'))
@@ -144,6 +153,8 @@ async def preview(db_path, root, target, seed, keys=None,check_orders=None):
     for appointment in current_appointments(db_path,target,keys,settings(root).get('registrations',[])):
         try:
             data=await seed(appointment)
+            if data.get('production') and (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
+                raise ValueError('Data ultimei vizite în service nu poate fi confirmată în DSM; verificare consilier înainte de solicitarea talonului.')
             existing=await check_orders(data) if check_orders else []
             if existing and not settings(root).get('existing_order_ids',{}).get(data['registration']):
                 results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=False,
@@ -154,7 +165,8 @@ async def preview(db_path, root, target, seed, keys=None,check_orders=None):
                 raise ValueError('Același număr are mai multe programări; verificare consilier pentru a nu amesteca mașinile.')
             phones.add(data['phone'])
             results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=True,phone_suffix=data['phone'][-4:],
-                                mode='update_existing' if data.get('approved_existing_order_id') else 'create',existing_orders=existing))
+                                mode='update_existing' if data.get('approved_existing_order_id') else 'create',existing_orders=existing,
+                                document_policy=data.get('document_policy')))
         except Exception as exc:
             results.append(dict(appointment_id=appointment['id'],registration=appointment['registration'],eligible=False,reason=str(exc)[:250]))
     return dict(date=target.isoformat(),candidates=results,eligible=sum(r['eligible'] for r in results))
@@ -184,6 +196,8 @@ async def tick(db_path, root, now, notify, seed, refresh=None, allowed=lambda:Tr
                     result['skipped']+=1;continue
             try:
                 data=await seed(appointment)
+                if data.get('production') and (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
+                    raise ValueError('Data ultimei vizite în service nu poate fi confirmată în DSM; verificare consilier înainte de solicitarea talonului.')
                 existing=await check_orders(data) if check_orders else []
                 bind_existing_order(root,data,existing)
                 with db(root) as conn:

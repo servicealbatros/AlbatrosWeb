@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import sqlite3
 import unicodedata
+from pre_arrival_policy import can_reuse, load_stored_vehicle, preparation_ready, saved_date
 
 RECIPIENTS = tuple(value.strip() for value in os.getenv('PRE_RECEPTION_TEST_PHONES', ('40700100000', '40700100006')[0] + ',' + ('40700100000', '40700100006')[1]).split(',') if value.strip())
 LOCK = asyncio.Lock()
@@ -55,6 +56,8 @@ async def request_document(root, sender, data, send):
                 'itp', 'itp_source', 'owner_name', 'manufacture_year',
                 'photo_registration', 'document_difference'):
         data.pop(key, None)
+    data['document_source'] = 'document'
+    data['document_refresh_requested'] = True
     save(root, sender, 'document', data)
     context = (f'TEST ALBATROS A — reluăm verificarea pe comanda {data["retest_command_code"]}, fără o comandă duplicată.\n'
                if data.get('test_run_id') and data.get('retest_command_code') else '')
@@ -191,11 +194,15 @@ async def restart(root, send, seed, *, run_id=None, recipient=None):
 
 
 def summary(data):
-    expired = date.fromisoformat(data['itp']) < date.today()
+    expiry = saved_date(data.get('itp'))
+    expired = bool(expiry and expiry < date.today())
     if data.get('production'):
+        reused = data.get('document_source') == 'dsm' and can_reuse(data)
+        identity = (f'Date preluate din fișa mașinii; ultima vizită: {saved_date(data["document_policy"]["last_visit"]):%d.%m.%Y}.\n'
+                    if reused else f'Titular talon: {data.get("owner_name","—")}\n')
         return (f'Verificați datele pentru pregătirea comenzii {data["registration"]}:\n'
-            f'Serie de caroserie: {data["vin"]}\nTitular talon: {data.get("owner_name","—")}\n'
-            f'An fabricație: {data.get("manufacture_year","—")}\nITP până la: {data["itp"]}' + (' — EXPIRAT' if expired else '') + '\n'
+            f'Serie de caroserie: {data["vin"]}\n' + identity +
+            f'An fabricație: {data.get("manufacture_year") or "neînregistrat"}\nITP până la: {data.get("itp") or "neînregistrat"}' + (' — EXPIRAT' if expired else '') + '\n'
             f'Client: {data.get("client_name","—")}\nAdresă: {data.get("client_address","—")}\nTelefon: {data["phone"]}\n'
             f'Lucrări: {data["work"]}\nCerințe suplimentare: {data.get("extra","Nu")}\n'
             'Datele și cerințele vor fi reverificate și confirmate la semnarea comenzii, împreună cu consilierul. '
@@ -232,7 +239,7 @@ async def request_missing_client(root, sender, data, send):
         await send(sender, summary(data))
 
 
-async def text(root, sender, body, send, writer):
+async def text(root, sender, body, send, writer, *, refresh_policy=None):
     if not get(root, sender):
         return False
     async with LOCK:
@@ -257,6 +264,30 @@ async def text(root, sender, body, send, writer):
                 return False
             await send(sender, f'Comanda de TEST {data["order"]["code"]} există deja. Nu creez o a doua comandă. Pentru încheierea conversației de test: STOP TEST.')
             return True
+        policy_review = (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}
+        if (data.get('production') and not data.get('document_verified')
+                and (stage in {'attendance','invite_failed'} and value in {'da', 'confirm', 'confirm participarea'}
+                     or stage=='document' or stage=='review' and policy_review and value in {'da','confirm datele'})
+                and refresh_policy):
+            try:
+                data['document_policy'] = await refresh_policy(data)
+            except Exception:
+                data['document_policy']={'decision':'review','reason':'history_unavailable'}
+                save(root,sender,'review',data)
+                await send(sender,'Nu am putut verifica ultima vizită în service. Consilierul va verifica datele existente înainte de a cere documente sau de a deschide comanda.')
+                return True
+        if (stage=='document' or stage=='review' and policy_review) and data.get('production'):
+            if (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
+                save(root,sender,'review',data)
+                await send(sender,'Consilierul va verifica data ultimei vizite și datele mașinii. Nu vă solicităm talonul până la clarificare.')
+                return True
+            if stage=='review' and not can_reuse(data):
+                await request_document(root,sender,data,send)
+                return True
+        if (stage=='document' or stage=='review' and policy_review) and can_reuse(data):
+            load_stored_vehicle(data)
+            await request_missing_client(root,sender,data,send)
+            return True
         if stage in {'attendance', 'invite_failed'}:
             if value in {'nu', 'nu confirm'}:
                 if data.get('production'):
@@ -264,7 +295,14 @@ async def text(root, sender, body, send, writer):
                 save(root, sender, 'stopped', data)
                 await send(sender, 'Am notat că nu confirmați venirea. Consilierul va verifica reprogramarea; programarea nu a fost anulată automat.' if data.get('production') else 'Am oprit simularea. Nu am anulat oferta sau vreo programare reală.')
             elif value in {'da', 'confirm', 'confirm participarea'}:
-                await request_document(root, sender, data, send)
+                if can_reuse(data):
+                    load_stored_vehicle(data)
+                    await request_missing_client(root,sender,data,send)
+                elif data.get('production') and (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
+                    save(root,sender,'review',data)
+                    await send(sender,'Consilierul va verifica data ultimei vizite și datele mașinii. Nu vă solicităm talonul până la clarificare.')
+                else:
+                    await request_document(root, sender, data, send)
             else:
                 await send(sender, 'Pentru confirmarea programării răspundeți DA sau NU.' if data.get('production') else 'Pentru testul B101TST răspunde DA sau NU.')
         elif stage == 'document':
@@ -363,7 +401,11 @@ async def text(root, sender, body, send, writer):
             elif value == 'corecteaza':
                 await request_document(root, sender, data, send)
             elif value == 'confirm datele':
-                if not data.get('document_current'):
+                if not preparation_ready(data):
+                    if data.get('production') and (data.get('document_policy') or {}).get('decision') not in {'reuse_dsm','request_document'}:
+                        save(root,sender,'review',data)
+                        await send(sender,'Data ultimei vizite trebuie verificată înaintea pregătirii comenzii. Nu solicităm încă talonul.')
+                        return True
                     await request_document(root, sender, data, send)
                     return True
                 if not data.get('client_name') or not data.get('client_address'):
@@ -380,7 +422,7 @@ async def text(root, sender, body, send, writer):
                     if prior['state'] != 'done' and prior['result']:
                         data['_created_command_id'] = json.loads(prior['result']).get('id')
                     result = json.loads(prior['result']) if prior['state'] == 'done' else await writer(data, allow_create)
-                    if result.get('itp') and result['itp'] != data['itp']:
+                    if result.get('itp') and result['itp'] != data.get('itp'):
                         raise ValueError('Un alt participant a confirmat deja o dată ITP diferită; verificare consilier necesară.')
                     with db(root) as conn:
                         conn.execute('UPDATE orders SET state=?,result=? WHERE offer=?', ('done', json.dumps(result), data['offer_id']))
@@ -434,6 +476,9 @@ async def image(root, sender, message, send, download, reader):
             os.chmod(evidence_path, 0o600)
             differences = []
             reference='programare' if data.get('production') else 'oferta semnată'
+            if (data.get('production') and data.get('vehicle_missing') and stage=='document' and not data.get('document_verified')
+                    and re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}',vin) and plate==data['registration']):
+                data['vin']=vin
             if vin and vin != data['vin']:
                 differences.append(f'VIN citit: {vin}; VIN din {reference}: {data["vin"]}')
             if plate and plate != data['registration'] and vin != data['vin']:
@@ -447,7 +492,7 @@ async def image(root, sender, message, send, download, reader):
                 await send(sender, 'Verificarea fotografiei a găsit: ' + '; '.join(differences) + '. Poate fi o eroare de citire. Vechimea pozei nu este motivul blocării. Trimite o fotografie mai clară pentru verificare; nu deschid încă o comandă.')
                 return True
             data.pop('document_difference', None)
-            if vin == data['vin']:
+            if vin == data['vin'] and re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}',vin):
                 data['document_verified'] = True
                 data['document_current'] = True
                 if plate and plate != data['registration']:

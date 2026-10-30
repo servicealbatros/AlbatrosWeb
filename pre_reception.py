@@ -58,6 +58,8 @@ async def request_document(root, sender, data, send):
     save(root, sender, 'document', data)
     context = (f'TEST ALBATROS A — reluăm verificarea pe comanda {data["retest_command_code"]}, fără o comandă duplicată.\n'
                if data.get('test_run_id') and data.get('retest_command_code') else '')
+    if data.get('manual_test') and not context:
+        context = f'TEST ALBATROS A — {data["registration"]}, fără rezervare în programator.\n'
     await send(sender, context + f'Vă rugăm să ne trimiteți o fotografie clară a talonului mașinii {data["registration"]}, pentru a ne ajuta să actualizăm datele și să scurtăm timpul de așteptare la intrarea mașinii în service. Vă rugăm să includeți seria de șasiu (VIN) și rubrica privind valabilitatea ITP. Dacă sunt pe fețe diferite, trimiteți fotografii cu ambele fețe. Nu este nevoie de CNP.')
 
 
@@ -118,7 +120,8 @@ def status(root):
     config=settings(root)
     return {'production_enabled': bool(config.get('enabled')), 'production_start_date': config.get('start_date'),
             'flow_version': 3, 'reminder_hour': '17:00', 'registration': 'B101TST',
-            'cases': [{'phone_suffix': r['phone'][-4:], 'stage': r['stage'], 'updated': r['updated']} for r in rows],
+            'cases': [{'phone_suffix': r['phone'][-4:], 'stage': r['stage'], 'updated': r['updated'],
+                       'registration': json.loads(r['data']).get('registration')} for r in rows],
             'orders': [{'state': r['state'], 'result': json.loads(r['result']) if r['result'] else None} for r in orders]}
 
 
@@ -199,7 +202,7 @@ def summary(data):
             'Nu se aprobă costuri suplimentare prin acest mesaj. Pentru pregătirea comenzii răspundeți CONFIRM DATELE. '
             'Pentru corecturi: CORECTEAZA CLIENT sau CORECTEAZA.')
     operation = f'actualizarea comenzii de TEST {data["retest_command_code"]}' if data.get('retest_command_id') else 'crearea comenzii REALE'
-    return (f'TEST B101TST — verifică datele înainte de {operation}:\nVIN: {data["vin"]}\n'
+    return (f'TEST {data["registration"]} — verifică datele înainte de {operation}:\nVIN: {data["vin"]}\n'
             f'ITP până la: {data["itp"]} (' + ('declarat de client' if data.get('itp_source') == 'client' else 'citit din talon') + ')' + (' — EXPIRAT' if expired else '') + '\n'
             + (f'Înmatriculare în fotografia veche: {data["photo_registration"]}; înmatricularea curentă din ofertă: {data["registration"]}.\n' if data.get('photo_registration') else '') +
             f'Nume client: {data.get("client_name") or data.get("client", "—")}\nAdresă: {data.get("client_address", "—")}\nTelefon: {data["phone"]}\n'
@@ -383,7 +386,7 @@ async def text(root, sender, body, send, writer):
                         conn.execute('UPDATE orders SET state=?,result=? WHERE offer=?', ('done', json.dumps(result), data['offer_id']))
                     data['order'] = result
                     save(root, sender, 'done', data)
-                    await send(sender, f'Comanda {result["code"]} pentru {data["registration"]} este pregătită. Vă așteptăm la programarea confirmată. Datele și cerințele vor fi reverificate la semnarea comenzii.' if data.get('production') else f'Comanda de TEST {result["code"]} a fost verificată în DSM pentru B101TST. Data expirării ITP {data["itp"]} a fost salvată și verificată în Date Mașină. Nu am făcut rezervare în programator.')
+                    await send(sender, f'Comanda {result["code"]} pentru {data["registration"]} este pregătită. Vă așteptăm la programarea confirmată. Datele și cerințele vor fi reverificate la semnarea comenzii.' if data.get('production') else f'Comanda de TEST {result["code"]} a fost verificată în DSM pentru {data["registration"]}. Data expirării ITP {data["itp"]} a fost salvată și verificată în Date Mașină. Nu am făcut rezervare în programator.')
                 except Exception:
                     save(root, sender, 'review', data)
                     await send(sender, 'Crearea sau verificarea comenzii necesită intervenția consilierului. Nu repet automat crearea și nu declar comanda finalizată.')

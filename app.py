@@ -527,9 +527,17 @@ async def pre_reception_retest(request: Request):
     if recipient in {'7032', '2878'}:
         from pre_reception import RECIPIENTS
         recipient = next(p for p in RECIPIENTS if p.endswith(recipient))
+    registration = body.get('registration')
+    if registration:
+        from manual_pre_reception import seed as manual_seed
+        if not recipient or not body.get('run_id'):
+            raise HTTPException(400, 'Testul pe o mașină aleasă necesită destinatar și identificator.')
+        prepared = await manual_seed(registration)
+        async def seed(**_):
+            return dict(prepared)
     async def send_retest(target, text):
         return await send_whatsapp_notification(target, text, kind='request',
-                                                subject='test pregătire recepție B101TST')
+                                                subject='test pregătire recepție '+str(registration or 'B101TST'))
     try:
         return await restart(DATA_DIR, send_retest, seed, run_id=body.get('run_id'), recipient=recipient)
     except ValueError as exc:
@@ -564,6 +572,9 @@ async def _pre_reception_write(data, allow_create):
             conn.execute('UPDATE scheduler_appointments SET pre_arrival_command_id=? WHERE id=?',(result['id'],data['appointment_id']))
             conn.commit()
         return result
+    if data.get('manual_test'):
+        from manual_pre_reception import write
+        return await write(data, allow_create, record_created)
     return await create_or_find(data, allow_create, record_created=record_created)
 
 

@@ -65,8 +65,10 @@ async def send_with_agreement(root, sender, data, send, message, stage, agreemen
             except ValueError:
                 record.update(state='review', reason='invalid_link')
             else:
-                message += ('\n\nVă rugăm să citiți și să semnați personal «Acord GDPR Client», '
-                            'deschis din linkul securizat DSM:\n' + link +
+                message += ('\n\nVă rugăm să citiți «Acord GDPR Client» din linkul securizat DSM:\n' + link +
+                            '\nFormularul include acorduri opționale pentru marketing. '
+                            'Alegeți personal opțiunile și semnați dacă sunteți de acord. '
+                            'Pentru refuzul semnării răspundeți REFUZ GDPR; pregătirea comenzii poate continua. '
                             '\nDupă semnare, răspundeți AM SEMNAT. Vom verifica semnarea în sistem; '
                             'răspunsul din WhatsApp nu ține locul semnăturii.')
                 record['delivery'] = 'sending'
@@ -299,6 +301,27 @@ async def text(root, sender, body, send, writer, *, refresh_policy=None, agreeme
             return True
         if stage == 'stopped':
             return False
+        if (agreement and data.get('production') and data.get('document_source') == 'document'
+                and value in {'refuz gdpr', 'nu semnez gdpr', 'nu doresc sa semnez gdpr'}):
+            record = data.get('gdpr') or {}
+            already_signed = record.get('state') == 'signed'
+            record.update(state='declined', declined_at=datetime.now(timezone.utc).isoformat())
+            record.pop('link', None)
+            record.pop('verified_at', None)
+            record.pop('verification_source', None)
+            if already_signed:
+                record['reason'] = 'existing_agreement_requires_review'
+            data['gdpr'] = record
+            save(root, sender, stage, data)
+            message = 'Am notat refuzul semnării în acest flux. Pregătirea comenzii poate continua.'
+            if already_signed:
+                message += ' Consilierul va verifica separat acordul existent în DSM.'
+            if stage == 'document':
+                message += ' Așteptăm fotografiile clare ale talonului, inclusiv rubrica ITP.'
+            elif stage == 'confirm':
+                message += ' Pentru pregătirea comenzii, răspundeți CONFIRM DATELE.'
+            await send(sender, message)
+            return True
         if (agreement and data.get('production') and data.get('document_source') == 'document'
                 and value in {'am semnat', 'semnat', 'verifica gdpr'}):
             try:

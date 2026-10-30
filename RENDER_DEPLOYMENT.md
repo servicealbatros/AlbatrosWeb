@@ -218,14 +218,25 @@ Only native HTTPS signing hosts under `servicemanager.q-service.ro` or `dsmpro.r
 are accepted. Existing pilot/recipient selections and the recent-visit no-photo
 path are unchanged. This feature does not enable sending or expand enrollment.
 
-Protocol evidence was inspected in saved DSM frontend sources and document UI;
-the current authenticated signing-link response and an actual customer signature
+Protocol evidence was inspected in saved DSM frontend sources. On 30 October
+2026, read-only inspection of the authenticated DSM document UI confirmed the
+GDPR entry, its QR/SMS controls, and its client-scoped document preview. The
+native template includes optional marketing choices; the WhatsApp text now
+explains this. An explicit `REFUZ GDPR` stops generating/resending the agreement
+without blocking certificate/data confirmation or the normal confirmed order
+writer. Refusing an agreement already recorded as signed flags adviser review;
+it does not claim to revoke a native DSM agreement or change marketing settings.
+The inspected template displays street number 165, while the project owner's
+provided workshop address is 165C. Verify the appropriate company/workshop
+address in DSM before rollout; no company profile or legal template was edited.
+
+The current authenticated signing-link response and an actual customer signature
 have **not** been exercised against live DSM. No live document was generated,
 customer message sent, customer data modified or Render deployment performed.
 Regression coverage is in `test_dsm_gdpr.py`; existing pre-arrival, document-policy
 and pre-reception suites also pass locally. The broader deployment regression
-command ran 265 tests: 264 passed and one Linux-only lease test was skipped.
-The 25 new GDPR tests pass separately without resource warnings; some existing
+command ran 268 tests: 267 passed and one Linux-only lease test was skipped.
+The 28 new GDPR tests pass separately without resource warnings; some existing
 suites emit SQLite unclosed-connection ResourceWarnings on Python 3.14.
 The runtime is Windows Python 3.14;
 the Linux Docker build remains unexecuted in this environment.

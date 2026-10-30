@@ -67,6 +67,9 @@ async def prepare(data, checkpoint, *, check_only=False):
     if not data.get('production') or data.get('document_source') != 'document':
         return {}
     previous = data.get('gdpr') or {}
+    if (previous.get('state') == 'declined' and not check_only
+            or previous.get('reason') == 'existing_agreement_requires_review'):
+        return previous  # No automatic regeneration or reminder after refusal.
     binding = identity(data)
     if previous.get('binding') and previous['binding'] != binding:
         data['gdpr'] = {**previous, 'state': 'review', 'reason': 'client_data_changed'}
@@ -104,6 +107,8 @@ async def prepare(data, checkpoint, *, check_only=False):
         record.pop('reason', None)
     elif previous.get('state') == 'review':
         return previous  # Read-only signature recovery is allowed; regeneration is not.
+    elif previous.get('state') == 'declined':
+        record.update(state='declined')
     elif head.get('transaction_head__status') not in {'working', ''}:
         record.update(state='review', reason='transaction_not_active')
     elif previous.get('state') == 'generating':

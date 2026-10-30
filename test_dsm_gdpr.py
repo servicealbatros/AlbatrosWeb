@@ -213,6 +213,8 @@ class AgreementFlowTests(unittest.IsolatedAsyncioTestCase):
             await self.handle('DA', case())
             self.assertIn('fotografie clară', self.send.await_args.args[1])
             self.assertIn(LINK, self.send.await_args.args[1])
+            self.assertIn('acorduri opționale pentru marketing', self.send.await_args.args[1])
+            self.assertIn('REFUZ GDPR', self.send.await_args.args[1])
             self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['delivery'], 'submitted')
             value = flow.get(self.root, PHONE)[1]
             await flow.request_document(self.root, PHONE, value, self.send, agreement=gdpr.prepare)
@@ -289,6 +291,46 @@ class AgreementFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'review')
             self.assertIn('nu este încă verificată', self.send.await_args.args[1])
             self.writer.assert_not_awaited()
+
+    async def test_explicit_refusal_keeps_confirmation_and_order_creation_available(self):
+        value = case()
+        value.update(document_verified=True, document_current=True, document_fields_confirmed=True,
+                     itp='2030-01-01', phone_confirmed=True, extra='Nu')
+        value['gdpr'] = dict(state='pending', link=LINK)
+        with patch.object(gdpr, 'call', AsyncMock()) as read, patch.object(gdpr, 'generate', AsyncMock()) as create:
+            await self.handle('REFUZ GDPR', value, 'confirm')
+            self.assertEqual(flow.get(self.root, PHONE)[0], 'confirm')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'declined')
+            self.assertIn('CONFIRM DATELE', self.send.await_args.args[1])
+            self.writer.assert_not_awaited()
+            await self.handle('CONFIRM DATELE')
+            self.writer.assert_awaited_once()
+            self.assertEqual(flow.get(self.root, PHONE)[0], 'done')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'declined')
+            read.assert_not_awaited(); create.assert_not_awaited()
+            self.assertNotIn(LINK, self.send.await_args.args[1])
+
+    async def test_declining_existing_signed_agreement_flags_adviser_without_claiming_dsm_revocation(self):
+        value = case(); value['gdpr'] = dict(state='signed')
+        with patch.object(gdpr, 'call', AsyncMock()) as read:
+            await self.handle('REFUZ GDPR', value, 'done')
+            self.assertIn('verifica separat', self.send.await_args.args[1])
+            self.assertEqual(reminders.status(self.root)['issues'][0]['state'], 'review')
+            self.assertNotIn('revocat', self.send.await_args.args[1])
+            await self.handle('AM SEMNAT')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'declined')
+            self.assertEqual(reminders.status(self.root)['issues'][0]['state'], 'review')
+            read.assert_not_awaited(); self.writer.assert_not_awaited()
+
+    async def test_customer_can_verify_later_signature_after_refusing_without_automatic_regeneration(self):
+        value = case(); value['gdpr'] = dict(state='declined')
+        with patch.object(gdpr, 'call', AsyncMock(return_value=payload())) as read, patch.object(gdpr, 'generate', AsyncMock()) as create:
+            await self.handle('AM SEMNAT', value, 'document')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'declined')
+            read.return_value = payload(sms_or_qrcode_sended={'2_statement_of_agreement': 'signed'})
+            await self.handle('AM SEMNAT')
+            self.assertEqual(flow.get(self.root, PHONE)[1]['gdpr']['state'], 'signed')
+            create.assert_not_awaited(); self.writer.assert_not_awaited()
 
     async def test_adviser_status_has_separate_signature_and_delivery_without_private_links(self):
         value = case(); value['gdpr'] = dict(state='pending', delivery='uncertain', link=LINK)

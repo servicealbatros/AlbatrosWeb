@@ -126,7 +126,9 @@ def status(root):
                     last_visit=(data.get('document_policy') or {}).get('last_visit'),
                     gdpr_state=(data.get('gdpr') or {}).get('state'),
                     gdpr_delivery=(data.get('gdpr') or {}).get('delivery')))
-                if (data.get('gdpr') or {}).get('state') == 'review' or (data.get('gdpr') or {}).get('delivery') in {'sending', 'uncertain'}:
+                if ((data.get('gdpr') or {}).get('state') == 'review'
+                        or (data.get('gdpr') or {}).get('delivery') in {'sending', 'uncertain'}
+                        or (data.get('gdpr') or {}).get('reason') == 'existing_agreement_requires_review'):
                     errors.append(dict(appointment_id=data.get('appointment_id'),start_at=data.get('appointment_start'),
                         state='review',error='Acordul GDPR sau trimiterea linkului necesită verificarea consilierului.'))
             if data.get('production') and (data.get('attendance_declined') or case['stage']=='review'):

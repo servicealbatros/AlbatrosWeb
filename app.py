@@ -525,6 +525,25 @@ async def pre_arrival_preview(request: Request):
     return await preview(DB_PATH,DATA_DIR,target,seed,snapshot.get('appointment_ids'),check_orders=existing_orders)
 
 
+@app.post('/api/dashboard/master/dsm-work-orders')
+async def advisor_dsm_work_order(request: Request):
+    _master_access(request)
+    if not POLICY.robot_enabled:
+        raise HTTPException(409, 'STOP SAFE activ.')
+    if request.headers.get('x-human-action') != 'create-dsm-work-order':
+        raise HTTPException(403, 'Acțiune explicită de consilier necesară.')
+    from dsm_advisor_order import AdvisorOrderInput, run
+    from pydantic import ValidationError
+    try:
+        data = AdvisorOrderInput.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        raise HTTPException(422, 'Date invalide pentru comanda DSM.')
+    try:
+        return await run(DATA_DIR, data)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post('/api/dashboard/master/pre-reception/pilot')
 async def pre_reception_pilot(request: Request):
     _master_access(request)

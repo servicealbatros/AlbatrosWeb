@@ -15,6 +15,7 @@ COPY scripts/render_single_app.py ./scripts/render_single_app.py
 COPY scripts/restore_cloud_migration.py ./scripts/restore_cloud_migration.py
 COPY scripts/dsm_session_keeper.py ./scripts/dsm_session_keeper.py
 RUN python -m unittest test_pre_arrival_policy.py test_dsm_gdpr.py
+RUN python -m unittest test_dsm_advisor_order.py
 RUN python -m unittest test_brake_scope.py test_whatsapp_intake_resume.py test_brake_shared_axles.py
 RUN python -m unittest test_labour_independent.py test_labour_fallback_runner.py
 RUN python -m unittest test_offer_queue_readiness.py test_provider_sessions.py test_provider_continuity.py

@@ -105,6 +105,20 @@ async def expired_autototal_form(page):
     }"""))
 
 
+async def intercars_email_form(page):
+    """Only the pinned Inter Cars identity host may receive a saved email."""
+    location = urlparse(page.url)
+    if (location.scheme != 'https' or location.hostname != 'account.intercars.eu'
+            or location.username or location.password
+            or not location.path.startswith('/authenticationendpoint/')):
+        return None
+    username = page.locator('form input[type=email]:visible,form input[type=text]:visible')
+    button = page.get_by_role('button', name=re.compile(r'^\s*(?:Continue|Continuă|Continua|Next)\s*$', re.I))
+    if await username.count() == 1 and await button.count() == 1:
+        return username, button
+    return None
+
+
 async def reconnect(page, credentials, provider):
     if not credentials or not provider_url(provider, page.url):
         return 'login_required'
@@ -117,16 +131,51 @@ async def reconnect(page, credentials, provider):
     if await active_verification(page):
         return 'human_verification_required'
     password = page.locator('input[type=password]:visible')
+    email_submitted = False
+    if provider == 'Inter Cars' and await password.count() == 0:
+        first = await intercars_email_form(page)
+        if first is None:
+            return 'unsupported_login_form'
+        username, next_button = first
+        existing = (await username.input_value()).strip()
+        if existing not in {'', credentials['username']}:
+            return 'human_login_in_progress'
+        if existing != credentials['username']:
+            await username.fill(credentials['username'], timeout=10000)
+        if await active_verification(page):
+            return 'human_verification_required'
+        await next_button.click(timeout=15000)
+        for _ in range(10):
+            if not provider_url(provider, page.url):
+                return 'login_location_changed'
+            if await active_verification(page):
+                return 'human_verification_required'
+            if await authenticated(page, provider):
+                return 'connected'
+            if await password.count() == 1:
+                location = urlparse(page.url)
+                if (location.hostname != 'account.intercars.eu'
+                        or not location.path.startswith('/authenticationendpoint/')):
+                    return 'login_location_changed'
+                email_submitted = True
+                break
+            await asyncio.sleep(1)
+        if not email_submitted:
+            return 'login_failed'
     if await password.count() != 1:
         return 'unsupported_login_form'
     form = password.locator('xpath=ancestor::form')
     if await form.count() != 1:
         return 'unsupported_login_form'
     username = form.locator('input[type=email]:visible,input[type=text]:visible')
-    button = form.get_by_role('button', name=re.compile(r'^(?:Autentificare|Autentifică-te|Login|Log in|Sign in|Conectare|Conectează-te|Intră în cont)$', re.I))
-    if await username.count() != 1 or await button.count() != 1:
+    names = r'Autentificare|Autentifică-te|Login|Log in|Sign in|Conectare|Conectează-te|Intră în cont'
+    if email_submitted:
+        names += r'|Continue|Continuă|Continua'
+    button = form.get_by_role('button', name=re.compile('^(?:' + names + ')$', re.I))
+    username_count = await username.count()
+    if (username_count != 1 and not (email_submitted and username_count == 0)) or await button.count() != 1:
         return 'unsupported_login_form'
-    user_value = (await username.input_value()).strip()
+    user_value = (await username.input_value()).strip() if username_count else credentials['username']
     password_value = await password.input_value()
     if (password_value not in {'', credentials['password']}
             or user_value not in {'', credentials['username']}):
@@ -247,7 +296,8 @@ class ProviderSessionKeeper:
                             self.error_reloads[provider] = time.monotonic()
                             await page.reload(wait_until='domcontentloaded', timeout=15000)
                         continue
-                    if not await page.locator('input[type=password]:visible').count():
+                    if (not await page.locator('input[type=password]:visible').count()
+                            and not (provider == 'Inter Cars' and await intercars_email_form(page))):
                         state['status'] = 'unverified'
                         continue
                     state['status'] = 'login_required'

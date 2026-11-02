@@ -111,6 +111,55 @@ class ReadinessTests(unittest.TestCase):
 
 
 class QueueLoginTests(unittest.IsolatedAsyncioTestCase):
+    def email_page(self, *, foreign=False, human_email=False):
+        state={'password':False,'connected':False}
+        email=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value='human' if human_email else ''),fill=AsyncMock())
+        hidden=SimpleNamespace(count=AsyncMock(return_value=0))
+        login=SimpleNamespace(count=AsyncMock(return_value=1),click=AsyncMock(side_effect=lambda **kw:state.update(connected=True)))
+        def button(role, **kwargs):
+            self.assertTrue(kwargs['name'].search('Continue'))
+            return login
+        form=SimpleNamespace(count=AsyncMock(return_value=1),locator=lambda _:hidden,get_by_role=button)
+        password=SimpleNamespace(count=AsyncMock(side_effect=lambda:int(state['password'])),input_value=AsyncMock(return_value=''),fill=AsyncMock(),locator=lambda _:form)
+        page=SimpleNamespace(url='https://account.intercars.eu/authenticationendpoint/login.do',
+                             locator=lambda query:password if 'password' in query else email)
+        def continued(**kwargs):
+            state['password']=True
+            if foreign: page.url='https://untrusted.invalid/login'
+        next_button=SimpleNamespace(count=AsyncMock(return_value=1),click=AsyncMock(side_effect=continued))
+        page.get_by_role=lambda *a,**kw:next_button
+        return page,email,password,next_button,login,state
+
+    async def test_saved_login_handles_email_continue_then_password_only(self):
+        page,email,password,next_button,login,state=self.email_page()
+        credentials={'username':'test-user','password':'test-secret','login_url':page.url}
+        with patch.object(sessions,'active_verification',AsyncMock(return_value=False)), \
+             patch.object(sessions,'authenticated',AsyncMock(side_effect=lambda *a:state['connected'])):
+            result=await sessions.reconnect(page,credentials,'Inter Cars')
+        self.assertEqual(result,'connected')
+        email.fill.assert_awaited_once_with('test-user',timeout=10000)
+        next_button.click.assert_awaited_once()
+        password.fill.assert_awaited_once_with('test-secret',timeout=10000)
+        login.click.assert_awaited_once()
+
+    async def test_second_step_rejects_foreign_redirect_and_preserves_human_email(self):
+        for foreign,human in ((True,False),(False,True)):
+            page,email,password,next_button,login,state=self.email_page(foreign=foreign,human_email=human)
+            with patch.object(sessions,'active_verification',AsyncMock(return_value=False)), \
+                 patch.object(sessions,'authenticated',AsyncMock(return_value=False)):
+                result=await sessions.reconnect(page,{'username':'test-user','password':'test-secret','login_url':page.url},'Inter Cars')
+            self.assertEqual(result,'login_location_changed' if foreign else 'human_login_in_progress')
+            password.fill.assert_not_awaited(); login.click.assert_not_awaited()
+            if human: email.fill.assert_not_awaited(); next_button.click.assert_not_awaited()
+
+    async def test_second_step_stops_at_captcha(self):
+        page,email,password,next_button,login,state=self.email_page()
+        with patch.object(sessions,'active_verification',AsyncMock(side_effect=lambda *a:state['password'])), \
+             patch.object(sessions,'authenticated',AsyncMock(return_value=False)):
+            result=await sessions.reconnect(page,{'username':'test-user','password':'test-secret','login_url':page.url},'Inter Cars')
+        self.assertEqual(result,'human_verification_required')
+        password.fill.assert_not_awaited(); login.click.assert_not_awaited()
+
     async def test_queued_intercars_can_reconnect_but_running_cannot(self):
         for state,allowed in [('QUEUED',True),('RETRY',True),('RUNNING',False)]:
             with self.subTest(state=state), TemporaryDirectory() as folder:

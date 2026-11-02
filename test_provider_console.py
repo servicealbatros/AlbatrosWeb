@@ -209,6 +209,61 @@ class ProviderFormBrowserTests(unittest.IsolatedAsyncioTestCase):
                 response = await client.post('/api/provider-auth/open', json={'provider': 'DSM'})
                 self.assertEqual(response.json()['page_id'], dsm_id)
 
+    async def test_intercars_account_change_returns_to_email_without_submitting_password(self):
+        import httpx
+        content = '''<h1>Welcome</h1><form><input type="hidden" name="username" value="fixture-user">
+          <input type="password" value="fixture-secret"><button type="button">Sign In</button></form>
+          <button type="button" id="change">Use a different account</button>
+          <button type="button">Checkout</button><a href="https://attacker.example/">Login</a>
+          <script>document.querySelector('#change').onclick=()=>{
+            document.body.innerHTML='<h1>Sign In</h1><form><input type="email" name="email"><button>Continue</button></form>';
+          };</script>'''
+        await self.browser_context.route('**/*', lambda route: route.fulfill(
+            status=200, content_type='text/html', body=content))
+        await self.page.goto('https://account.intercars.eu/authenticationendpoint/login.do')
+        state = await console.snapshot()
+        self.assertEqual([x['text'] for x in state['auth_navigation']], ['Use a different account'])
+        self.assertNotIn('fixture-secret', str(state['forms']))
+        change = state['auth_navigation'][0]
+        app = FastAPI()
+        app.include_router(console.router)
+        with patch.dict(console.SESSIONS, {'fixture-session': time.time() + 60}), \
+             patch.dict(os.environ, {'ALBATROS_PROVIDER_TEST_CONSOLE': 'true'}):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                    base_url='https://test.example', headers={'Origin': 'https://test.example'},
+                    cookies={'albatros_provider_test': 'fixture-session'}) as client:
+                # A login submit or checkout index cannot masquerade as an account change.
+                response = await client.post('/api/provider-auth/login-link', json={
+                    'page_id': 'browser-test', 'index': 0})
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(await self.page.locator('input[type=password]').input_value(), 'fixture-secret')
+                response = await client.post('/api/provider-auth/login-link', json={
+                    'page_id': 'stale-page', 'index': change['index']})
+                self.assertEqual(response.status_code, 409)
+                response = await client.post('/api/provider-auth/login-link', json={
+                    'page_id': 'browser-test', 'index': change['index']})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()['forms'][0]['fields'][0]['type'], 'email')
+                self.assertEqual(response.json()['auth_navigation'], [])
+                self.assertEqual(await self.page.locator('input[type=password]').count(), 0)
+
+    async def test_account_change_requires_pinned_intercars_password_page(self):
+        content = '''<h1>Sign In</h1><form><input type="password"><button>Sign In</button></form>
+          <button type="button">Use a different account</button>'''
+        await self.browser_context.route('**/*', lambda route: route.fulfill(
+            status=200, content_type='text/html', body=content))
+        for url in ('https://ro.e-cat.intercars.eu/authenticationendpoint/login.do',
+                    'https://account.intercars.eu/catalogue/',
+                    'https://account.intercars.eu:444/authenticationendpoint/login.do',
+                    'https://account.intercars.eu.attacker.example/authenticationendpoint/login.do',
+                    'https://www3.eoriginal.ro/authenticationendpoint/login.do'):
+            with self.subTest(url=url):
+                await self.page.goto(url)
+                self.assertEqual((await console.snapshot())['auth_navigation'], [])
+        await self.page.goto('https://account.intercars.eu/authenticationendpoint/login.do')
+        await self.page.set_content('<h1>Catalog</h1><button>Use a different account</button>')
+        self.assertEqual((await console.snapshot())['auth_navigation'], [])
+
     async def test_device_confirmation_requires_device_context(self):
         content = '<h1>{}</h1><form><input name="denumire"><button>Deconectare</button>' \
                   '<button>SALVARE</button></form>'

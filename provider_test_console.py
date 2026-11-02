@@ -194,9 +194,18 @@ async def snapshot():
         finally:
             if debugger is not None:
                 await debugger.detach()
-    navigation = await _page.locator('a,button').evaluate_all("""nodes=>nodes.map((e,index)=>({index,
+    location = urlparse(_page.url)
+    account_change = (location.scheme == 'https' and location.hostname == 'account.intercars.eu'
+        and location.port in {None, 443} and not location.username and not location.password
+        and location.path.startswith('/authenticationendpoint/')
+        and any(field['type'] == 'password' for form in forms for field in form['fields']))
+    navigation = await _page.locator('a,button').evaluate_all("""(nodes,accountChange)=>nodes.map((e,index)=>({index,
       text:(e.innerText||'').trim(),visible:!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)}))
-      .filter(e=>e.visible&&/^(autentificare|conectare|login|log in|sign in|contul meu|my account)$/i.test(e.text))""")
+      .filter(e=>e.visible&&(/^(autentificare|conectare|login|log in|sign in|contul meu|my account)$/i.test(e.text)
+        ||(accountChange&&/^Use a different account$/i.test(e.text))))""", account_change)
+    if forms:
+        navigation = [item for item in navigation if account_change
+                      and item['text'].lower() == 'use a different account']
     captcha = _page.locator('[name="g-recaptcha-response"]')
     captcha_present = await captcha.count() > 0
     captcha_complete = await captcha.evaluate_all('nodes=>nodes.some(e=>!!e.value.trim())') if captcha_present else False
@@ -210,7 +219,7 @@ async def snapshot():
             'forms': forms, 'image': 'data:image/png;base64,' + base64.b64encode(shot).decode() if shot else '',
             'screenshot_unavailable': shot is None,
             'notice': ' '.join(notice)[:500], 'dsm_session_saved': dsm_saved,
-            'login_form_present': bool(forms), 'auth_navigation': [] if forms else navigation,
+            'login_form_present': bool(forms), 'auth_navigation': navigation,
             'captcha_present': captcha_present, 'captcha_complete': captcha_complete,
             'captcha_regions': await captcha_regions()}
 

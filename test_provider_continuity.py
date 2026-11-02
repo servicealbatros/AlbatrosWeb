@@ -99,12 +99,26 @@ class SupplierContinuityTests(unittest.IsolatedAsyncioTestCase):
         item.dispose = AsyncMock(side_effect=lambda: events.append('dispose'))
         page.request = SimpleNamespace(get=AsyncMock(return_value=item))
         page.goto = AsyncMock(side_effect=lambda *a, **k: events.append('navigate'))
-        with patch.object(sessions, 'authenticated', AsyncMock(return_value=True)), \
+        with patch.object(sessions, 'authenticated', AsyncMock(side_effect=[True, False])), \
              patch.object(sessions, 'upstream_error', AsyncMock(return_value=False)), \
              patch.object(self.keeper, 'idle', return_value=True):
             state = await self.keeper.check(SimpleNamespace(pages=[page]))
         self.assertEqual(events, ['dispose', 'navigate'])
         self.assertEqual(state['Inter Cars']['status'], 'login_required')
+
+    async def test_browser_only_sso_response_does_not_reload_authenticated_catalogue(self):
+        page, *_ = login_page(sessions.INTERCARS_HOME)
+        item = response('https://account.intercars.eu/authenticationendpoint/login.do')
+        page.request = SimpleNamespace(get=AsyncMock(return_value=item))
+        page.goto, page.reload = AsyncMock(), AsyncMock()
+        with patch.object(sessions, 'authenticated', AsyncMock(return_value=True)), \
+             patch.object(self.keeper, 'idle', return_value=True):
+            state = await self.keeper.check(SimpleNamespace(pages=[page]))
+        self.assertEqual(state['Inter Cars']['status'], 'connected')
+        self.assertEqual(state['Inter Cars']['keepalive_status'], 'browser_session_active')
+        page.goto.assert_not_awaited()
+        page.reload.assert_not_awaited()
+        item.dispose.assert_awaited_once()
 
     async def test_active_work_prevents_keepalive_and_tab_restoration(self):
         page, *_ = login_page(sessions.INTERCARS_HOME)

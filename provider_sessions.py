@@ -281,6 +281,11 @@ class ProviderSessionKeeper:
         self.last_keepalive[provider] = now
         try:
             outcome = await read_session_status(page, SUPPLIER_HOMES[provider], provider)
+            if provider == 'Inter Cars' and outcome == 'login_required' and await authenticated(page, provider):
+                # The e-cat root can run a browser-only SSO handshake. A plain
+                # APIRequestContext GET cannot complete that JavaScript flow;
+                # do not reload a positively authenticated catalogue because of it.
+                outcome = 'browser_session_active'
         except Exception:
             self.last_keepalive[provider] = now - KEEPALIVE_INTERVAL + 60
             outcome = 'upstream_unavailable'

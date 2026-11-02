@@ -28,7 +28,8 @@ def source_report(request_id, vin, paths, catalog_vin=None):
             if data.get("request_id") != request_id or not vin or observed_vin not in accepted_vins:
                 raise ValueError("Rezultatul nu aparține cererii și VIN-ului curent")
             sources[name] = {
-                "status": data.get("status") or "unknown",
+                "status": (data.get('intercars_status') if name == 'intercars' and data.get('autototal_fallback')
+                           else data.get("status")) or "unknown",
                 "source": data.get("source") or name,
                 "updated_at_ns": path.stat().st_mtime_ns,
                 "vehicle": data.get("vehicle") or {},

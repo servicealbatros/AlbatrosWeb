@@ -738,6 +738,19 @@ async def master_provider_tabs(request: Request):
     return {'checked_at': datetime.now().isoformat(timespec='seconds'), 'providers': result}
 
 
+@app.get('/api/dashboard/master/provider-sessions')
+def master_provider_sessions(request: Request):
+    """Sanitized, passive session evidence; no login or browser navigation."""
+    _master_access(request)
+    try:
+        saved = json.loads((DATA_DIR / 'provider_session_health.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        saved = {}
+    return {'providers': {name: {key: (saved.get(name) or {}).get(key)
+                                for key in ('status', 'checked_at', 'auto_login_configured')}
+                          for name in ('DSM', 'Inter Cars', 'AutoTotal', 'Haynes')}}
+
+
 @app.post('/api/dashboard/master/clear-requests')
 def master_clear_requests(request: Request):
     _master_access(request)
@@ -2364,10 +2377,12 @@ def _load_request_offer_result(request_id: int) -> dict:
     if data.get("source_file") is None and not path.exists():
         return data
     try:
+        request_row = _request_by_id(request_id) or {}
         other_path = _autototal_result_file(request_id)
         if other_path.exists():
             other = json.loads(other_path.read_text(encoding="utf-8"))
-            if isinstance(other, dict):
+            from labour_vehicle import matching
+            if isinstance(other, dict) and matching(other, request_id, str(request_row.get('vin') or '')):
                 data["autototal"] = other
                 data["autototal_status"] = other.get("status")
                 data["identity_comparison"] = _compare_supplier_identities(
@@ -2379,7 +2394,9 @@ def _load_request_offer_result(request_id: int) -> dict:
                         + other["products"]
                         + _oe_accessory_belt_catalog_products(other)
                     )
-        request_row = _request_by_id(request_id) or {}
+            elif isinstance(other, dict):
+                data['autototal_status'] = 'identity_mismatch'
+                data['autototal_identity_rejected'] = True
         from original_oil_policy import is_original_engine_oil
         from autototal_request_worker import _oe_option_allowed
         data['products'] = [p for p in data.get('products') or []
@@ -5092,8 +5109,17 @@ def _autototal_complete_offer(request_id: int) -> dict:
     if (payload.get("status") == "ready" and payload.get("products")
             and not (payload.get("missing_product_kinds") or [])):
         row = _request_by_id(request_id) or {}
-        if not _missing_requested_parts(row, payload['products'], payload.get('oe_candidates')):
-            return payload
+        from labour_vehicle import matching
+        if not matching(payload, request_id, str(row.get('vin') or '')):
+            return {}
+        filtered = _load_request_offer_result(request_id)
+        products = [p for p in filtered.get('products') or []
+                    if str(p.get('source') or '').startswith('AutoTotal')
+                    and math.isfinite(_float_or_zero(p.get('price_ron')))
+                    and _float_or_zero(p.get('price_ron')) > 0]
+        if (filtered.get('identity_review', {}).get('status') == 'confirmed'
+                and products and not _missing_requested_parts(row, products, payload.get('oe_candidates'))):
+            return {**payload, 'products':products}
     return {}
 
 
@@ -5138,9 +5164,9 @@ def _finish_with_complete_autototal(job: dict, now: datetime) -> bool:
         return False
     _auto_select_complete_dsm_products(int(job["request_id"]), payload)
     job["status"] = "READY_FOR_REVIEW"
-    job["stage"] = "autototal_complete_intercars_unavailable"
+    job["stage"] = "autototal_complete_comparison_pending"
     job["message"] = (
-        "Oferta AutoTotal este completă; Inter Cars nu a confirmat vehiculul și nu mai blochează oferta."
+        "AutoTotal a furnizat piesele și prețurile pentru verificare. Comparația Inter Cars nu a fost finalizată."
     )
     job["updated_at"] = now.isoformat(timespec="seconds")
     _offer_result_file(int(job["request_id"])).write_text(json.dumps({
@@ -5153,6 +5179,8 @@ def _finish_with_complete_autototal(job: dict, now: datetime) -> bool:
         "products": [],
         "message": job["message"],
         "source": "AutoTotal complet; Inter Cars indisponibil",
+        "autototal_fallback": True,
+        "intercars_status": "not_completed",
         "job_id": job.get("id"),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return True
@@ -5195,7 +5223,8 @@ def _recover_stale_robot_jobs() -> int:
     with ROBOT_JOBS_LOCK:
         jobs = _load_robot_jobs()
         for job in jobs:
-            if job.get("status") != "RUNNING":
+            status = job.get('status')
+            if status not in {'QUEUED', 'RETRY', 'RUNNING'}:
                 continue
             # One supplier is sufficient when it has produced a genuinely
             # complete offer. Do not leave the dashboard in RUNNING while the
@@ -5205,6 +5234,18 @@ def _recover_stale_robot_jobs() -> int:
                 if _finish_with_complete_autototal(job, now):
                     recovered += 1
                     continue
+            if status != 'RUNNING':
+                try:
+                    queued_at = datetime.fromisoformat(str(job.get('updated_at') or job.get('created_at') or ''))
+                    overdue = (now - queued_at).total_seconds() > max(60, int(os.getenv('ROBOT_QUEUE_TIMEOUT_SECONDS', '180')))
+                except (ValueError, TypeError):
+                    overdue = False
+                if overdue:
+                    job.update(status='ERROR', stage='intercars_not_claimed', updated_at=now.isoformat(timespec='seconds'),
+                               message='Inter Cars nu a preluat căutarea în intervalul permis. Verifică autentificarea furnizorului; AutoTotal continuă independent.')
+                    _write_robot_error_result(job, job['message'])
+                    recovered += 1
+                continue
             if not _lease_is_expired(job, now):
                 continue
             attempts = int(job.get("attempt_count") or 1)

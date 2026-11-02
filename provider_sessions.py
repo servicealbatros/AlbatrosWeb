@@ -165,12 +165,15 @@ class ProviderSessionKeeper:
         self.last_keepalive = {}
         self.last_restore = {}
 
-    def idle(self):
+    def idle(self, *, allow_queued=False):
         root = os.getenv('ALBATROS_DATA_DIR')
         if not root:
             return True
         from browser_resources import busy_reason
-        return busy_reason(root) is None
+        marker = Path(root) / '.browser-console-activity'
+        if allow_queued and marker.exists() and time.time() - marker.stat().st_mtime < 120:
+            return False
+        return busy_reason(root, include_queued=not allow_queued) is None
 
     async def keep_autototal(self, page):
         """Refresh the HTTP session, without navigating the catalogue tab."""
@@ -250,7 +253,10 @@ class ProviderSessionKeeper:
                     state['status'] = 'login_required'
                     if not vault.path.exists():
                         continue
-                    if not self.idle():
+                    # A queued Inter Cars job cannot be claimed while its tab
+                    # is on the login host. Allow that login to break the cycle;
+                    # active work, manual login and CAPTCHA remain protected.
+                    if not self.idle(allow_queued=(provider == 'Inter Cars')):
                         state['status'] = 'retry_wait'
                         continue
                     version = vault.path.stat().st_mtime_ns

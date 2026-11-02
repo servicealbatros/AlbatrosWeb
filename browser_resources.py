@@ -118,13 +118,13 @@ def memory_health(root):
     return {**result, 'memory': memory_sample(), 'enabled': enabled()}
 
 
-def busy_reason(root):
+def busy_reason(root, *, include_queued=True):
     """Persistent jobs also cover the gap between Popen and a worker's lease."""
     root = Path(root)
     try:
         jobs = root / 'robot_offer_jobs.json'
-        if jobs.exists() and any(str(j.get('status', '')).upper() in
-                                 {'QUEUED', 'RUNNING', 'RETRY', 'WAITING'}
+        blocked = {'RUNNING', 'WAITING'} | ({'QUEUED', 'RETRY'} if include_queued else set())
+        if jobs.exists() and any(str(j.get('status', '')).upper() in blocked
                                  for j in json.loads(jobs.read_text(encoding='utf-8'))):
             return 'offering'
         for name in ('dsm_periodic_import.json', 'dsm_accepted_offers_sync.json'):

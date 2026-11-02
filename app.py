@@ -1151,6 +1151,7 @@ def _reset_draft_parts_from_selection(request_id: int) -> None:
         "drain_plug_price_ron", "drain_plug_availability",
     ):
         draft.pop(field, None)
+    draft["labour_reviewed"] = False
     drafts[str(request_id)] = draft
     _save_offer_drafts(drafts)
 
@@ -6183,8 +6184,8 @@ def request_offer_manual_part(request_id: int, data: ManualOfferPartInput):
         )
     if data.quantity < 1 or data.quantity > 99:
         raise HTTPException(status_code=400, detail="Cantitatea trebuie să fie între 1 și 99.")
-    if data.unit_price_ron < 0 or data.unit_price_ron > 1_000_000:
-        raise HTTPException(status_code=400, detail="Prețul unitar nu poate fi negativ.")
+    if not math.isfinite(data.unit_price_ron) or data.unit_price_ron < 0 or data.unit_price_ron > 1_000_000:
+        raise HTTPException(status_code=400, detail="Prețul unitar trebuie să fie un număr între 0 și 1.000.000 RON.")
     if _defer_workshop_product(request_id, dict(description=description, manufacturer_ref=manufacturer_ref,
                                                quantity=data.quantity, price_ron=data.unit_price_ron)):
         return {'ok': True, 'status': 'necesar_intern_magazie'}
@@ -6218,7 +6219,46 @@ def request_offer_manual_part(request_id: int, data: ManualOfferPartInput):
     selections[str(request_id)] = current
     _save_offer_selections(selections)
     _reset_draft_parts_from_selection(request_id)
+    _sync_manual_part_checklist(request_id, product)
     return {"ok": True, "product": product, "selected": selected_products}
+
+
+
+def _sync_manual_part_checklist(request_id: int, product: dict, *, remove=False) -> None:
+    from offer_parts_checklist import normalize_lines, subtotal
+    from timing_chain_policy import default_checklist
+    draft = _draft_for_request(request_id)
+    defaults = default_checklist((_request_by_id(request_id) or {}).get('symptom'))
+    rows = list(draft.get('parts_checklist') or defaults)
+    if not rows:
+        return  # Regular basket quotes already calculate from selected products.
+    source = 'manual:' + product['supplier_code']
+    if remove:
+        restored = []
+        for row in rows:
+            if row.get('source') != source:
+                restored.append(row)
+            else:
+                original = next((r for r in defaults if r['description'] == row['description']), None)
+                if original:
+                    restored.append(dict(original))
+        rows = restored
+    else:
+        line = dict(description=product['description'], code=product['manufacturer_ref'],
+                    quantity=product['quantity'], unit_price_ron=product['price_ron'],
+                    confirmed=True, source=source)
+        # Fill a matching unpriced requirement instead of charging it twice.
+        match = next((i for i, r in enumerate(rows) if not r.get('confirmed') and
+                      (r.get('description', '').strip().casefold() == line['description'].casefold()
+                       or r.get('code') and r['code'] == line['code'])), None)
+        if match is None:
+            rows.append(line)
+        else:
+            rows[match] = line
+    draft['parts_checklist'] = normalize_lines(rows)
+    draft['parts_price_ron'] = subtotal(draft['parts_checklist'])
+    draft['labour_reviewed'] = False
+    _save_draft_for_request(request_id, draft)
 
 
 def _defer_workshop_product(request_id: int, product: dict) -> bool:
@@ -6254,6 +6294,7 @@ def request_offer_manual_part_remove(request_id: int, data: ManualOfferPartRemov
     selections[str(request_id)] = current
     _save_offer_selections(selections)
     _reset_draft_parts_from_selection(request_id)
+    _sync_manual_part_checklist(request_id, {"supplier_code": data.product_code}, remove=True)
     return {"ok": True, "product_code": data.product_code}
 
 
@@ -6955,15 +6996,16 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
     {partial_notice}
     {products_html}
     <div class="selection-box"><h3 style="margin:0 0 8px">Piese selectate pentru ofertă</h3>{selected_summary_html}</div>
-    <div class="oilbox" style="margin-top:14px;background:#f5f3ff;border-color:#7c3aed">
-      <h3 style="margin:0 0 6px">Piesă identificată de consilier</h3>
+    <div class="oilbox" id="manual_parts" style="margin-top:14px;background:#f5f3ff;border-color:#7c3aed;scroll-margin-top:24px">
+      <h3 style="margin:0 0 6px">Adaugă piese manual în ofertă</h3>
       <div style="margin-bottom:12px"><small>Folosește această secțiune când robotul nu găsește sigur piesa. Codul trebuie verificat de consilier înainte de adăugare.</small></div>
       <div class="formgrid">
-        <div class="field"><label>Cod verificat</label><input id="manual_code" placeholder="Cod producător / furnizor"></div>
-        <div class="field"><label>Denumire piesă</label><input id="manual_description" placeholder="Denumirea completă din catalog"></div>
-        <div class="field"><label>Cantitate</label><input id="manual_quantity" type="number" min="1" max="99" step="1" value="1"></div>
+        <div class="field"><label for="manual_code">Cod piesă</label><input id="manual_code" placeholder="Cod producător / furnizor"></div>
+        <div class="field"><label for="manual_description">Denumire piesă</label><input id="manual_description" placeholder="Denumirea completă din catalog"></div>
+        <div class="field"><label for="manual_quantity">Cantitate</label><input id="manual_quantity" type="number" min="1" max="99" step="1" value="1" oninput="updateManualPartTotal()"></div>
       </div>
-      <div class="actions"><button type="button" class="purple" onclick="addManualPart()">Adaugă piesa verificată în ofertă</button></div>
+      <div class="formgrid" style="margin-top:12px"><div class="field"><label for="manual_price">Preț unitar (RON)</label><input id="manual_price" type="number" min="0" max="1000000" step="0.01" placeholder="Ex.: 125.50" oninput="updateManualPartTotal()"></div><div class="field"><label>Total piesă</label><output id="manual_total" style="padding:12px;font-weight:700" aria-live="polite">—</output></div></div>
+      <div class="actions"><button id="manual_add" type="button" class="purple" onclick="addManualPart()">Adaugă în ofertă</button></div>
       <div id="manual_part_status" class="muted" style="display:none;margin-top:10px" aria-live="polite"></div>
     </div>
   </div>
@@ -7314,6 +7356,12 @@ async function changeQuantity(code,value){{
   if(!r.ok){{await window.AlbatrosAI.notify(d.detail||"Nu am putut salva cantitatea.");return;}}
   location.reload();
 }}
+function updateManualPartTotal(){{
+  const quantity=Number(document.getElementById("manual_quantity").value);
+  const price=document.getElementById("manual_price").value;
+  document.getElementById("manual_total").textContent=price!=='' && quantity>0 && Number(price)>=0
+    ?(quantity*Number(price)).toLocaleString('ro-RO',{{minimumFractionDigits:2,maximumFractionDigits:2}})+' RON':'—';
+}}
 async function addManualPart(){{
   const box=document.getElementById("manual_part_status");
   box.style.display="block";box.textContent="Se adaugă piesa…";
@@ -7322,15 +7370,22 @@ async function addManualPart(){{
     brand:"",
     description:document.getElementById("manual_description").value.trim(),
     manufacturer_ref:document.getElementById("manual_code").value.trim(),
-    quantity:Math.max(1,parseInt(document.getElementById("manual_quantity").value,10)||1),
-    unit_price_ron:0,
+    quantity:Number(document.getElementById("manual_quantity").value),
+    unit_price_ron:Number(document.getElementById("manual_price").value),
     availability:""
   }};
+  if(!data.manufacturer_ref||!data.description||!Number.isInteger(data.quantity)||data.quantity<1||data.quantity>99||
+     document.getElementById("manual_price").value===''||!Number.isFinite(data.unit_price_ron)||data.unit_price_ron<0||data.unit_price_ron>1000000){{
+    box.textContent="Completează codul, denumirea, cantitatea (1–99) și prețul unitar valid.";return;
+  }}
+  const button=document.getElementById("manual_add");button.disabled=true;
+  try{{
   const r=await fetch("/api/requests/{request_id}/offer-manual-part",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(data)}});
   const d=await r.json();
   if(!r.ok){{box.textContent=d.detail||"Piesa nu a putut fi adăugată.";return;}}
   box.textContent=d.status==='necesar_intern_magazie'?'Consumabil păstrat în necesarul intern; se adaugă în deviz după cererea mecanicului.':"Piesa a fost adăugată și marcată ca verificată manual.";
   setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),500);
+  }}catch(error){{box.textContent="Piesa nu a putut fi salvată. Verifică conexiunea și reîncearcă.";}}finally{{button.disabled=false;}}
 }}
 async function removeManualPart(code){{
   const r=await fetch("/api/requests/{request_id}/offer-manual-part-remove",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{product_code:code}})}});
@@ -9849,7 +9904,7 @@ function render() {
             }
         });
         tr.innerHTML = `
-            <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}${row.replaces_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replaces_request_id)}">Completare #${esc(row.replaces_request_id)}</a>` : ''}${row.replacement_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replacement_request_id)}">Înlocuită de #${esc(row.replacement_request_id)}</a>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
+            <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}${row.replaces_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replaces_request_id)}">Completare #${esc(row.replaces_request_id)}</a>` : ''}${row.replacement_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replacement_request_id)}">Înlocuită de #${esc(row.replacement_request_id)}</a>` : ''}<br><a href="/oferta/${encodeURIComponent(id)}#manual_parts" style="display:inline-block;margin-top:6px" onclick="event.stopPropagation()">Piese manuale</a><br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
             <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}${row.source === 'dsm_accepted_offer' ? `<br><strong style="color:${row.offer_validity === 'expired' ? '#b91c1c' : row.offer_validity === 'valid' ? '#166534' : '#92400e'}">${esc(row.offer_validity_message || 'Valabilitate de verificat')}</strong>` : ''}</td>
             <td>${esc(customer || "—")}</td>
             <td>${esc(phone || "—")}</td>

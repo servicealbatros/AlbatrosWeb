@@ -160,6 +160,34 @@ class QueueLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result,'human_verification_required')
         password.fill.assert_not_awaited(); login.click.assert_not_awaited()
 
+    async def test_email_document_navigation_is_retried_without_refilling_email(self):
+        page,email,password,next_button,login,state=self.email_page()
+        calls=[False,False,sessions.BrowserError('Execution context was destroyed'),False]
+        def verification(*args):
+            item=calls.pop(0) if calls else False
+            if isinstance(item,Exception): raise item
+            return item
+        with patch.object(sessions,'active_verification',AsyncMock(side_effect=verification)), \
+             patch.object(sessions,'authenticated',AsyncMock(side_effect=lambda *a:state['connected'])), \
+             patch.object(sessions.asyncio,'sleep',AsyncMock()):
+            result=await sessions.reconnect(page,{'username':'test-user','password':'test-secret','login_url':page.url},'Inter Cars')
+        self.assertEqual(result,'connected')
+        email.fill.assert_awaited_once(); password.fill.assert_awaited_once()
+
+    async def test_password_only_resume_requires_matching_hidden_username(self):
+        for match in (True,False):
+            page,email,password,next_button,login,state=self.email_page(); state['password']=True
+            original=password.locator('xpath=ancestor::form')
+            visible=SimpleNamespace(count=AsyncMock(return_value=0))
+            hidden=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value='test-user' if match else 'other-user'))
+            original.locator=lambda query:hidden if 'type=hidden' in query else visible
+            with patch.object(sessions,'active_verification',AsyncMock(return_value=False)), \
+                 patch.object(sessions,'authenticated',AsyncMock(side_effect=lambda *a:state['connected'])):
+                result=await sessions.reconnect(page,{'username':'test-user','password':'test-secret','login_url':page.url},'Inter Cars')
+            self.assertEqual(result,'connected' if match else 'unsupported_login_form')
+            if match: password.fill.assert_awaited_once()
+            else: password.fill.assert_not_awaited()
+
     async def test_code_field_is_not_mistaken_for_an_email_step(self):
         page,email,password,next_button,login,state=self.email_page()
         email.evaluate.return_value=False

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from cryptography.fernet import Fernet
+from playwright.async_api import Error as BrowserError
 
 DOMAINS = {'DSM': ('dsmpro.ro', 'servicemanager.q-service.ro'),
            'Inter Cars': ('intercars.eu',), 'AutoTotal': ('eoriginal.ro',),
@@ -152,19 +153,22 @@ async def reconnect(page, credentials, provider):
             return 'human_verification_required'
         await next_button.click(timeout=15000)
         for _ in range(10):
-            if not provider_url(provider, page.url):
-                return 'login_location_changed'
-            if await active_verification(page):
-                return 'human_verification_required'
-            if await authenticated(page, provider):
-                return 'connected'
-            if await password.count() == 1:
-                location = urlparse(page.url)
-                if (location.hostname != 'account.intercars.eu'
-                        or not location.path.startswith('/authenticationendpoint/')):
+            try:
+                if not provider_url(provider, page.url):
                     return 'login_location_changed'
-                email_submitted = True
-                break
+                if await active_verification(page):
+                    return 'human_verification_required'
+                if await authenticated(page, provider):
+                    return 'connected'
+                if await password.count() == 1:
+                    location = urlparse(page.url)
+                    if (location.hostname != 'account.intercars.eu'
+                            or not location.path.startswith('/authenticationendpoint/')):
+                        return 'login_location_changed'
+                    email_submitted = True
+                    break
+            except BrowserError:
+                pass  # The email step replaces the document; retry the new DOM.
             await asyncio.sleep(1)
         if not email_submitted:
             return 'login_failed'
@@ -174,12 +178,24 @@ async def reconnect(page, credentials, provider):
     if await form.count() != 1:
         return 'unsupported_login_form'
     username = form.locator('input[type=email]:visible,input[type=text]:visible')
+    username_count = await username.count()
+    if provider == 'Inter Cars' and not email_submitted and username_count == 0:
+        # Resume after navigation/restart only when the pinned form itself
+        # proves which username was submitted. Never infer it from a URL.
+        hidden = form.locator('input[type=hidden][name=username],input[type=hidden][name=email]')
+        location = urlparse(page.url)
+        if (location.hostname == 'account.intercars.eu'
+                and location.path.startswith('/authenticationendpoint/')
+                and await hidden.count() == 1
+                and (await hidden.input_value()).strip() == credentials['username']):
+            email_submitted = True
+    if username_count != 1 and not (email_submitted and username_count == 0):
+        return 'unsupported_login_form'
     names = r'Autentificare|Autentifică-te|Login|Log in|Sign in|Conectare|Conectează-te|Intră în cont'
     if email_submitted:
         names += r'|Continue|Continuă|Continua'
     button = form.get_by_role('button', name=re.compile('^(?:' + names + ')$', re.I))
-    username_count = await username.count()
-    if (username_count != 1 and not (email_submitted and username_count == 0)) or await button.count() != 1:
+    if await button.count() != 1:
         return 'unsupported_login_form'
     user_value = (await username.input_value()).strip() if username_count else credentials['username']
     password_value = await password.input_value()
@@ -197,12 +213,15 @@ async def reconnect(page, credentials, provider):
         return 'human_verification_required'
     await button.click(timeout=15000)
     for _ in range(10):
-        if await authenticated(page, provider):
-            return 'connected'
-        if await upstream_error(page):
-            return 'upstream_unavailable'
-        if await active_verification(page):
-            return 'human_verification_required'
+        try:
+            if await authenticated(page, provider):
+                return 'connected'
+            if await upstream_error(page):
+                return 'upstream_unavailable'
+            if await active_verification(page):
+                return 'human_verification_required'
+        except BrowserError:
+            pass
         await asyncio.sleep(1)
     if not await page.locator('input[type=password]:visible').count():
         return 'unverified'
@@ -329,6 +348,7 @@ class ProviderSessionKeeper:
                     state['status'] = outcome
                     break
                 result[provider] = state
-            except Exception:
-                result[provider] = {"auto_login_configured": vault.path.exists(), "status": "browser_unavailable", "checked_at": time.time()}
+            except Exception as error:
+                result[provider] = {"auto_login_configured": vault.path.exists(), "status": "browser_unavailable",
+                                    "error_type": type(error).__name__, "checked_at": time.time()}
         return result

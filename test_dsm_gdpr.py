@@ -8,9 +8,19 @@ from unittest.mock import AsyncMock, Mock, patch
 import dsm_gdpr as gdpr
 import pre_reception as flow
 import pre_arrival_reminders as reminders
+import pre_arrival_policy as document_policy
 from test_pre_arrival_policy import data, head, PHONE
 
 LINK = 'https://apps.dsmpro.ro/sign/example-test-only'
+
+
+def recent_case():
+    # The shared fixture uses a fixed October clock. Do not compare today's
+    # visit against that old day when this suite runs in a later month.
+    value = data()
+    value['document_policy'].update(document_policy.evaluate(
+        vehicle_exists=True, last_visit=date.today(), checked_on=date.today()))
+    return value
 
 
 def case():
@@ -312,7 +322,7 @@ class AgreementFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(LINK, self.send.await_args.args[1]); create.assert_awaited_once()
 
     async def test_recent_vehicle_still_checks_client_agreement_without_requesting_photo(self):
-        value = data(date.today().isoformat())
+        value = recent_case()
         flow.save(self.root, PHONE, 'attendance', value)
         with patch.object(gdpr, 'call', AsyncMock(return_value=payload(sms_or_qrcode_sended={'2_statement_of_agreement': 'signed'}))) as read, \
                 patch.object(gdpr, 'generate', AsyncMock()) as create:
@@ -324,7 +334,7 @@ class AgreementFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(flow.get(self.root, PHONE)[1]['document_source'], 'dsm')
 
     async def test_first_client_of_recent_vehicle_receives_link_and_can_confirm_signature(self):
-        value = data(date.today().isoformat())
+        value = recent_case()
         # Vehicle history is reusable, but the current client has no GDPR yet.
         value['contact_id'] = '44'
         response = payload(); response['transaction']['contact_id'] = '44'
@@ -352,7 +362,7 @@ class AgreementFlowTests(unittest.IsolatedAsyncioTestCase):
             create.assert_not_awaited()
 
     async def test_absent_transaction_for_recent_vehicle_defers_until_confirmed_order(self):
-        value = data(date.today().isoformat()); value.update(source_type='3', source_transaction_id='694')
+        value = recent_case(); value.update(source_type='3', source_transaction_id='694')
         with patch.object(gdpr, 'call', AsyncMock()) as read, patch.object(gdpr, 'generate', AsyncMock()) as create:
             await self.handle('DA', value)
             self.assertEqual(flow.get(self.root, PHONE)[1]['document_source'], 'dsm')

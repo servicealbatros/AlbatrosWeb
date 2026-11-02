@@ -1582,7 +1582,7 @@ def _combine_labour_results(haynes: dict, tecrmi: dict) -> dict:
     if statuses == {"not_started"}:
         status = "not_started"
         message = "Nu există încă un calcul de manoperă pentru această cerere."
-    elif "unavailable" in statuses or "needs_verification" in statuses:
+    elif statuses & {"unavailable", "needs_verification", "needs_vehicle_data"}:
         status = "needs_verification"
         message = "Sursele de timpi nu au furnizat încă un calcul complet; este necesară verificarea consilierului."
     else:
@@ -4024,7 +4024,7 @@ body{{font-family:Arial;background:#f4f6f8;color:#18212b;margin:0}}.wrap{{width:
 # ---------------------------------------------------------
 
 @app.post("/api/requests/{request_id}/technician-start")
-def request_technician_start(request_id: int, live_catalogues: bool = False):
+def request_technician_start(request_id: int, live_catalogues: bool = False, standalone: bool | None = None):
     try:
         POLICY.require_robot(Action.SEARCH_LABOUR)
     except SecurityViolation as exc:
@@ -4048,6 +4048,11 @@ def request_technician_start(request_id: int, live_catalogues: bool = False):
     if not symptom:
         raise HTTPException(status_code=400, detail="Cererea nu are lucrare/solicitare.")
     technical_symptom = expand_technical_request(symptom)
+    active_parts = [job for job in _load_robot_jobs() if job.get('status') in {'QUEUED', 'RUNNING'}]
+    if standalone is None:
+        standalone = not any(int(job.get('request_id') or 0) == request_id for job in active_parts)
+    if standalone and active_parts:
+        raise HTTPException(409, 'O căutare de piese folosește deja catalogul. Așteaptă terminarea ei înainte de căutarea independentă a manoperei.')
 
     if not TECHNICIAN_WORKER.exists():
         raise HTTPException(
@@ -4108,6 +4113,9 @@ def request_technician_start(request_id: int, live_catalogues: bool = False):
     tecrmi_running = dict(running)
     tecrmi_running["status"] = "running"
     tecrmi_running["message"] = "TecRMI caută timpii. Haynes va fi folosit numai dacă este necesar."
+    if standalone:
+        tecrmi_running['phase'] = 'identifying_vehicle'
+        tecrmi_running['message'] = 'Identificare independentă a vehiculului pentru manoperă; căutarea pieselor rămâne oprită.'
     tecrmi_output_path.write_text(
         json.dumps(tecrmi_running, ensure_ascii=False, indent=2),
         encoding="utf-8"
@@ -4142,12 +4150,15 @@ def request_technician_start(request_id: int, live_catalogues: bool = False):
     log_path = TECHNICIAN_LOG_DIR / f"request_{request_id}_worker.log"
     tecrmi_log_path = TECRMI_LOG_DIR / f"request_{request_id}_worker.log"
     labour_env = os.environ.copy()
-    labour_env['ALBATROS_WORKER_RUN_ID'] = register_worker_run([output_path, tecrmi_output_path])
+    from labour_vehicle import identity_path, hints_path
+    labour_env['ALBATROS_WORKER_RUN_ID'] = register_worker_run([output_path, tecrmi_output_path, identity_path(tecrmi_output_path)])
+    hints_path(tecrmi_output_path).write_text(json.dumps(_vehicle_hints_for_request(request_row), ensure_ascii=False), encoding='utf-8')
 
     coordinator_cmd = [str(TECHNICIAN_PYTHON), str(BASE / 'labour_fallback_runner.py'),
                        str(request_id), vin, technical_symptom, str(output_path),
                        str(_offer_result_file(request_id)), str(tecrmi_output_path),
-                       str(log_path), str(tecrmi_log_path), str(TECHNICIAN_WORKER), str(TECRMI_WORKER)]
+                       str(log_path), str(tecrmi_log_path), str(TECHNICIAN_WORKER), str(TECRMI_WORKER),
+                       'standalone' if standalone else 'coupled']
     try:
         with (TECHNICIAN_LOG_DIR / f"request_{request_id}_fallback.log").open('w', encoding='utf-8') as log_file:
             subprocess.Popen(coordinator_cmd, cwd=str(OFFERING_DIR), shell=False, env=labour_env,
@@ -5903,7 +5914,7 @@ def request_labour_only_start(request_id: int):
     request_row = _request_by_id(request_id)
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost găsită.")
-    result = request_technician_start(request_id)
+    result = request_technician_start(request_id, standalone=True)
     return {
         "ok": bool(result.get("ok", True)),
         "request_id": request_id,
@@ -7187,7 +7198,7 @@ async function startLabourOnly(){{
     const response=await fetch("/api/requests/{request_id}/labour-only-start",{{method:"POST"}});
     const data=await response.json();
     if(!response.ok||data.ok===false) throw new Error(data.detail||data.message||data.labour?.message||"Căutarea nu a pornit.");
-    status.innerHTML="✅ Modul doar manoperă a pornit.<br>⏳ HaynesPro și TecRMI caută în paralel.<br>✅ Nu a fost pornită nicio căutare de piese.";
+    status.innerHTML="✅ Modul doar manoperă a pornit.<br>⏳ TecRMI identifică vehiculul și caută timpii; Haynes este rezervă.<br>✅ Nu a fost pornită nicio căutare de piese.";
     btn.textContent="Manoperă pornită — în lucru…";
     setTimeout(()=>window.AlbatrosAI.whenIdle().then(()=>location.reload()),3500);
   }} catch(error) {{

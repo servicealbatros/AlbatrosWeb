@@ -9,6 +9,8 @@ import subprocess
 import sys
 
 from worker_run_guard import write_worker_result
+from labour_vehicle import matching
+from browser_resources import browser_operation
 
 
 def needs_haynes(result):
@@ -34,6 +36,7 @@ def run_worker(command, log_path, timeout):
             return 124
 
 
+@browser_operation
 async def haynes_on_demand(command, log_path, timeout):
     from playwright.async_api import async_playwright
     from provider_sessions import ProviderLoginVault, reconnect, provider_url
@@ -60,10 +63,13 @@ async def haynes_on_demand(command, log_path, timeout):
 
 
 def run(request_id, vin, symptom, haynes_output, offer_result, tecrmi_output,
-        haynes_log, tecrmi_log, haynes_worker, tecrmi_worker):
+        haynes_log, tecrmi_log, haynes_worker, tecrmi_worker, mode='coupled'):
     token = os.getenv('ALBATROS_WORKER_RUN_ID', '')
     timeout = max(60, int(os.getenv('ALBATROS_LABOUR_TIMEOUT_SECONDS', '240')))
     tecrmi_command = [sys.executable, str(tecrmi_worker), str(request_id), vin, symptom, str(tecrmi_output), str(offer_result)]
+    standalone = mode == 'standalone'
+    if standalone:
+        tecrmi_command.append('--standalone')
     try:
         code = run_worker(tecrmi_command, tecrmi_log, timeout)
     except OSError:
@@ -74,12 +80,13 @@ def run(request_id, vin, symptom, haynes_output, offer_result, tecrmi_output,
         result = {}
     if not isinstance(result, dict):
         result = {}
-    if result.get('status') in {None, 'running', 'standby'}:
-        result = {'request_id': int(request_id), 'status': 'error', 'source': 'AutoTotal TecRMI',
+    if result.get('status') in {None, 'running', 'standby'} or not matching(result, request_id, vin):
+        result = {'request_id': int(request_id), 'vin':vin, 'symptom':symptom,
+                  'status': 'error', 'source': 'AutoTotal TecRMI',
                   'message': 'Căutarea TecRMI nu s-a încheiat. Se verifică sursa de rezervă.',
                   'exit_code': code}
-        if not write_worker_result(tecrmi_output, result, token):
-            return
+    if not write_worker_result(tecrmi_output, result, token):
+        return
     base = {'request_id': int(request_id), 'vin': vin, 'symptom': symptom, 'source': 'HaynesPro — rezervă'}
     if not needs_haynes(result):
         write_worker_result(haynes_output, {**base, 'status': 'unavailable', 'skipped_due_to_tecrmi_complete': True,
@@ -91,13 +98,15 @@ def run(request_id, vin, symptom, haynes_output, offer_result, tecrmi_output,
     if not write_worker_result(haynes_output, started, token):
         return  # A newer request run superseded this one.
     command = [sys.executable, str(haynes_worker), str(request_id), vin, symptom, str(haynes_output), str(offer_result)]
+    if standalone:
+        command.append('--standalone')
     try:
         code = asyncio.run(haynes_on_demand(command, haynes_log, timeout))
         try:
             reserve_result = json.loads(Path(haynes_output).read_text(encoding='utf-8'))
         except (OSError, ValueError):
             reserve_result = {}
-        if not isinstance(reserve_result, dict) or reserve_result.get('status') in {None, 'running', 'standby'}:
+        if not matching(reserve_result, request_id, vin) or reserve_result.get('status') in {None, 'running', 'standby'}:
             write_worker_result(haynes_output, {**started, 'status': 'error', 'message': 'Căutarea de rezervă Haynes nu s-a încheiat. Este necesară verificarea consilierului.'}, token)
     except Exception:
         write_worker_result(haynes_output, {**started, 'status': 'error', 'message': 'Haynes nu a putut fi deschis sau autentificat. Verifică furnizorul în fereastra protejată.'}, token)

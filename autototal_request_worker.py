@@ -1655,12 +1655,13 @@ async def resolve_power_in_haynes(context, vehicle: dict) -> dict:
 
 
 async def run(request_id: int, vin: str, query: str, output: Path,
-              hints_path: Path | None = None) -> None:
+              hints_path: Path | None = None, *, identification_only: bool = False) -> None:
     base = {"request_id": request_id, "vin": vin, "query": query,
             "source": "AutoTotal", "products": [],
             "updated_at": datetime.now().isoformat(timespec="seconds")}
     try:
-        await ensure_autototal_responsive()
+        if not identification_only:
+            await ensure_autototal_responsive()
         vehicle_hints = _load_vehicle_hints(request_id, hints_path)
         target = _autototal_target()
         async with websockets.connect(target["webSocketDebuggerUrl"], max_size=16_000_000) as ws:
@@ -1746,8 +1747,9 @@ async def run(request_id: int, vin: str, query: str, output: Path,
             elif re.search(r"\b(?:E?4X4|4WD|AWD|4MATIC|4MOTION)\b", identity_text, re.I):
                 vehicle["drivetrain"] = "4x4"
             complete = all(vehicle.get(k) not in (None, "") for k in ("make", "model", "year", "engine_or_variant", "power_kw"))
-            save(output, {**base, "status": "searching_parts", "vehicle": vehicle,
-                          "message": "AutoTotal a identificat vehiculul și caută independent piesele cerute."})
+            save(output, {**base, "status": "identifying" if identification_only else "searching_parts", "vehicle": vehicle,
+                          "message": "AutoTotal identifică varianta exactă pentru manoperă." if identification_only
+                          else "AutoTotal a identificat vehiculul și caută independent piesele cerute."})
             types = (identification.get("td_catalog") or {}).get("types") or []
             # AutoTotal can return the OE vehicle immediately while its
             # standard TecDoc catalogue is still loading. Retry the VIN decode
@@ -1789,6 +1791,10 @@ async def run(request_id: int, vin: str, query: str, output: Path,
                         "make", "model", "year", "engine_or_variant", "power_kw"
                     ))
             if not types:
+                if identification_only:
+                    save(output, {**base, 'status':'needs_vehicle_data', 'vehicle':vehicle,
+                                  'message':'AutoTotal nu a identificat tipul TecDoc exact pentru manoperă.'})
+                    return
                 oe_candidates = await _discover_oe_vin_candidates(ws, identification, vin, query)
                 oe_products = []
                 for index, candidate in enumerate(oe_candidates):
@@ -1825,7 +1831,11 @@ async def run(request_id: int, vin: str, query: str, output: Path,
             selected_type = _select_vehicle_type(types, selection_name, vehicle.get("engine_or_variant") or "",
                                                  vehicle.get("drivetrain") or "", vehicle.get("year"),
                                                  vehicle.get("power_kw"))
-            if not selected_type:
+            if not selected_type or (identification_only and not selected_type.get('typeIdField')):
+                if identification_only:
+                    save(output, {**base, 'status':'needs_vehicle_data', 'vehicle':vehicle,
+                                  'message':'Mai multe variante TecDoc sunt posibile; nu aleg automat o variantă pentru manoperă.'})
+                    return
                 # An ambiguous TecDoc type must not block the independent
                 # VIN-specific OE diagrams. Keep the ambiguity for review.
                 oe_candidates = await _discover_oe_vin_candidates(ws, identification, vin, query)
@@ -1876,6 +1886,11 @@ async def run(request_id: int, vin: str, query: str, output: Path,
                 "tecrmi_status": "starting",
                 "message": "AutoTotal a identificat tipul TecDoc exact; piesele și timpii continuă în paralel.",
             })
+            if identification_only:
+                save(output, {**base, 'status':'vehicle_ready', 'vehicle':vehicle,
+                              'catalog_status':'tecdoc_vehicle_ready', 'identification_only':True,
+                              'message':'Vehicul identificat pentru manoperă; căutarea pieselor nu a fost pornită.'})
+                return
             base_url = str(identification.get("link") or "").split("#", 1)[0]
             await _evaluate(ws, 10, f"location.href={json.dumps(base_url + '#/standard?ti=' + type_id)}; true")
             await asyncio.sleep(2)

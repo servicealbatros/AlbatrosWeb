@@ -20,14 +20,14 @@ class LabourFallbackTests(unittest.TestCase):
         self.args=('10','TESTVIN','frane',self.haynes,root/'offer.json',self.tecrmi,root/'haynes.log',root/'tecrmi.log','haynes.py','tecrmi.py')
 
     def test_complete_tecrmi_skips_haynes_entirely(self):
-        self.tecrmi.write_text(json.dumps({'status':'ready','technical_hours':1,'detected_operations':[{'id':'pads'}],'resolved_operations':[{'id':'pads'}]}))
+        self.tecrmi.write_text(json.dumps({'request_id':10,'vin':'TESTVIN','status':'ready','technical_hours':1,'detected_operations':[{'id':'pads'}],'resolved_operations':[{'id':'pads'}]}))
         with patch.object(runner,'run_worker',return_value=0) as primary,patch.object(runner,'haynes_on_demand',AsyncMock()) as reserve:
             runner.run(*self.args)
         primary.assert_called_once(); reserve.assert_not_awaited()
         self.assertTrue(json.loads(self.haynes.read_text())['skipped_due_to_tecrmi_complete'])
 
     def test_missing_operation_requires_reserve(self):
-        result={'status':'ready','technical_hours':1,'detected_operations':[{'id':'front'},{'id':'rear'}],'resolved_operations':[{'id':'front'}]}
+        result={'request_id':10,'vin':'TESTVIN','status':'ready','technical_hours':1,'detected_operations':[{'id':'front'},{'id':'rear'}],'resolved_operations':[{'id':'front'}]}
         self.assertTrue(runner.needs_haynes(result))
         self.tecrmi.write_text(json.dumps(result))
         with patch.object(runner,'run_worker',return_value=0),patch.object(runner,'haynes_on_demand',AsyncMock(return_value=0)) as reserve:
@@ -40,6 +40,10 @@ class LabourFallbackTests(unittest.TestCase):
             runner.run(*self.args)
         self.assertEqual(json.loads(self.tecrmi.read_text())['status'],'error')
         self.assertEqual(json.loads(self.haynes.read_text())['status'],'error')
+        for path in (self.tecrmi,self.haynes):
+            result=json.loads(path.read_text())
+            self.assertEqual(result['vin'],'TESTVIN')
+            self.assertEqual(result['request_id'],10)
 
     def test_superseded_request_never_starts_reserve_or_overwrites_results(self):
         self.tecrmi.write_text('{"status":"needs_verification"}')

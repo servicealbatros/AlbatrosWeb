@@ -570,6 +570,17 @@ def find_haynes_page(browser):
                 return pg
     return None
 
+
+def haynes_matches_vin(page, vin):
+    """A generic or previously selected Haynes page is not vehicle evidence."""
+    if any(part in page.url.lower() for part in ('makesoverview', '/login', '/signin')):
+        return False
+    try:
+        body = page.locator('body').inner_text(timeout=8000)
+        return bool(re.search(r'(?<![A-Z0-9])' + re.escape(vin.upper()) + r'(?![A-Z0-9])', body.upper()))
+    except Exception:
+        return False
+
 def find_intercars_page(browser):
     for context in browser.contexts:
         for pg in context.pages:
@@ -1112,13 +1123,17 @@ async def _haynes_drivetrain_conflict(request_id: int, offer_result_path: str) -
 
 
 async def _autototal_repair_times(request_id: int, offer_result_path: str,
-                                  operations: list[dict]) -> dict | None:
+                                  operations: list[dict], *, identity_file=None, expected_vin=None) -> dict | None:
     """Read TecRMI repair times from AutoTotal for its VIN-selected exact vehicle."""
     if not offer_result_path:
         return None
-    auto_path = Path(offer_result_path).with_name(f"request_{request_id}_autototal.json")
+    auto_path = Path(identity_file) if identity_file else Path(offer_result_path).with_name(f"request_{request_id}_autototal.json")
     try:
         auto = json.loads(auto_path.read_text(encoding="utf-8"))
+        if expected_vin:
+            from labour_vehicle import matching
+            if not matching(auto, request_id, expected_vin):
+                return None
         vehicle = auto.get("vehicle") or {}
         type_id = str(vehicle.get("autototal_type_id") or "")
     except Exception:
@@ -1130,15 +1145,18 @@ async def _autototal_repair_times(request_id: int, offer_result_path: str,
     if not target:
         return None
     async with websockets.connect(target["webSocketDebuggerUrl"], max_size=32_000_000) as ws:
-        tree_expr = """(async()=>JSON.stringify((await axios.post('/car/repair/getRepair',{typeID:%s})).data?.result?.categs||[]))()""" % json.dumps(type_id)
+        from autototal_request_worker import _post_helper_js
+        tree_expr = """(async()=>{const post=%s;return JSON.stringify((await post('/car/repair/getRepair',{typeID:%s})).data?.result?.categs||[]);})()""" % (_post_helper_js(), json.dumps(type_id))
         tree_reply = await _cdp_call(ws, 1000, "Runtime.evaluate", {
             "expression": tree_expr, "awaitPromise": True, "returnByValue": True})
         tree_json = tree_reply.get("result", {}).get("result", {}).get("value") or "[]"
         tree = json.loads(tree_json)
-        capacity_expr = """(async()=>JSON.stringify((await axios.post('/car/capacitati-umplere',{typeID:%s})).data?.result?.engOil||{}))()""" % json.dumps(type_id)
-        capacity_reply = await _cdp_call(ws, 1001, "Runtime.evaluate", {
-            "expression": capacity_expr, "awaitPromise": True, "returnByValue": True})
-        engine_oil = json.loads(capacity_reply.get("result", {}).get("result", {}).get("value") or "{}")
+        engine_oil = {}
+        if any(op['id'] in {'engine_oil', 'oil_filter'} for op in operations):
+            capacity_expr = """(async()=>{const post=%s;return JSON.stringify((await post('/car/capacitati-umplere',{typeID:%s})).data?.result?.engOil||{});})()""" % (_post_helper_js(), json.dumps(type_id))
+            capacity_reply = await _cdp_call(ws, 1001, "Runtime.evaluate", {
+                "expression": capacity_expr, "awaitPromise": True, "returnByValue": True})
+            engine_oil = json.loads(capacity_reply.get("result", {}).get("result", {}).get("value") or "{}")
         engine_oil_liters = float((engine_oil.get("engine_capacity") or {}).get("value") or 0)
         oil_options = []
         for option in engine_oil.get("engine_oil_options") or []:
@@ -1226,9 +1244,10 @@ async def _autototal_repair_times(request_id: int, offer_result_path: str,
                 unresolved.append(op)
                 continue
             leaf = ranked[0][1]
-            time_expr = """(async()=>JSON.stringify((await axios.post('/car/repair/getRepairTime',{
+            time_expr = """(async()=>{const post=%s;return JSON.stringify((await post('/car/repair/getRepairTime',{
               typeID:%s,cID:%s,kID:%s,iID:%s
-            })).data?.result||[]))()""" % (
+            })).data?.result||[]);})()""" % (
+                _post_helper_js(),
                 json.dumps(type_id), json.dumps(leaf["main_id"]),
                 json.dumps(leaf["kor_id"]), json.dumps(leaf["item_id"]))
             reply = await _cdp_call(ws, call_id, "Runtime.evaluate", {
@@ -1313,7 +1332,7 @@ def _save_ready_labour(output: Path, request_id: int, vin: str, request_text: st
     })
 
 def _wait_for_autototal_identification(request_id: int, offer_result_path: str,
-                                       timeout_seconds: float = 300.0) -> bool:
+                                       timeout_seconds: float = 180.0, *, expected_vin=None) -> bool:
     """Wait for AutoTotal's exact TecDoc type, not merely an interim status.
 
     OE-first searches can legitimately take more than 90 seconds.  Returning
@@ -1327,11 +1346,15 @@ def _wait_for_autototal_identification(request_id: int, offer_result_path: str,
     while time.monotonic() < deadline:
         try:
             payload = json.loads(auto_path.read_text(encoding="utf-8"))
+            if expected_vin:
+                from labour_vehicle import matching
+                if not matching(payload, request_id, expected_vin):
+                    return False
             vehicle = payload.get("vehicle") or {}
             if vehicle.get("autototal_type_id"):
                 return True
             if payload.get("status") in {
-                "error", "unavailable"
+                "error", "unavailable", "needs_vehicle_data", "vehicle_partial"
             }:
                 return False
         except Exception:
@@ -1349,6 +1372,7 @@ def main():
     request_text = sys.argv[3].strip()
     output = Path(sys.argv[4])
     offer_result_path = sys.argv[5].strip() if len(sys.argv) > 5 else ""
+    standalone = '--standalone' in sys.argv[6:]
 
     operations = detect_operations(request_text)
 
@@ -1365,7 +1389,7 @@ def main():
         return
 
     try:
-        drivetrain_conflict = asyncio.run(_haynes_drivetrain_conflict(request_id, offer_result_path))
+        drivetrain_conflict = None if standalone else asyncio.run(_haynes_drivetrain_conflict(request_id, offer_result_path))
     except Exception:
         drivetrain_conflict = None
     if drivetrain_conflict:
@@ -1384,8 +1408,9 @@ def main():
     # AutoTotal and Inter Cars are asynchronous. If AutoTotal cannot resolve
     # the exact type, Inter Cars still finishes by VIN; wait for that fallback
     # before attempting integrated Haynes maintenance.
-    offer_state = wait_for_offer_products(offer_result_path)
-    if offer_state.get("status") not in {
+    budget = max(60, int(os.getenv('ALBATROS_LABOUR_TIMEOUT_SECONDS', '240')))
+    offer_state = {} if standalone else wait_for_offer_products(offer_result_path, timeout_seconds=max(1, budget - 120))
+    if not standalone and offer_state.get("status") not in {
             "ready", "partial", "error", "needs_vehicle_data", "failed"}:
         save(output, {
             "status": "error",
@@ -1402,11 +1427,12 @@ def main():
         return
 
     try:
-        asyncio.run(ensure_autototal_responsive())
+        if not standalone:
+            asyncio.run(ensure_autototal_responsive())
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(CDP_URL, timeout=15000)
-            intercars_page = find_intercars_page(browser)
-            products = load_offer_products(offer_result_path)
+            intercars_page = None if standalone else find_intercars_page(browser)
+            products = [] if standalone else load_offer_products(offer_result_path)
             revision_ids = {"engine_oil", "oil_filter", "air_filter", "cabin_filter", "fuel_filter"}
             revision_operations = [op for op in operations if op.get("id") in revision_ids]
             maintenance = None
@@ -1432,6 +1458,13 @@ def main():
                             operation_snapshots[op["id"]] = snap
 
             page = find_haynes_page(browser)
+
+            if standalone and (not page or not haynes_matches_vin(page, vin)):
+                save(output, {'request_id':request_id, 'vin':vin, 'symptom':request_text,
+                              'status':'needs_vehicle_data', 'source':'HaynesPro — rezervă',
+                              'detected_operations':operations, 'unresolved_operations':operations,
+                              'message':'Vehiculul cererii nu este confirmat în Haynes. Selectează vehiculul după VIN înainte de citirea timpilor.'})
+                return
 
             if not operation_snapshots and not page:
                 save(output, {

@@ -6,7 +6,10 @@ other one's result.
 """
 from pathlib import Path
 import asyncio
+import os
 import sys
+
+from labour_vehicle import identity_path, hints_path, read_identity
 
 from technician_request_worker_v6_time_parse_fix import (
     _autototal_repair_times,
@@ -15,6 +18,23 @@ from technician_request_worker_v6_time_parse_fix import (
     detect_operations,
     save,
 )
+
+
+async def standalone_identity(request_id, vin, request_text, output, offer_result_path):
+    """Identify the VIN ourselves; never wait for or create a parts job."""
+    from autototal_request_worker import run as identify
+    from worker_run_guard import write_worker_result
+    target = identity_path(output)
+    previous = Path(offer_result_path).with_name(f'request_{request_id}_autototal.json')
+    cached = read_identity(previous, request_id, vin)
+    if ((cached.get('vehicle') or {}).get('autototal_type_id')
+            and cached.get('catalog_status') in {'tecdoc_vehicle_ready', 'tecdoc_ready'}):
+        write_worker_result(target, cached, os.getenv('ALBATROS_WORKER_RUN_ID', ''))
+        return read_identity(target, request_id, vin)
+    budget = max(60, int(os.getenv('ALBATROS_LABOUR_TIMEOUT_SECONDS', '240')))
+    await asyncio.wait_for(identify(request_id, vin, request_text, target,
+                                  hints_path(output), identification_only=True), timeout=min(90, budget * .4))
+    return read_identity(target, request_id, vin)
 
 
 def main() -> None:
@@ -27,6 +47,7 @@ def main() -> None:
     request_text = sys.argv[3].strip()
     output = Path(sys.argv[4])
     offer_result_path = sys.argv[5].strip()
+    standalone = '--standalone' in sys.argv[6:]
     operations = detect_operations(request_text)
 
     if not operations:
@@ -41,7 +62,21 @@ def main() -> None:
         })
         return
 
-    identified = _wait_for_autototal_identification(request_id, offer_result_path)
+    identity_file = None
+    try:
+        if standalone:
+            identity = asyncio.run(standalone_identity(request_id, vin, request_text, output, offer_result_path))
+            identity_file = identity_path(output)
+            identified = bool((identity.get('vehicle') or {}).get('autototal_type_id'))
+        else:
+            budget = max(60, int(os.getenv('ALBATROS_LABOUR_TIMEOUT_SECONDS', '240')))
+            identified = _wait_for_autototal_identification(request_id, offer_result_path,
+                timeout_seconds=max(1, budget - 120), expected_vin=vin)
+    except Exception:
+        save(output, {'status':'error', 'request_id':request_id, 'vin':vin, 'symptom':request_text,
+                      'detected_operations':operations, 'source':'AutoTotal TecRMI',
+                      'message':'Identificarea independentă AutoTotal nu s-a încheiat; verifică sesiunea și datele vehiculului.'})
+        return
     if not identified:
         save(output, {
             "status": "unavailable",
@@ -54,12 +89,20 @@ def main() -> None:
             "engine_oil_liters": 0,
             "engine_oil_specification": "",
             "engine_oil_options": [],
-            "message": "AutoTotal nu a publicat tipul TecDoc exact în intervalul permis; nu am interogat TecRMI pe o variantă nesigură.",
+            "message": (str(identity.get('message') or 'AutoTotal nu a identificat o variantă TecDoc unică.') if standalone
+                        else "AutoTotal nu a publicat tipul TecDoc exact în intervalul permis; nu am interogat TecRMI pe o variantă nesigură."),
             "source": "AutoTotal TecRMI / timpi reparație",
         })
         return
     try:
-        result = asyncio.run(_autototal_repair_times(request_id, offer_result_path, operations))
+        save(output, {'status':'running', 'request_id':request_id, 'vin':vin, 'symptom':request_text,
+                      'detected_operations':operations, 'phase':'reading_labour',
+                      'source':'AutoTotal TecRMI', 'message':'Vehicul identificat; TecRMI citește timpii operațiilor solicitate.'})
+        async def search():
+            budget = max(60, int(os.getenv('ALBATROS_LABOUR_TIMEOUT_SECONDS', '240')))
+            return await asyncio.wait_for(_autototal_repair_times(
+                request_id, offer_result_path, operations, identity_file=identity_file, expected_vin=vin), timeout=min(90, budget * .4))
+        result = asyncio.run(search())
     except Exception as exc:
         save(output, {
             "status": "error",

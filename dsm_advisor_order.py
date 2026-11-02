@@ -77,7 +77,7 @@ async def inspect(data):
         h = (details.get(ident) or {}).get('transaction') or {}
         check_identity(h, data, contact_id, ident)
         orders.append({'id': ident, 'code': str(h.get('transaction_head__code') or ident)})
-    return contact_id, orders
+    return contact_id, orders, plate(car.get('car_auto_number'))
 
 
 def journal(data_dir):
@@ -97,19 +97,22 @@ async def update_plate(data, ident):
       if(location.protocol!=='https:'||!['s.servicemanager.q-service.ro','apps.dsmpro.ro','appm.dsmpro.ro'].includes(location.hostname))throw Error('Domeniu DSM nepermis');
       const r=await fetch('/special/car/update_car_detail',{method:'POST',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||''},body:new URLSearchParams(__DATA__),signal:AbortSignal.timeout(12000)});
       if(!r.ok||r.url.includes('/login'))throw Error('DSM indisponibil');return JSON.stringify(await r.json());})()'''.replace('__DATA__', json.dumps(payload)))
-    if str(result.get('status')) not in {'1', 'true', 'True'} or result.get('validation'):
-        raise ValueError('DSM nu a confirmat schimbarea numărului; comanda este păstrată pentru verificare.')
     car = await call('/special/car/get_car', {'car_id': data.car_id})
     if str(car.get('car_body_series') or '').upper() != data.vin or plate(car.get('car_auto_number')) != data.registration:
-        raise ValueError('Numărul salvat nu este confirmat în fișa mașinii DSM.')
+        status = str(result.get('status') or '')[:30]
+        validation = result.get('validation')
+        fields = sorted(validation) if isinstance(validation, dict) else []
+        raise ValueError('Numărul salvat nu este confirmat în fișa mașinii DSM. '
+                         + 'Status: ' + status + '; rubrici: ' + ', '.join(fields))
 
 
 async def run(data_dir, data):
     async with LOCK:
-        contact_id, orders = await inspect(data)
+        contact_id, orders, current_registration = await inspect(data)
         if data.dry_run:
             return {'ready': not orders, 'registration': data.registration,
-                    'previous_registration': data.previous_registration, 'existing_orders': orders,
+                    'previous_registration': data.previous_registration, 'current_registration': current_registration,
+                    'existing_orders': orders,
                     'identity_verified': True, 'work': data.work, 'dry_run': True}
         fingerprint = hashlib.sha256(data.model_dump_json(exclude={'dry_run'}).encode()).hexdigest()
         conn = journal(data_dir)

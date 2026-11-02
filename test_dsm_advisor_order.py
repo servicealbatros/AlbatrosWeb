@@ -61,7 +61,7 @@ class AdvisorOrderTests(unittest.IsolatedAsyncioTestCase):
     async def update_plate(self, expression):
         self.writes.append('plate')
         self.registration = self.data.registration
-        return {'status': 1}
+        return {'status': 'success'}
 
     async def test_preview_has_no_writes_and_create_retry_has_one_order(self):
         result = await writer.run(self.folder.name, self.data)

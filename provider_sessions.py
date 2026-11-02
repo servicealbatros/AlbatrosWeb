@@ -15,6 +15,9 @@ DOMAINS = {'DSM': ('dsmpro.ro', 'servicemanager.q-service.ro'),
            'Haynes': ('workshopdata.com',)}
 AUTOTOTAL_HOME = 'https://www3.eoriginal.ro/'
 AUTOTOTAL_LOGIN = 'https://www3.eoriginal.ro/login'
+INTERCARS_HOME = 'https://ro.e-cat.intercars.eu/ro/'
+SUPPLIER_HOMES = {'AutoTotal': AUTOTOTAL_HOME, 'Inter Cars': INTERCARS_HOME}
+KEEPALIVE_INTERVAL = 300
 
 
 def provider_url(provider, url):
@@ -104,6 +107,23 @@ async def expired_autototal_form(page):
         return t.length<1000 && /An Error Was Encountered/i.test(t) &&
             /The action you have requested is not allowed[.]/i.test(t);
     }"""))
+
+
+async def read_session_status(page, url, provider):
+    """Read a trusted page using existing cookies, releasing its response body."""
+    if not provider_url(provider, url):
+        raise ValueError('Untrusted session check')
+    response = await page.request.get(url, timeout=10000)
+    try:
+        destination = urlparse(response.url)
+        if (response.status in {401, 403} or not provider_url(provider, response.url)
+                or re.search(r'/(?:login|signin|sign-in)(?:\.[a-z]+)?/?$', destination.path, re.I)):
+            return 'login_required'
+        return 'ok' if response.ok else 'upstream_unavailable'
+    finally:
+        # APIRequestContext retains bodies until explicit disposal, even if
+        # metadata inspection fails. Release before any caller navigates.
+        await response.dispose()
 
 
 async def intercars_email_form(page):
@@ -240,6 +260,7 @@ class ProviderSessionKeeper:
         self.attempts = {}
         self.error_reloads = {}
         self.last_keepalive = {}
+        self.keepalive_health = {}
         self.last_restore = {}
 
     def idle(self, *, allow_queued=False):
@@ -248,42 +269,46 @@ class ProviderSessionKeeper:
             return True
         from browser_resources import busy_reason
         marker = Path(root) / '.browser-console-activity'
-        if allow_queued and marker.exists() and time.time() - marker.stat().st_mtime < 120:
+        if marker.exists() and time.time() - marker.stat().st_mtime < 120:
             return False
         return busy_reason(root, include_queued=not allow_queued) is None
 
-    async def keep_autototal(self, page):
-        """Refresh the HTTP session, without navigating the catalogue tab."""
+    async def keep_session(self, page, provider):
+        """Keep the existing supplier HTTP session warm without tab navigation."""
         now = time.monotonic()
-        if now - self.last_keepalive.get('AutoTotal', -600) < 600:
+        if now - self.last_keepalive.get(provider, -KEEPALIVE_INTERVAL) < KEEPALIVE_INTERVAL:
             return None
-        self.last_keepalive['AutoTotal'] = now
+        self.last_keepalive[provider] = now
         try:
-            response = await page.request.get(AUTOTOTAL_HOME, timeout=10000)
+            outcome = await read_session_status(page, SUPPLIER_HOMES[provider], provider)
         except Exception:
-            self.last_keepalive['AutoTotal'] = now - 540
-            return 'upstream_unavailable'
-        if response.status in {401, 403} or urlparse(response.url).path.rstrip('/') == '/login':
-            return 'login_required'
-        return 'ok' if response.ok else 'upstream_unavailable'
+            self.last_keepalive[provider] = now - KEEPALIVE_INTERVAL + 60
+            outcome = 'upstream_unavailable'
+        self.keepalive_health[provider] = {'keepalive_status': outcome, 'keepalive_checked_at': time.time()}
+        return outcome
+
+    async def keep_autototal(self, page):
+        return await self.keep_session(page, 'AutoTotal')
 
     async def check(self, context):
         result = {}
         for provider, vault in self.vaults.items():
             try:
                 state = {'auto_login_configured': vault.path.exists(), 'status': 'tab_missing', 'checked_at': time.time()}
+                state.update(self.keepalive_health.get(provider, {}))
                 if provider == 'Haynes':
                     state['status'] = 'standby'
                     result[provider] = state
                     continue
                 pages = [p for p in context.pages if not p.is_closed() and provider_url(provider, p.url)]
-                if (provider == 'AutoTotal' and not pages and vault.path.exists() and self.idle()
+                if (provider in SUPPLIER_HOMES and not pages and vault.path.exists()
+                        and self.idle(allow_queued=(provider == 'Inter Cars'))
                         and time.monotonic() - self.last_restore.get(provider, -60) >= 60):
                     self.last_restore[provider] = time.monotonic()
                     page = await context.new_page()
                     pages = [page]
                     try:
-                        await page.goto(AUTOTOTAL_HOME, wait_until='domcontentloaded', timeout=15000)
+                        await page.goto(SUPPLIER_HOMES[provider], wait_until='domcontentloaded', timeout=15000)
                     except Exception:
                         if not provider_url(provider, page.url):
                             await page.close()
@@ -293,15 +318,18 @@ class ProviderSessionKeeper:
                 for page in pages:
                     if await authenticated(page, provider):
                         connected = True
-                        if provider == 'AutoTotal' and self.idle():
-                            outcome = await self.keep_autototal(page)
+                        if provider in SUPPLIER_HOMES and self.idle():
+                            outcome = await self.keep_session(page, provider)
+                            state.update(self.keepalive_health.get(provider, {}))
                             if outcome == 'login_required':
                                 connected = False
                                 # An idle home page may return to a fresh login
                                 # with GET. Never reload a submitted POST form.
                                 path = urlparse(page.url).path
-                                if path == '/' or path.startswith(('/search/', '/auto/vin/', '/uleiuri/')):
+                                if provider == 'AutoTotal' and (path == '/' or path.startswith(('/search/', '/auto/vin/', '/uleiuri/'))):
                                     await page.goto(AUTOTOTAL_LOGIN, wait_until='domcontentloaded', timeout=15000)
+                                elif provider == 'Inter Cars' and path in {'/', '/ro/'}:
+                                    await page.goto(INTERCARS_HOME, wait_until='domcontentloaded', timeout=15000)
                             elif outcome == 'upstream_unavailable':
                                 state['keepalive_status'] = outcome
                         break
@@ -320,7 +348,8 @@ class ProviderSessionKeeper:
                         break
                     if await upstream_error(page):
                         state['status'] = 'upstream_unavailable'
-                        if time.monotonic() - self.error_reloads.get(provider, 0) > 60:
+                        if (self.idle(allow_queued=(provider == 'Inter Cars'))
+                                and time.monotonic() - self.error_reloads.get(provider, 0) > 60):
                             self.error_reloads[provider] = time.monotonic()
                             await page.reload(wait_until='domcontentloaded', timeout=15000)
                         continue
@@ -346,6 +375,8 @@ class ProviderSessionKeeper:
                         state['status'] = 'retry_wait'
                         continue
                     outcome = await reconnect(page, vault.load(), provider)
+                    if outcome == 'connected':
+                        self.last_keepalive.pop(provider, None)
                     if outcome in {'connected', 'login_failed'}:
                         self.attempts[provider] = (time.monotonic(), failures + (outcome == 'login_failed'), version)
                     state['status'] = outcome

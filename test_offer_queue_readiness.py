@@ -113,7 +113,7 @@ class ReadinessTests(unittest.TestCase):
 class QueueLoginTests(unittest.IsolatedAsyncioTestCase):
     def email_page(self, *, foreign=False, human_email=False):
         state={'password':False,'connected':False}
-        email=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value='human' if human_email else ''),fill=AsyncMock())
+        email=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value='human' if human_email else ''),fill=AsyncMock(),evaluate=AsyncMock(return_value=True))
         hidden=SimpleNamespace(count=AsyncMock(return_value=0))
         login=SimpleNamespace(count=AsyncMock(return_value=1),click=AsyncMock(side_effect=lambda **kw:state.update(connected=True)))
         def button(role, **kwargs):
@@ -159,6 +159,14 @@ class QueueLoginTests(unittest.IsolatedAsyncioTestCase):
             result=await sessions.reconnect(page,{'username':'test-user','password':'test-secret','login_url':page.url},'Inter Cars')
         self.assertEqual(result,'human_verification_required')
         password.fill.assert_not_awaited(); login.click.assert_not_awaited()
+
+    async def test_code_field_is_not_mistaken_for_an_email_step(self):
+        page,email,password,next_button,login,state=self.email_page()
+        email.evaluate.return_value=False
+        with patch.object(sessions,'active_verification',AsyncMock(return_value=False)):
+            result=await sessions.reconnect(page,{'username':'test-user','password':'test-secret','login_url':page.url},'Inter Cars')
+        self.assertEqual(result,'unsupported_login_form')
+        email.fill.assert_not_awaited(); next_button.click.assert_not_awaited()
 
     async def test_queued_intercars_can_reconnect_but_running_cannot(self):
         for state,allowed in [('QUEUED',True),('RETRY',True),('RUNNING',False)]:

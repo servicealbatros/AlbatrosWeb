@@ -108,14 +108,20 @@ async def expired_autototal_form(page):
 async def intercars_email_form(page):
     """Only the pinned Inter Cars identity host may receive a saved email."""
     location = urlparse(page.url)
-    if (location.scheme != 'https' or location.hostname != 'account.intercars.eu'
+    if (location.scheme != 'https' or location.hostname != 'account.intercars.eu' or location.port not in (None,443)
             or location.username or location.password
             or not location.path.startswith('/authenticationendpoint/')):
         return None
     username = page.locator('form input[type=email]:visible,form input[type=text]:visible')
     button = page.get_by_role('button', name=re.compile(r'^\s*(?:Continue|Continuă|Continua|Next)\s*$', re.I))
     if await username.count() == 1 and await button.count() == 1:
-        return username, button
+        identity = await username.evaluate(r"""e=>{
+          const hint=[e.name,e.id,e.placeholder,e.autocomplete,e.labels?.[0]?.innerText].join(' ');
+          return !/otp|code|cod\b|token|captcha|one.?time|verific/i.test(hint)
+            && (e.type==='email'||/email|username|utilizator/i.test(hint));
+        }""")
+        if identity:
+            return username, button
     return None
 
 

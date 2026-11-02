@@ -5,6 +5,7 @@ the two catalogues can run at the same time and neither can overwrite the
 other one's result.
 """
 from pathlib import Path
+from datetime import datetime
 import asyncio
 import os
 import sys
@@ -96,6 +97,7 @@ def main() -> None:
         return
     try:
         save(output, {'status':'running', 'request_id':request_id, 'vin':vin, 'symptom':request_text,
+                      'started_at':datetime.now().isoformat(timespec='seconds'),
                       'detected_operations':operations, 'phase':'reading_labour',
                       'source':'AutoTotal TecRMI', 'message':'Vehicul identificat; TecRMI citește timpii operațiilor solicitate.'})
         async def search():

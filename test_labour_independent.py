@@ -144,7 +144,13 @@ class WorkerTests(unittest.TestCase):
         result = {'resolved':[{**op,'technical_hours':.5,'haynes_operation':op['canonical']} for op in operations],
                   'unresolved':[]}
         argv = ['worker','10',VIN,QUERY,str(self.output),str(self.parts),'--standalone']
+        snapshots = []
+        original_save = tecrmi.save
+        def save(path, value):
+            snapshots.append(value.copy())
+            original_save(path, value)
         with patch.object(tecrmi.sys, 'argv', argv), \
+             patch.object(tecrmi, 'save', side_effect=save), \
              patch.object(tecrmi, 'standalone_identity', AsyncMock(return_value={'vehicle':{'autototal_type_id':'12'}})), \
              patch.object(tecrmi, '_wait_for_autototal_identification') as wait, \
              patch.object(tecrmi, '_autototal_repair_times', AsyncMock(return_value=result)) as search:
@@ -154,6 +160,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(saved['status'], 'ready')
         self.assertEqual(saved['technical_hours'], 1)
         self.assertEqual(saved['vin'], VIN)
+        self.assertTrue(next(x for x in snapshots if x['status']=='running')['started_at'])
         self.assertEqual({op['id'] for op in saved['resolved_operations']}, {'brake_pads_front','brake_pads_rear'})
 
     def test_identification_timeout_preserves_identity_and_does_not_read_arbitrary_type(self):

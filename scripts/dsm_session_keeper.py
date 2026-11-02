@@ -17,14 +17,44 @@ async def reconnect(page, credentials):
     from provider_sessions import reconnect as reconnect_provider
     return await reconnect_provider(page, credentials, 'DSM')
 
+
+async def restore_missing_dsm(context, vault, login_vault, keeper):
+    """Restore only a missing DSM tab, in the existing authenticated context."""
+    from provider_sessions import provider_url
+    if any(not page.is_closed() and provider_url('DSM', page.url) for page in context.pages):
+        return False
+    if not (vault.path.exists() or login_vault.path.exists()) or not keeper.idle(allow_queued=True):
+        return False
+    now = time.monotonic()
+    if now - keeper.last_restore.get('DSM', -60) < 60:
+        return False
+    keeper.last_restore['DSM'] = now
+    url = 'https://apps.dsmpro.ro/'
+    try:
+        saved = vault.load()
+        if saved and trusted_landing(saved.get('landing', '')):
+            url = trusted_landing(saved['landing'])
+    except (OSError, ValueError):
+        pass  # The trusted landing can be recovered by normal login instead.
+    page = await context.new_page()
+    try:
+        await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+    except Exception:
+        if not provider_url('DSM', page.url):
+            await page.close()
+        raise
+    return True
+
+
 async def main():
     from playwright.async_api import async_playwright
     vault = DsmSessionVault(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], os.environ['ALBATROS_PROVIDER_STATE_KEY'])
     login_vault = DsmLoginVault(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], os.environ['ALBATROS_PROVIDER_STATE_KEY'])
     status_path = Path(os.environ['ALBATROS_DATA_DIR']) / 'dsm_session_health.json'
     last_read, last_login, failures = 0, 0, 0
+    last_keepalive_status, last_keepalive_checked_at = None, None
     last_error_reload, login_version = 0, 0
-    from provider_sessions import ProviderSessionKeeper, upstream_error
+    from provider_sessions import ProviderSessionKeeper, upstream_error, read_session_status, KEEPALIVE_INTERVAL
     supplier_keeper = ProviderSessionKeeper(os.environ['ALBATROS_BROWSER_PROFILE_DIR'], os.environ['ALBATROS_PROVIDER_STATE_KEY'])
     memory_guard = BrowserMemoryGuard(status_path.parent)
     stopping = asyncio.Event()
@@ -37,6 +67,7 @@ async def main():
                 async with browser_activity():
                     connected = False
                     unavailable = False
+                    await restore_missing_dsm(context, vault, login_vault, supplier_keeper)
                     version = login_vault.path.stat().st_mtime_ns if login_vault.path.exists() else 0
                     if version != login_version:
                         login_version, last_login, failures = version, 0, 0
@@ -46,7 +77,7 @@ async def main():
                             continue
                         if await upstream_error(page):
                             unavailable = True
-                            if time.monotonic() - last_error_reload > 60:
+                            if supplier_keeper.idle() and time.monotonic() - last_error_reload > 60:
                                 last_error_reload = time.monotonic()
                                 await page.reload(wait_until='domcontentloaded', timeout=15000)
                             continue
@@ -57,16 +88,19 @@ async def main():
                         vault.save(await context.cookies(), landing)
                         connected = True
                         failures = 0
-                        if time.monotonic() - last_read > 600:
+                        if supplier_keeper.idle() and time.monotonic() - last_read > KEEPALIVE_INTERVAL:
                             last_read = time.monotonic()
                             # Only a read of the existing home page; no DSM writes.
-                            response = await page.request.get(landing, timeout=15000)
-                            if trusted_login(response.url):
-                                await page.reload(wait_until='domcontentloaded', timeout=15000)
+                            outcome = await read_session_status(page, landing, 'DSM')
+                            last_keepalive_status, last_keepalive_checked_at = outcome, time.time()
+                            if outcome == 'login_required':
                                 connected = False
+                                if landing.endswith('/special/home/index'):
+                                    await page.reload(wait_until='domcontentloaded', timeout=15000)
                         break
                     result = 'connected' if connected else 'upstream_unavailable' if unavailable else 'login_required'
-                    if not connected and not unavailable and time.monotonic() - last_login > (1800 if failures >= 3 else 60 * 2 ** failures):
+                    if (not connected and not unavailable and supplier_keeper.idle(allow_queued=True)
+                            and time.monotonic() - last_login > (1800 if failures >= 3 else 60 * 2 ** failures)):
                         credentials = login_vault.load()
                         if credentials:
                             for page in context.pages:
@@ -80,9 +114,11 @@ async def main():
                                         failures += 1
                                     break
                     status_path.write_text(json.dumps({'status': result, 'checked_at': time.time(),
-                        'auto_login_configured': login_vault.path.exists(), 'failed_attempts': failures}), encoding='utf-8')
+                        'auto_login_configured': login_vault.path.exists(), 'failed_attempts': failures,
+                        'keepalive_status': last_keepalive_status, 'keepalive_checked_at': last_keepalive_checked_at}), encoding='utf-8')
                     provider_health = await supplier_keeper.check(context)
-                    provider_health['DSM'] = {'status': result, 'auto_login_configured': login_vault.path.exists(), 'checked_at': time.time()}
+                    provider_health['DSM'] = {'status': result, 'auto_login_configured': login_vault.path.exists(), 'checked_at': time.time(),
+                        'keepalive_status': last_keepalive_status, 'keepalive_checked_at': last_keepalive_checked_at}
                     (status_path.parent / 'provider_session_health.json').write_text(json.dumps(provider_health), encoding='utf-8')
             except Exception as error:
                 print('DSM session snapshot: ' + type(error).__name__, flush=True)

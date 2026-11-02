@@ -252,9 +252,11 @@ class BrowserMemoryGuard:
                 and (self.last_reload is None or now - self.last_reload >= 900)):
             from provider_sessions import authenticated
             for page in list(context.pages):
-                # AutoTotal CAPTCHA/session state is especially sensitive to
-                # navigation. Keep its one persistent tab; only collect garbage.
-                if home_provider(page.url) == 'AutoTotal':
+                # Honour the runtime's persistent-tab policy during maintenance
+                # too: supplier SSO/CAPTCHA state can be lost on a home reload.
+                # Garbage collection above still runs without clearing sessions.
+                if (home_provider(page.url) == 'AutoTotal'
+                        or os.getenv('ALBATROS_KEEP_PROVIDER_TABS', 'true') == 'true'):
                     continue
                 async with asyncio.timeout(4):
                     safe = await safe_home(page)

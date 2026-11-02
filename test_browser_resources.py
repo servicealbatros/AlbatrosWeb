@@ -76,6 +76,7 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.context = SimpleNamespace(pages=[self.first], new_cdp_session=AsyncMock(return_value=self.client))
         for patcher in [patch.object(resources, 'enabled', return_value=True),
                         patch.object(resources, 'Lease', return_value=self.lease),
+                        patch.dict(os.environ, {'ALBATROS_KEEP_PROVIDER_TABS': 'false'}),
                         patch.object(resources, 'memory_sample', return_value=HIGH)]:
             patcher.start(); self.addCleanup(patcher.stop)
 
@@ -156,6 +157,18 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'],'collected')
         for p in self.context.pages:
             p.close.assert_not_awaited();p.reload.assert_not_awaited()
+
+    async def test_default_persistent_tab_policy_preserves_all_supplier_pages(self):
+        self.context.pages = [page(), page(), page('https://www3.eoriginal.ro/')]
+        with patch.dict(os.environ):
+            os.environ.pop('ALBATROS_KEEP_PROVIDER_TABS', None)
+            with patch.object(resources, 'safe_home', AsyncMock(return_value=True)):
+                result = await self.guard.tick(self.context, now=1000)
+        self.assertEqual(result['status'], 'collected')
+        self.assertEqual(self.client.send.await_count, 3)
+        for p in self.context.pages:
+            p.close.assert_not_awaited()
+            p.reload.assert_not_awaited()
 
     async def test_maintenance_timeout_releases_exclusive_lease(self):
         with patch.object(self.guard, 'maintain', AsyncMock(side_effect=TimeoutError)):

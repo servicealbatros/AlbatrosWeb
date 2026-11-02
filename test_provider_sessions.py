@@ -93,11 +93,13 @@ class ProviderLoginTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as folder:
             keeper=sessions.ProviderSessionKeeper(Path(folder)/'profile',Fernet.generate_key().decode())
             p,_,_,_=login_page(sessions.AUTOTOTAL_HOME);p.goto=AsyncMock();p.reload=AsyncMock()
-            p.request=SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(url=sessions.AUTOTOTAL_HOME,status=200,ok=True)))
+            response=SimpleNamespace(url=sessions.AUTOTOTAL_HOME,status=200,ok=True,dispose=AsyncMock())
+            p.request=SimpleNamespace(get=AsyncMock(return_value=response))
             with patch.object(sessions,'authenticated',AsyncMock(return_value=True)),patch.object(keeper,'idle',return_value=True):
                 first=await keeper.check(SimpleNamespace(pages=[p]));await keeper.check(SimpleNamespace(pages=[p]))
             self.assertEqual(first['AutoTotal']['status'],'connected')
             p.request.get.assert_awaited_once_with(sessions.AUTOTOTAL_HOME,timeout=10000)
+            response.dispose.assert_awaited_once()
             p.goto.assert_not_awaited();p.reload.assert_not_awaited()
 
     async def test_missing_autototal_tab_is_restored_once_in_same_context(self):

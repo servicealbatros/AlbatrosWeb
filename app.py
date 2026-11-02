@@ -747,7 +747,8 @@ def master_provider_sessions(request: Request):
     except (OSError, ValueError):
         saved = {}
     return {'providers': {name: {key: (saved.get(name) or {}).get(key)
-                                for key in ('status', 'checked_at', 'auto_login_configured', 'error_type')}
+                                for key in ('status', 'checked_at', 'auto_login_configured', 'error_type',
+                                            'keepalive_status', 'keepalive_checked_at')}
                           for name in ('DSM', 'Inter Cars', 'AutoTotal', 'Haynes')}}
 
 

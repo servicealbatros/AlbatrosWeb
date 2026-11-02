@@ -179,8 +179,8 @@ class QueueLoginTests(unittest.IsolatedAsyncioTestCase):
             page,email,password,next_button,login,state=self.email_page(); state['password']=True
             original=password.locator('xpath=ancestor::form')
             visible=SimpleNamespace(count=AsyncMock(return_value=0))
-            hidden=SimpleNamespace(count=AsyncMock(return_value=1),input_value=AsyncMock(return_value='test-user' if match else 'other-user'))
-            original.locator=lambda query:hidden if 'type=hidden' in query else visible
+            hidden=SimpleNamespace(evaluate_all=AsyncMock(return_value=match))
+            original.locator=lambda query:hidden if query=='input' else visible
             with patch.object(sessions,'active_verification',AsyncMock(return_value=False)), \
                  patch.object(sessions,'authenticated',AsyncMock(side_effect=lambda *a:state['connected'])):
                 result=await sessions.reconnect(page,{'username':'test-user','password':'test-secret','login_url':page.url},'Inter Cars')

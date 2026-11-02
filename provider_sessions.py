@@ -182,12 +182,15 @@ async def reconnect(page, credentials, provider):
     if provider == 'Inter Cars' and not email_submitted and username_count == 0:
         # Resume after navigation/restart only when the pinned form itself
         # proves which username was submitted. Never infer it from a URL.
-        hidden = form.locator('input[type=hidden][name=username],input[type=hidden][name=email]')
         location = urlparse(page.url)
         if (location.hostname == 'account.intercars.eu'
                 and location.path.startswith('/authenticationendpoint/')
-                and await hidden.count() == 1
-                and (await hidden.input_value()).strip() == credentials['username']):
+                and await form.locator('input').evaluate_all(r"""(nodes,expected)=>nodes.some(e=>{
+                  const hint=e.name+' '+e.id;
+                  const shown=!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+                  return !shown && e.type!=='password' && /user|email|login/i.test(hint)
+                    && !/token|csrf|session|code|password/i.test(hint) && e.value.trim()===expected;
+                })""", credentials['username'])):
             email_submitted = True
     if username_count != 1 and not (email_submitted and username_count == 0):
         return 'unsupported_login_form'

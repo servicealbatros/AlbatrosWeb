@@ -1376,7 +1376,8 @@ def _last_sent_offer_context(sender: str) -> str:
         f"Marca/pachet trimis: {brand}\n"
         f"Piesa/pachet trimis: {part_name}\n"
         f"Preț piese trimis: {price}\n"
-        f"Manoperă estimată: {tech.get('labour_price_ron', '')}\n"
+        f"Manoperă estimată{' (cu TVA)' if 'labour_price_with_vat_ron' in tech else ''}: "
+        f"{tech.get('labour_price_with_vat_ron', tech.get('labour_price_ron', ''))}\n"
         "Dacă clientul spune «confirm», «da», «sunt de acord», «accept» sau o formulare similară, "
         "confirmarea se referă EXACT la această ultimă ofertă trimisă. "
         "NU schimba marca, produsul sau cererea și NU întreba dacă se referă la o ofertă mai veche, "
@@ -2969,8 +2970,8 @@ class OfferDraftInput(BaseModel):
     additional_hours: float = 0.0
     technical_hours: float = 0.0
     expected_hours: float = 0.0
-    hourly_rate_ron: float = 200.0
-    labour_price_ron: float = 0.0
+    hourly_rate_ron: float = Field(default=200.0, ge=0, allow_inf_nan=False)
+    labour_price_ron: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     booking_hours: float = 0.0
     labour_reviewed: bool = False
     parts_brand: str = ""
@@ -4364,14 +4365,11 @@ def _persist_offer_draft(request_id: int, data: OfferDraftInput, *, stock_reques
         draft["labour_reviewed_at"] = datetime.now().isoformat(timespec="seconds")
     draft["request_id"] = request_id
     draft["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    draft["total_ron"] = round(
-        _float_or_zero(draft.get("parts_price_ron"))
-        + _float_or_zero(draft.get("oil_unit_price_ron")) * _float_or_zero(draft.get("oil_liters"))
-        + (_float_or_zero(draft.get("drain_plug_price_ron"))
-           if draft.get("drain_plug_selected") else 0.0)
-        + _float_or_zero(draft.get("labour_price_ron")),
-        2
-    )
+    from offer_pricing import quote_pricing
+    # Keep the rate displayed when this existing draft was reviewed.
+    if old.get('labour_vat_percent') is not None:
+        draft['labour_vat_percent'] = old['labour_vat_percent']
+    draft.update(quote_pricing(draft))
     _save_draft_for_request(request_id, draft)
     return {"ok": True, "draft": draft}
 
@@ -4460,6 +4458,11 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
                                     data: WhatsAppDestinationInput | None = None,
                                     human_action: str | None = Header(None, alias="X-Human-Action")):
     _confirm_local_dashboard_click(request, Action.SEND_FINAL_OFFER, request_id, human_action, "send-whatsapp")
+    return await _send_reviewed_offer_draft(request_id, data)
+
+
+async def _send_reviewed_offer_draft(request_id: int, data: WhatsAppDestinationInput | None = None):
+    # All public send routes perform their existing human confirmation first.
     request_row = _request_by_id(request_id)
     if not request_row:
         raise HTTPException(status_code=404, detail="Cererea nu a fost găsită.")
@@ -4469,7 +4472,9 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         raise HTTPException(status_code=400, detail="Salvează mai întâi oferta editabilă.")
     _require_advisor_labour_review(request_id)
 
-    labour_price = _float_or_zero(draft.get("labour_price_ron"))
+    from offer_pricing import quote_pricing, labour_pricing
+    pricing = quote_pricing(draft)
+    labour_price = pricing['labour_price_with_vat_ron']
     parts_price = _float_or_zero(draft.get("parts_price_ron"))
     oil_unit_price = _float_or_zero(draft.get("oil_unit_price_ron"))
     oil_liters = _float_or_zero(draft.get("oil_liters"))
@@ -4626,21 +4631,22 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         lines.append(f"• Lucrări incluse: {operation}")
 
     if additional_operation and additional_hours > 0:
-        extra_price = additional_hours * _float_or_zero(draft.get("hourly_rate_ron"))
+        extra_price = labour_pricing(additional_hours * _float_or_zero(draft.get("hourly_rate_ron")),
+                                    vat_percent=pricing['labour_vat_percent'])['labour_price_with_vat_ron']
         lines.append(
             f"• Constatare suplimentară: {additional_operation} — "
             f"{additional_hours:g} h / {ron(extra_price)}"
         )
 
     if labour_price > 0:
-        lines.append(f"• Manoperă estimată: {ron(labour_price)}")
+        lines.append(f"• Manoperă estimată (cu TVA): {ron(labour_price)}")
         lines.append(f"• Durată estimată a lucrării: {expected_hours:.1f} h")
 
     deferred_notice = _deferred_inspection_notice(symptom)
     if deferred_notice:
         lines.append(f"• Neofertat încă: {deferred_notice}")
 
-    total = round(parts_price + labour_price + oil_unit_price * oil_liters + drain_plug_price, 2)
+    total = pricing['total_ron']
     lines.append(f"• {'Total estimativ' if oil_unit_price <= 0 or oil_liters > 0 else 'Subtotal fără ulei'}: {ron(total)}")
 
     # `notes` conține justificări interne pentru consilier (surse, coduri,
@@ -4683,13 +4689,14 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
     if drain_plug_selected and drain_plug_price > 0:
         compact_lines.append(f"Bușon baie ulei: {ron(drain_plug_price)}")
     if additional_operation and additional_hours > 0:
-        extra_price = additional_hours * _float_or_zero(draft.get("hourly_rate_ron"))
+        extra_price = labour_pricing(additional_hours * _float_or_zero(draft.get("hourly_rate_ron")),
+                                    vat_percent=pricing['labour_vat_percent'])['labour_price_with_vat_ron']
         compact_lines.append(
             f"Manoperă suplimentară: {additional_operation} — "
             f"{additional_hours:g} h / {ron(extra_price)} (inclusă în manopera totală)"
         )
     if labour_price > 0:
-        compact_lines.append(f"Manoperă totală: {ron(labour_price)}; durată totală: {expected_hours:.1f} h")
+        compact_lines.append(f"Manoperă totală (cu TVA): {ron(labour_price)}; durată totală: {expected_hours:.1f} h")
     compact_lines.append(f"Total estimativ: {ron(total)}")
     compact_lines.append("Răspundeți ACCEPT dacă sunteți de acord. După accept verificăm programarea.")
     compact_template_message = customer_offer_text("\n".join(compact_lines))
@@ -4710,13 +4717,14 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         if drain_plug_selected and drain_plug_price > 0:
             compact_lines.append(f"Bușon: {ron(drain_plug_price)}")
         if additional_operation and additional_hours > 0:
-            extra_price = additional_hours * _float_or_zero(draft.get("hourly_rate_ron"))
+            extra_price = labour_pricing(additional_hours * _float_or_zero(draft.get("hourly_rate_ron")),
+                                        vat_percent=pricing['labour_vat_percent'])['labour_price_with_vat_ron']
             compact_lines.append(
                 f"Suplimentar: {additional_operation[:100]} — "
                 f"{additional_hours:g} h / {ron(extra_price)} (inclus)"
             )
         if labour_price > 0:
-            compact_lines.append(f"Manoperă totală: {ron(labour_price)}; {expected_hours:.1f} h")
+            compact_lines.append(f"Manoperă totală (cu TVA): {ron(labour_price)}; {expected_hours:.1f} h")
         compact_lines.extend([
             f"Total estimativ: {ron(total)}",
             "Răspundeți ACCEPT dacă sunteți de acord."
@@ -4735,7 +4743,7 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
         "price": ron(parts_price) if parts_price > 0 else "0 RON",
     }
     tech_context = {
-        "labour_price_ron": labour_price,
+        **{key: value for key, value in pricing.items() if key.startswith('labour_')},
         "albatros_expected_hours": expected_hours,
         "booking_hours": booking_hours,
         "operation": operation,
@@ -4747,7 +4755,7 @@ async def send_offer_draft_whatsapp(request_id: int, request: Request,
     save_request_status()
     _reset_beta_intake_after_offer(to_number)
 
-    return {"ok": True, "request_id": request_id, "phone": to_number, "total_ron": total, "message": message}
+    return {"ok": True, "request_id": request_id, "phone": to_number, **pricing, "message": message}
 
 
 @app.post("/api/requests/{request_id}/full-offer-send-whatsapp")
@@ -4762,154 +4770,14 @@ async def request_full_offer_send_whatsapp(request_id: int, confirmation_token: 
     if offer_result.get("review_status") != "APPROVED":
         raise HTTPException(status_code=409, detail="Consilierul trebuie sa dea VERDE ofertei inainte de trimiterea catre client.")
 
-    selections = _load_offer_selections()
-    selected = selections.get(str(request_id), {}).get("product")
-    selected_products = selections.get(str(request_id), {}).get("products") or ([selected] if selected else [])
-    tech = _load_technician_result(request_id)
-    tech_ready = tech.get("status") == "ready"
-
-    # Oferta poate fi:
-    # 1) doar manoperă, 2) doar piese, 3) piese + manoperă.
-    if not selected and not tech_ready:
-        raise HTTPException(
-            status_code=400,
-            detail="Nu există încă nici piese selectate, nici un calcul de manoperă gata."
-        )
-
-    phone = str(
-        request_row.get("phone")
-        or request_row.get("telefon")
-        or ""
-    ).strip()
-    to_number = re.sub(r"\D", "", phone)
-    if not to_number:
-        raise HTTPException(status_code=400, detail="Cererea nu are număr de telefon.")
-
-    customer = (
-        request_row.get("customer_name")
-        or request_row.get("name")
-        or request_row.get("client")
-        or ""
-    )
-    symptom = (
-        request_row.get("symptom")
-        or request_row.get("request")
-        or request_row.get("solicitare")
-        or request_row.get("problem")
-        or ""
-    )
-
-    brand = ""
-    part_name = ""
-    availability = ""
-    parts_price = 0.0
-
-    if selected:
-        brand = _offer_value(selected, "brand", "marca")
-        part_name = _offer_value(selected, "description", "name", "product_name", "nume")
-        parts_price_text = _offer_value(selected, "price", "price_text", "pret")
-        availability = _offer_value(
-            selected,
-            "availability",
-            "availability_text",
-            "disponibilitate"
-        )
-        parts_price = _ron_to_float(
-            selected.get("price_ron") if isinstance(selected, dict) else None
-        )
-        if parts_price <= 0:
-            parts_price = _ron_to_float(parts_price_text)
-
-    labour_price = float(tech.get("labour_price_ron") or 0) if tech_ready else 0.0
-    total = round(parts_price + labour_price, 2)
-    expected_hours = float(tech.get("albatros_expected_hours") or 0) if tech_ready else 0.0
-    booking_hours = float(tech.get("booking_hours") or 0) if tech_ready else 0.0
-
-    def ron(v: float) -> str:
-        return f"{v:,.2f} RON".replace(",", "X").replace(".", ",").replace("X", ".")
-
-    greeting = (
-        f"Bună ziua, {customer}!"
-        if customer and customer != "—"
-        else "Bună ziua!"
-    )
-
-    lines = [
-        greeting,
-        "",
-        f"Am completat oferta pentru solicitarea dvs.: {symptom}.",
-        "",
-    ]
-
-    if selected:
-        lines.extend([
-            f"• Marcă / pachet: {brand}",
-            f"• Piesă / pachet: {part_name}",
-            f"• Preț piese: {ron(parts_price)}",
-        ])
-
-    if tech_ready:
-        lines.append(f"• Manoperă estimată: {ron(labour_price)}")
-
-    lines.append(f"• Total estimativ: {ron(total)}")
-
-    if tech_ready:
-        lines.extend([
-            f"• Durată estimată a lucrării: {expected_hours:.1f} h",
-            f"• Timp rezervat în programare: {booking_hours:g} h",
-        ])
-
-    deferred_notice = _deferred_inspection_notice(symptom)
-    if deferred_notice:
-        lines.append(f"• Neofertat încă: {deferred_notice}")
-
-    lines.extend([
-        "",
-        "Oferta este estimativă și poate suferi modificări după verificarea finală "
-        "și după începerea lucrării. Pot apărea diferențe de preț sau timp dacă sunt "
-        "necesare operații ori repere suplimentare, dacă există elemente blocate/uzate "
-        "sau alte situații constatate în timpul intervenției. Orice modificare importantă "
-        "va fi comunicată înainte de continuarea lucrării.",
-        "",
-        "Dacă sunteți de acord cu oferta estimativă, confirmați aici. "
-        "După accept, verificăm programatorul service-ului și vă comunicăm noi primul interval disponibil."
-    ])
-
-    message = "\n".join(lines)
-
-    await send_whatsapp_notification(
-        to_number, message, kind="offer",
-        subject=f"oferta #{request_id}",
-        recipient_name=str(request_row.get("customer_name") or "client"),
-    )
-
-    remembered_product = selected or {
-        "brand": "MANOPERĂ",
-        "description": "Ofertă doar manoperă",
-        "price": "0 RON",
-    }
-    _remember_last_sent_offer(to_number, request_id, remembered_product, tech if tech_ready else None)
-    _set_offer_flow_state(to_number, request_id, "awaiting_acceptance")
-    REQUEST_STATUS[request_id] = "ofertat"
-    save_request_status()
-    _reset_beta_intake_after_offer(to_number)
-
-    return {
-        "ok": True,
-        "request_id": request_id,
-        "phone": stored_phone,
-        "offer_type": (
-            "piese+manopera" if selected and tech_ready
-            else "doar_piese" if selected
-            else "doar_manopera"
-        ),
-        "parts_price_ron": parts_price,
-        "labour_price_ron": labour_price,
-        "total_ron": total,
-        "expected_hours": expected_hours,
-        "booking_hours": booking_hours,
-        "message": message,
-    }
+    result = await _send_reviewed_offer_draft(request_id)
+    draft = _draft_for_request(request_id)
+    return {**result,
+            "offer_type": "piese+manopera" if result['parts_total_ron'] > 0 and result['labour_price_ron'] > 0
+                          else "doar_piese" if result['parts_total_ron'] > 0 else "doar_manopera",
+            "parts_price_ron": result['parts_total_ron'],
+            "expected_hours": draft.get('expected_hours', 0),
+            "booking_hours": draft.get('booking_hours', 0)}
 
 
 @app.get("/tehnician/{request_id}", response_class=HTMLResponse)
@@ -6331,94 +6199,8 @@ async def request_offer_send_whatsapp(request_id: int, request: Request,
     if _load_request_offer_result(request_id).get("review_status") != "APPROVED":
         raise HTTPException(status_code=409, detail="Oferta trebuie aprobată de consilier înainte de trimitere.")
 
-    selections = _load_offer_selections()
-    selected = selections.get(str(request_id), {}).get("product")
-    selected_products = selections.get(str(request_id), {}).get("products") or ([selected] if selected else [])
-    if not selected_products:
-        raise HTTPException(
-            status_code=400,
-            detail="Selecteaza mai intai un produs din oferta."
-        )
-    if any(p.get("requested_item") == "ulei OE" for p in selected_products):
-        raise HTTPException(status_code=409, detail="Completează cantitatea de ulei sau păstrează prețul pe litru în oferta editabilă.")
-
-    supplied_phone = str(data.phone or "").strip() if data else ""
-    stored_request_phone = str(request_row.get("phone") or request_row.get("telefon") or "")
-    to_number = _normalize_whatsapp_phone(supplied_phone or stored_request_phone)
-    stored_phone = "+" + to_number
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute("UPDATE service_requests SET phone=? WHERE id=?", (stored_phone, request_id))
-        conn.commit()
-    finally:
-        conn.close()
-
-    customer = (
-        request_row.get("customer_name")
-        or request_row.get("name")
-        or request_row.get("client")
-        or ""
-    )
-    symptom = (
-        request_row.get("symptom")
-        or request_row.get("request")
-        or request_row.get("solicitare")
-        or request_row.get("problem")
-        or ""
-    )
-
-    parts_lines = []
-    total = 0.0
-    for part in selected_products:
-        name = _offer_value(part, "description", "name", "product_name", "nume")
-        price = _offer_value(part, "price", "price_text", "pret")
-        availability = _offer_value(part, "availability", "availability_text", "disponibilitate")
-        quantity = max(1, int(part.get("quantity") or 1))
-        parts_lines.append(f"• {name}: {quantity} × {price} — disponibilitate: {availability}")
-        total += ((_ron_to_float(part.get("price_ron") if isinstance(part, dict) else None)
-                   or _ron_to_float(price)) * quantity)
-
-    greeting = (
-        f"Bună ziua, {customer}!"
-        if customer and customer != "—"
-        else "Bună ziua!"
-    )
-
-    symptom_lower = str(symptom).lower()
-    is_service_package = any(
-        key in symptom_lower
-        for key in ("revizie", "filtru", "filtre", "schimb ulei", "ulei motor")
-    )
-
-    message = (
-        f"{greeting}\n\n"
-        f"Am pregătit oferta pentru solicitarea dvs.: {symptom}.\n\n"
-        + "\n".join(parts_lines) + "\n"
-        + (f"Total piese: {total:,.2f} RON\n".replace(",", "X").replace(".", ",").replace("X", ".") if total else "")
-        + "\n"
-        "Manopera nu este inclusă în acest preț și va fi calculată separat, "
-        "împreună cu durata estimată a lucrării.\n\n"
-        "Dacă sunteți de acord cu varianta propusă, confirmați aici "
-        "și continuăm cu calculul manoperei și programarea."
-    )
-
-    await send_whatsapp_notification(
-        to_number, message, kind="offer",
-        subject=f"oferta #{request_id}",
-        recipient_name=str(request_row.get("customer_name") or "client"),
-    )
-    _remember_last_sent_offer(to_number, request_id, selected, None)
-    _set_offer_flow_state(to_number, request_id, "awaiting_acceptance")
-    REQUEST_STATUS[request_id] = "ofertat"
-    save_request_status()
-    _reset_beta_intake_after_offer(to_number)
-
-    return {
-        "ok": True,
-        "request_id": request_id,
-        "phone": stored_phone,
-        "message": message,
-    }
+    # Use the reviewed editable quote, including labour VAT and all selected lines.
+    return await _send_reviewed_offer_draft(request_id, data)
 
 
 
@@ -6485,6 +6267,13 @@ def request_unified_offer_page(request_id: int):
 
     def val(name, default=""):
         v = draft.get(name)
+        # A parts-only draft saved before the time search finished contains zero
+        # placeholders. Show the newly available times without replacing a review.
+        if (name in {'technical_hours', 'expected_hours', 'booking_hours', 'labour_price_ron'}
+                and not draft.get('labour_reviewed')
+                and not any(_float_or_zero(draft.get(key)) for key in
+                            ('technical_hours', 'expected_hours', 'labour_price_ron'))):
+            return default
         return default if v is None else v
 
     filter_products = [p for p in selected_products if "ulei" not in str(p.get("requested_item") or "").lower() or "filtru" in str(p.get("requested_item") or "").lower()]
@@ -6537,6 +6326,9 @@ def request_unified_offer_page(request_id: int):
     base_expected_hours = max(0.0, round(expected_hours - additional_hours, 2)) if additional_hours else expected_hours
     hourly_rate = _float_or_zero(val("hourly_rate_ron", tech_defaults["hourly_rate_ron"])) or 200.0
     labour_price = _float_or_zero(val("labour_price_ron", tech_defaults["labour_price_ron"]))
+    from offer_pricing import labour_pricing
+    labour_amounts = labour_pricing(labour_price, vat_percent=draft.get('labour_vat_percent'))
+    labour_vat = labour_amounts['labour_vat_percent']
     booking_hours = _float_or_zero(val("booking_hours", tech_defaults["booking_hours"]))
 
     parts_brand = str(val("parts_brand", parts_brand_default) or "")
@@ -7066,12 +6858,18 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
         <input id="booking_hours" type="number" step="0.1" value="{booking_hours}">
       </div>
       <div class="field">
-        <label>Tarif manoperă (RON/h)</label>
+        <label>Tarif manoperă fără TVA (RON/h)</label>
         <input id="hourly_rate_ron" type="number" step="1" value="{hourly_rate}">
       </div>
       <div class="field">
-        <label>Manoperă (RON)</label>
+        <label>Manoperă fără TVA (RON)</label>
         <input id="labour_price_ron" type="number" step="0.01" value="{labour_price}">
+      </div>
+      <div class="field">
+        <label>Manoperă cu TVA {labour_vat:g}%</label>
+        <strong id="labour_gross_value">{labour_amounts['labour_price_with_vat_ron']:.2f} RON</strong>
+        <div><small>TVA manoperă: <span id="labour_vat_value">{labour_amounts['labour_vat_ron']:.2f} RON</span></small></div>
+        <input id="labour_vat_percent" type="hidden" value="{labour_vat}">
       </div>
       <input id="parts_brand" type="hidden" value="{_escape_html(parts_brand)}">
       <input id="parts_name" type="hidden" value="{_escape_html(parts_name)}">
@@ -7145,7 +6943,8 @@ table{{width:100%;border-collapse:collapse;margin-top:12px}} th,td{{padding:9px;
         </label>
         <small>Dacă modifici ulterior un timp, tariful sau manopera, confirmarea se anulează și trebuie bifată din nou.</small>
       </div>
-      <div class="span3 totalbox">Total estimativ: <span id="total_value">0,00 RON</span></div>
+      <div class="span3 totalbox"><div>Piese și ulei: <span id="parts_total_value">0,00 RON</span></div>
+        <div>Total estimativ: <span id="total_value">0,00 RON</span></div></div>
     </div>
 
     <div class="actions">
@@ -7181,7 +6980,15 @@ function updateTotal(){{
   document.getElementById("oil_pack_quantity").value=
     (packLiters>0&&n("oil_liters")>0)?Math.ceil(n("oil_liters")/packLiters):0;
   const plugTotal=document.getElementById("drain_plug_selected").checked?n("drain_plug_price_ron"):0;
-  const total=n("labour_price_ron")+n("parts_price_ron")+oilTotal+plugTotal;
+  const netCents=Math.round((Math.max(0,n("labour_price_ron"))+Number.EPSILON)*100);
+  const vatCents=Math.round(netCents*n("labour_vat_percent")/100+1e-8);
+  const labourGross=(netCents+vatCents)/100;
+  const partsTotal=Math.round((n("parts_price_ron")+oilTotal+plugTotal+Number.EPSILON)*100)/100;
+  const total=Math.round((labourGross+partsTotal+Number.EPSILON)*100)/100;
+  const money=value=>value.toLocaleString("ro-RO",{{minimumFractionDigits:2,maximumFractionDigits:2}})+" RON";
+  document.getElementById("labour_vat_value").textContent=money(vatCents/100);
+  document.getElementById("labour_gross_value").textContent=money(labourGross);
+  document.getElementById("parts_total_value").textContent=money(partsTotal);
   document.getElementById("oil_subtotal").textContent=
     oilTotal.toLocaleString("ro-RO",{{minimumFractionDigits:2,maximumFractionDigits:2}})+" RON";
   document.getElementById("total_value").textContent=

@@ -25,7 +25,7 @@ body{font-family:"Segoe UI",Arial,sans-serif}
 '''
 
 SCRIPT = '''
-document.addEventListener('DOMContentLoaded',()=>{
+function initialiseOfferDock(){
  const filter=document.getElementById('partsOutstandingOnly');
  const groups=[...document.querySelectorAll('.part-group')];
  const storageKey='albatros-parts-filter:'+location.pathname;
@@ -33,9 +33,10 @@ document.addEventListener('DOMContentLoaded',()=>{
  function apply(){let shown=0;groups.forEach(g=>{g.hidden=filter.checked&&g.dataset.selected==='true';if(!g.hidden)shown++});document.getElementById('partsFilterEmpty').hidden=shown>0||groups.length===0;try{sessionStorage.setItem(storageKey,String(filter.checked))}catch(e){}}
  filter.addEventListener('change',apply);apply();
  const total=document.getElementById('total_value');
- const mirror=()=>{document.getElementById('dockTotal').textContent=total?.textContent||'—';const val=id=>{const n=Number(document.getElementById(id)?.value);return Number.isFinite(n)?n:0};const money=n=>n.toLocaleString('ro-RO',{minimumFractionDigits:2,maximumFractionDigits:2})+' RON';document.getElementById('dockLabour').textContent=money(val('labour_price_ron'));};
+ const mirror=()=>{for(const [dock,source]of [['dockTotal','total_value'],['dockLabour','labour_gross_value'],['dockParts','parts_total_value']]){const target=document.getElementById(dock);if(target)target.textContent=document.getElementById(source)?.textContent||'—';}};
  if(total)new MutationObserver(mirror).observe(total,{childList:true,characterData:true,subtree:true});document.addEventListener('input',mirror);mirror();
-});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initialiseOfferDock);else initialiseOfferDock();
 '''
 
 
@@ -69,5 +70,5 @@ def render_parts_workspace(groups, missing, *, checklist=None):
       <label><input id="partsOutstandingOnly" type="checkbox">Arată doar piesele neselectate</label></div>
       {missing_html}{''.join(sections)}
       <div id="partsFilterEmpty" class="parts-filter-empty" hidden>Toate grupele cu rezultate au o piesă selectată. Verifică și eventualele rezultate lipsă de mai sus.</div>
-      </section><aside class="offer-dock"><div><b>{f'Necesar: {len(checklist)} poziții' if checklist else f'Piese: {selected}/{len(groups)} grupe'}</b> <span>· Manoperă: <span id="dockLabour">—</span></span></div>
+      </section><aside class="offer-dock"><div><b>Piese: <span id="dockParts">—</span></b> <span>· {f'Necesar: {len(checklist)} poziții' if checklist else f'{selected}/{len(groups)} grupe'} · Manoperă cu TVA: <span id="dockLabour">—</span></span></div>
       <a href="#partsWorkspace">Înapoi la piese ↑</a><div><span>Total estimativ </span><strong id="dockTotal">—</strong></div></aside><script>{SCRIPT}</script>'''

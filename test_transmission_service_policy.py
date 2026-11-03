@@ -49,7 +49,8 @@ class TransmissionServiceTests(unittest.TestCase):
                 labour_operations=operations,technical_hours=2,expected_hours=2.4,booking_hours=3.4,
                 labour_price_ron=480,labour_reviewed=True))
             self.assertEqual(result['draft']['oil_liters'], 0)
-            self.assertEqual(result['draft']['total_ron'], 490)
+            self.assertEqual(result['draft']['total_ron'], 590.8)
+            self.assertEqual(result['draft']['labour_price_with_vat_ron'], 580.8)
             self.assertEqual(app._missing_draft_labour_operations(dict(symptom=symptom), state), [])
             app._require_advisor_labour_review(999)
 

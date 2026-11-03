@@ -92,7 +92,7 @@ def journal(data_dir):
 async def update_plate(data, ident):
     # A fixed DSM route and fixed field: no arbitrary browser/script input.
     payload = {'car_id': data.car_id, 'transaction_id': ident,
-               'input': 'car_auto_number', 'val': data.registration}
+               'input': 'car_no', 'val': data.registration}
     result = await _evaluate('''(async()=>{
       if(location.protocol!=='https:'||!['s.servicemanager.q-service.ro','apps.dsmpro.ro','appm.dsmpro.ro'].includes(location.hostname))throw Error('Domeniu DSM nepermis');
       const r=await fetch('/special/car/update_car_detail',{method:'POST',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded','X-CSRF-TOKEN':document.querySelector('meta[name="csrf-token"]')?.content||''},body:new URLSearchParams(__DATA__),signal:AbortSignal.timeout(12000)});
@@ -123,7 +123,7 @@ async def run(data_dir, data):
             ident = str(row['order_id'] or '') if row else ''
             if row and not ident:
                 raise ValueError('Crearea anterioară este incertă; nu repet operația DSM.')
-            if orders and (not ident or len(orders) != 1 or orders[0]['id'] != ident):
+            if orders and not ident:
                 return {'created': False, 'existing_orders': orders, 'review_required': True}
             if not ident:
                 # Commit intent BEFORE DSM writes. An ambiguous response is never retried.
@@ -178,6 +178,7 @@ async def run(data_dir, data):
             conn.execute('UPDATE operations SET state=?,code=? WHERE operation_id=?', ('done', code, data.operation_id))
             conn.commit()
             return {'created': True, 'id': ident, 'code': code,
-                    'registration': data.registration, 'verified': True}
+                    'registration': data.registration, 'verified': True,
+                    'other_existing_orders': [o for o in orders if o['id'] != ident]}
         finally:
             conn.close()

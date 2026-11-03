@@ -213,6 +213,15 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        class FixtureDate(date):
+            @classmethod
+            def today(cls):
+                return TODAY
+        clock = patch.object(flow, 'date', FixtureDate)
+        clock.start()
+        self.addCleanup(clock.stop)
+
     async def tick(self,root,value,notify):
         now=datetime(2026,10,30,17,tzinfo=reminders.ROMANIA)
         reminders.configure(root,True,now.date().isoformat(),['B112TST'])

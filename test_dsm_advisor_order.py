@@ -59,9 +59,10 @@ class AdvisorOrderTests(unittest.IsolatedAsyncioTestCase):
         return {'status': 1}
 
     async def update_plate(self, expression):
+        self.assertIn('"input": "car_no"', expression)
         self.writes.append('plate')
         self.registration = self.data.registration
-        return {'status': 1}
+        return {'status': 'success'}
 
     async def test_preview_has_no_writes_and_create_retry_has_one_order(self):
         result = await writer.run(self.folder.name, self.data)
@@ -108,6 +109,17 @@ class AdvisorOrderTests(unittest.IsolatedAsyncioTestCase):
         self.data.work = 'Altă lucrare'
         with self.assertRaisesRegex(ValueError, 'alte date'):
             await writer.run(self.folder.name, self.data)
+        self.assertEqual(self.created, 1)
+
+    async def test_resume_finishes_only_journaled_order_when_another_order_appears(self):
+        self.data.dry_run = False
+        await writer.run(self.folder.name, self.data)
+        async def search(registration):
+            return [dict(transaction_id=i, transaction_type='2', status='working') for i in ['999', '1000']]
+        with patch.object(writer, '_search_transactions', side_effect=search):
+            result = await writer.run(self.folder.name, self.data)
+        self.assertEqual(result['id'], '999')
+        self.assertEqual(result['other_existing_orders'][0]['id'], '1000')
         self.assertEqual(self.created, 1)
 
 

@@ -716,6 +716,34 @@ async def sync_dsm_accepted_offers(request: Request):
     return await synchronize(DB_PATH, DATA_DIR)
 
 
+@app.get('/api/dashboard/master/dsm-booking-reconciliation')
+def dsm_booking_reconciliation_status(request: Request):
+    _master_access(request)
+    from dsm_booking_reconciliation import state
+    return state(DATA_DIR)
+
+
+@app.post('/api/dashboard/master/dsm-booking-reconciliation')
+async def reconcile_dsm_bookings(request: Request):
+    _master_access(request)
+    body = await request.json()
+    if not isinstance(body, dict) or type(body.get('apply', False)) is not bool:
+        raise HTTPException(422, 'Verifică opțiunea apply.')
+    apply = body.get('apply', False)
+    if apply and request.headers.get('X-Human-Action') != 'reconcile-dsm-bookings':
+        raise HTTPException(403, 'Acțiune explicită de reconciliere necesară.')
+    from dsm_booking_reconciliation import reconcile
+    try:
+        result = await reconcile(DB_PATH, apply=apply)
+    except Exception:
+        raise HTTPException(502, 'Programările DSM nu au putut fi verificate complet; statusurile sunt păstrate.') from None
+    for ident in result.get('resolved_request_ids', []):
+        REQUEST_STATUS[ident] = 'rezolvat'
+    if result.get('resolved_request_ids'):
+        save_request_status()
+    return result
+
+
 @app.post('/api/dashboard/master/dsm-accepted-offers/rebuild')
 async def rebuild_dsm_signed_dashboard(request: Request):
     _master_access(request)
@@ -7995,6 +8023,9 @@ async def _dsm_accepted_offers_loop():
         try:
             if POLICY.robot_enabled and due(state(DATA_DIR), datetime.now(ROMANIA)):
                 await synchronize(DB_PATH, DATA_DIR)
+            if POLICY.robot_enabled:
+                from dsm_booking_reconciliation import tick
+                await tick(DB_PATH, DATA_DIR)
         except asyncio.CancelledError:
             raise
         except Exception:

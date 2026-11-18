@@ -1,6 +1,6 @@
 import ast
 from contextlib import closing
-from datetime import date
+from datetime import date, datetime, timezone
 import gc
 from pathlib import Path
 import sqlite3
@@ -38,12 +38,16 @@ class CommunicatedTests(unittest.TestCase):
     def current(self):
         return scheduler.get_appointment(self.db, self.booking['id'])
 
+    def balance(self, department='mecanica', now=None):
+        return scheduler.distribute_dsm_appointments_by_capacity(self.db, '2026-11-16', department,
+            now=now or datetime(2026, 11, 17, 12))
+
     def test_exact_recovery_is_idempotent_and_balancer_preserves_communicated_work(self):
         self.assertEqual(sent.restore(self.db, self.mihai, '2026-11-18', self.entries)['restored_ids'], [self.booking['id']])
         before = self.current()
         self.assertEqual(before['technician_id'], self.mihai)
         sent.restore(self.db, self.mihai, '2026-11-18', self.entries)
-        result = scheduler.distribute_dsm_appointments_by_capacity(self.db, '2026-11-16')
+        result = self.balance()
         self.assertEqual(result['appointment_count'], 0)
         self.assertEqual(self.current()['technician_id'], self.mihai)
         self.assertEqual(self.current()['start_at'], before['start_at'])
@@ -51,7 +55,7 @@ class CommunicatedTests(unittest.TestCase):
 
     def test_sent_dsm_source_and_parent_of_sent_split_are_protected(self):
         sent.record_sent(self.db, self.other, [self.current()])
-        result = scheduler.distribute_dsm_appointments_by_capacity(self.db, '2026-11-16')
+        result = self.balance()
         self.assertEqual(result['appointment_count'], 0)
         with closing(sqlite3.connect(self.db)) as conn:
             conn.execute('DELETE FROM scheduler_communicated_appointments')
@@ -61,7 +65,7 @@ class CommunicatedTests(unittest.TestCase):
                 (self.other, self.booking['id'])).lastrowid
             conn.commit()
         sent.record_sent(self.db, self.other, [scheduler.get_appointment(self.db, child)])
-        self.assertEqual(scheduler.distribute_dsm_appointments_by_capacity(self.db, '2026-11-16')['appointment_count'], 0)
+        self.assertEqual(self.balance()['appointment_count'], 0)
         self.assertIsNotNone(scheduler.get_appointment(self.db, child))
 
     def test_rebalancing_another_department_does_not_delete_existing_split(self):
@@ -71,7 +75,7 @@ class CommunicatedTests(unittest.TestCase):
                 VALUES ('2026-11-18T09:30','2026-11-18T10:30','diagnoza',1,'dsm_capacity_split_local',?,'mecanica')''',
                 (self.booking['id'],)).lastrowid
             conn.commit()
-        scheduler.distribute_dsm_appointments_by_capacity(self.db, '2026-11-16', 'tinichigerie_vopsitorie')
+        self.balance('tinichigerie_vopsitorie')
         self.assertIsNotNone(scheduler.get_appointment(self.db, child))
 
     def test_import_preserves_sent_and_manual_allocations_but_applies_explicit_dsm_cancellation(self):
@@ -108,6 +112,56 @@ class CommunicatedTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sent.restore(self.db, self.mihai, '2026-11-18', self.entries)
         self.assertEqual(self.current()['technician_id'], original['technician_id'])
+
+    def test_only_tomorrow_unsent_is_balanced_and_other_days_remain_identical(self):
+        ids = {}
+        with closing(sqlite3.connect(self.db)) as conn:
+            for day in (17, 19, 20):
+                ids[day] = conn.execute('''INSERT INTO scheduler_appointments
+                    (technician_id,start_at,end_at,operations,estimated_hours,source)
+                    VALUES (?,?,?,'diagnoza dificila trepidatii',1,'dsm_schedule_readonly')''',
+                    (self.other, f'2026-11-{day}T08:30', f'2026-11-{day}T09:30')).lastrowid
+            sent_id = conn.execute('''INSERT INTO scheduler_appointments
+                (technician_id,start_at,end_at,operations,estimated_hours,source)
+                VALUES (?,'2026-11-19T10:30','2026-11-19T11:30','diagnoza dificila trepidatii',1,'dsm_schedule_readonly')''',
+                (self.mihai,)).lastrowid
+            conn.commit()
+        sent.record_sent(self.db, self.mihai, [scheduler.get_appointment(self.db, sent_id)])
+        fixed = [self.booking['id'], ids[17], ids[20], sent_id]
+        before = {ident: scheduler.get_appointment(self.db, ident) for ident in fixed}
+        # Even an old calendar page cannot rebalance another day or week.
+        result = scheduler.distribute_dsm_appointments_by_capacity(self.db, '2026-01-01', 'all', now=datetime(2026,11,18,12))
+        self.assertEqual(result['date'], '2026-11-19')
+        self.assertEqual(result['appointment_count'], 1)
+        self.assertEqual({r['appointment_id'] for r in result['decisions']}, {ids[19]})
+        self.assertEqual(result['communicated_preserved'], 1)
+        for ident in fixed:
+            self.assertEqual(scheduler.get_appointment(self.db, ident), before[ident])
+
+    def test_old_delivery_receipts_also_freeze_next_days_assignment(self):
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute('UPDATE scheduler_appointments SET technician_id=? WHERE id=?', (self.mihai,self.booking['id']))
+            conn.commit()
+        self.assertEqual(self.balance()['appointment_count'], 0)
+        self.assertEqual(self.balance()['communicated_preserved'], 1)
+        sync_local_schedule(self.db, [dict(dsm_appointment_id='APP-2184',mechanic='Fixture mechanic',
+            registration='B100TST',start_at='2026-11-18T10:30',end_at='2026-11-18T11:30',operations='diagnoza')])
+        self.assertEqual(self.current()['technician_id'], self.mihai)
+        self.assertEqual(self.current()['start_at'], '2026-11-18T08:30')
+
+    def test_romanian_midnight_and_week_boundary_use_calendar_tomorrow(self):
+        for now, expected in ((datetime(2026,11,17,22,30,tzinfo=timezone.utc),'2026-11-19'),
+                              (datetime(2026,7,17,21,30,tzinfo=timezone.utc),'2026-07-19'),
+                              (datetime(2026,11,22,12),'2026-11-23')):
+            with self.subTest(now=now):
+                self.assertEqual(self.balance(now=now)['date'], expected)
+
+    def test_legacy_rebalance_entry_point_cannot_modify_today(self):
+        before = self.current()
+        result = scheduler.rebalance_schedule(self.db, '2026-11-16', now=datetime(2026,11,18,12))
+        self.assertEqual(result['date'], '2026-11-19')
+        self.assertEqual(result['appointment_count'], 0)
+        self.assertEqual(self.current(), before)
 
 
 class RecoveryEndpointTests(unittest.IsolatedAsyncioTestCase):

@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 SKILL_LABELS = {
@@ -1163,46 +1164,23 @@ def auto_schedule_request(db_path: Path, request_id: int, earliest: str | None =
             "appointments": created}
 
 
-def rebalance_schedule(db_path: Path, week_start: str) -> dict:
-    monday = _parse_local(f"{week_start}T00:00")
-    monday -= timedelta(days=monday.weekday())
-    next_week = monday + timedelta(days=7)
-    with sqlite3.connect(db_path) as conn:
-        request_ids = [int(row[0]) for row in conn.execute("""
-            SELECT DISTINCT request_id FROM scheduler_appointments
-            WHERE request_id IS NOT NULL AND status!='anulat' AND start_at>=? AND start_at<?
-        """, (monday.isoformat(timespec="minutes"), next_week.isoformat(timespec="minutes"))).fetchall()]
-    requests = [request_by_id(db_path, request_id) for request_id in request_ids]
-    requests = [request for request in requests if request]
-    requests.sort(key=lambda request: (
-        -len(classify_operations(request.get("symptom") or "")),
-        -sum(SKILL_DEFAULT_HOURS.get(skill, 1.0)
-             for skill in classify_operations(request.get("symptom") or "")),
-        -int(request["id"]),
-    ))
-    with sqlite3.connect(db_path) as conn:
-        if request_ids:
-            placeholders = ",".join("?" for _ in request_ids)
-            conn.execute(f"DELETE FROM scheduler_appointments WHERE request_id IN ({placeholders})", request_ids)
-            conn.commit()
-    results = []
-    earliest = monday.replace(hour=8, minute=30).isoformat(timespec="minutes")
-    for request in requests:
-        results.append(auto_schedule_request(db_path, int(request["id"]), earliest))
-    appointments = [item for result in results for item in result["appointments"]]
-    return {"status": "rebalanced", "request_count": len(results),
-            "appointment_count": len(appointments), "appointments": appointments}
+def rebalance_schedule(db_path: Path, week_start: str, *, now: datetime | None = None) -> dict:
+    # Compatibility entry point must obey the same next-day and sent-work rules.
+    return distribute_dsm_appointments_by_capacity(db_path, week_start, 'all', now=now)
 
 
 def distribute_dsm_appointments_by_capacity(
-    db_path: Path, week_start: str, department: str = "mecanica"
+    db_path: Path, week_start: str, department: str = "mecanica", *, now: datetime | None = None
 ) -> dict:
-    """Split mixed DSM work and redistribute local blocks by real capability."""
+    """Balance only tomorrow's uncommunicated DSM work, in Romanian local time."""
     if department != "all" and department not in DEPARTMENT_LABELS:
         raise ValueError("Secția selectată este invalidă.")
-    monday = _parse_local(f"{week_start}T00:00")
-    monday -= timedelta(days=monday.weekday())
-    end = monday + timedelta(days=7)
+    _parse_local(f"{week_start}T00:00")  # Validate older clients' calendar field.
+    local_now = now or datetime.now(ZoneInfo('Europe/Bucharest'))
+    if local_now.tzinfo:
+        local_now = local_now.astimezone(ZoneInfo('Europe/Bucharest'))
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None) + timedelta(days=1)
+    end = day_start + timedelta(days=1)
     technicians = list_technicians(db_path)
     if department != "all":
         technicians = [item for item in technicians
@@ -1220,8 +1198,10 @@ def distribute_dsm_appointments_by_capacity(
               AND source IN ('dsm_schedule_readonly','dsm_readonly_import')
               AND COALESCE(dsm_original_start_at,start_at)>=?
               AND COALESCE(dsm_original_start_at,start_at)<?
+              AND start_at>=? AND start_at<? AND end_at<=?
         """
-        target_params: list = [monday.isoformat(timespec="minutes"), end.isoformat(timespec="minutes")]
+        target_params: list = [day_start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes"),
+                              day_start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes"), end.isoformat(timespec="minutes")]
         if department != "all":
             target_sql += " AND department=?"
             target_params.append(department)
@@ -1231,12 +1211,13 @@ def distribute_dsm_appointments_by_capacity(
         protected = protected_ids(conn)
         # A communicated child also protects its original DSM appointment.
         protected.update(r[0] for r in conn.execute('SELECT continued_from_id,id FROM scheduler_appointments WHERE continued_from_id IS NOT NULL') if r[1] in protected)
+        communicated_preserved = sum(int(r['id']) in protected for r in targets)
         targets = [r for r in targets if int(r['id']) not in protected]
         # Rebuild only children of the selected, uncommunicated appointments.
         # A bodyshop recalculation must not delete the mechanics' work blocks.
         for target in targets:
-            delete_sql = "DELETE FROM scheduler_appointments WHERE source='dsm_capacity_split_local' AND continued_from_id=?"
-            args = [target['id']]
+            delete_sql = "DELETE FROM scheduler_appointments WHERE source='dsm_capacity_split_local' AND continued_from_id=? AND start_at>=? AND start_at<? AND end_at<=?"
+            args = [target['id'], day_start.isoformat(timespec='minutes'), end.isoformat(timespec='minutes'), end.isoformat(timespec='minutes')]
             if department != 'all':
                 delete_sql += ' AND department=?'
                 args.append(department)
@@ -1260,7 +1241,7 @@ def distribute_dsm_appointments_by_capacity(
         fixed = [dict(row) for row in conn.execute("""
             SELECT * FROM scheduler_appointments
             WHERE status!='anulat' AND start_at<? AND end_at>?
-        """, (end.isoformat(timespec="minutes"), monday.isoformat(timespec="minutes"))).fetchall()
+        """, (end.isoformat(timespec="minutes"), day_start.isoformat(timespec="minutes"))).fetchall()
                  if int(row["id"]) not in target_ids]
 
         busy: dict[int, list[tuple[datetime, datetime]]] = {
@@ -1420,7 +1401,10 @@ def distribute_dsm_appointments_by_capacity(
         return {
             "ok": unresolved == 0,
             "department": department,
-            "week_start": monday.date().isoformat(),
+            "week_start": (day_start - timedelta(days=day_start.weekday())).date().isoformat(),
+            "date": day_start.date().isoformat(),
+            "scope": "tomorrow_uncommunicated",
+            "communicated_preserved": communicated_preserved,
             "appointment_count": len(targets),
             "blocks_created": blocks_created,
             "split_count": split_count,

@@ -13,9 +13,17 @@ def initialize(conn):
 
 
 def protected_ids(conn):
-    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='scheduler_communicated_appointments'").fetchone():
-        return set()
-    return {r[0] for r in conn.execute('SELECT appointment_id FROM scheduler_communicated_appointments')}
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    result = set()
+    if 'scheduler_communicated_appointments' in tables:
+        result.update(r[0] for r in conn.execute('SELECT appointment_id FROM scheduler_communicated_appointments'))
+    # Older successful sends predate the per-appointment snapshots.
+    if 'scheduler_mechanic_schedule_deliveries' in tables:
+        result.update(r[0] for r in conn.execute('''SELECT a.id FROM scheduler_appointments a
+            JOIN scheduler_mechanic_schedule_deliveries d
+              ON d.technician_id=a.technician_id AND d.schedule_date=substr(a.start_at,1,10)
+            WHERE d.status IN ('accepted_by_meta','sent','delivered','read')'''))
+    return result
 
 
 def record_sent(db_path, technician_id, appointments):

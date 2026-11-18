@@ -8773,7 +8773,13 @@ def requests_dashboard():
         .yard-modal { position:fixed; inset:0; z-index:12000; padding:28px; background:rgba(17,24,39,.62); display:flex; align-items:center; justify-content:center; }
         .yard-modal.hidden { display:none; }
         .yard-window { width:min(1180px,96vw); max-height:90vh; overflow:auto; background:#fff7ed; border:2px solid #f59e0b; border-radius:16px; box-shadow:0 24px 70px rgba(0,0,0,.3); }
-        .yard-window-head { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; background:#fff7ed; border-bottom:1px solid #fdba74; }
+        .yard-window-head { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; padding:16px; background:#fff7ed; border-bottom:1px solid #fdba74; }
+        .yard-search { flex:1 0 100%; min-width:0; }
+        .yard-search label { display:block; font-size:13px; font-weight:700; margin-bottom:6px; }
+        .yard-search-controls { display:flex; gap:8px; }
+        .yard-search input { flex:1; min-width:0; width:100%; border:1px solid #d1d5db; border-radius:9px; padding:11px 12px; font:inherit; background:#fff; color:var(--text); }
+        .yard-search input:focus-visible { outline:2px solid #b7791f; outline-offset:2px; }
+        .yard-search-results { margin-top:6px; font-size:13px; }
         .yard-window-body { padding:16px; }
         .yard-close { font-size:18px; min-width:42px; }
 
@@ -9238,6 +9244,14 @@ def requests_dashboard():
                     <button id="importYardButton" onclick="importYardOrders()">Actualizează din DSM</button>
                     <button class="yard-close" onclick="closeYardModal()" title="Închide">×</button>
                 </div>
+                <div class="yard-search">
+                    <label for="yardSearch">Caută o mașină</label>
+                    <div class="yard-search-controls">
+                        <input id="yardSearch" type="search" autocomplete="off" placeholder="Număr auto, client, mașină, cod comandă sau lucrare" aria-controls="yardOrders" oninput="renderYardOrders()">
+                        <button type="button" onclick="clearYardSearch()" aria-label="Golește căutarea mașinilor din curte">Golește</button>
+                    </div>
+                    <div class="yard-search-results muted" id="yardSearchResults" role="status" aria-live="polite"></div>
+                </div>
             </div>
             <div class="yard-window-body">
                 <div class="yard-list" id="yardOrders"></div>
@@ -9538,12 +9552,32 @@ function renderStats() {
         requests.filter(r => rowStatus(r) === "acceptat").length;
 }
 
+function yardSearchText(text) {
+    return String(text ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function clearYardSearch() {
+    document.getElementById("yardSearch").value = "";
+    renderYardOrders();
+    document.getElementById("yardSearch").focus();
+}
+
 function renderYardOrders() {
     const box = document.getElementById("yardOrders");
     const empty = document.getElementById("yardEmpty");
+    const terms = yardSearchText(document.getElementById("yardSearch").value).split(/\s+/).filter(Boolean);
+    const filtered = yardOrders.filter(row => {
+        const fields = [row.registration, row.customer_name, row.vehicle, row.job_number, row.operations];
+        const text = fields.map(yardSearchText).join(" ") + " " +
+            [row.registration, row.job_number].map(v => yardSearchText(v).replace(/\s/g, "")).join(" ");
+        return terms.every(term => text.includes(term));
+    });
     document.getElementById("yardCount").textContent = yardOrders.length;
-    empty.style.display = yardOrders.length ? "none" : "block";
-    box.innerHTML = yardOrders.map(row => {
+    document.getElementById("yardSearchResults").textContent = `${filtered.length} din ${yardOrders.length} ${yardOrders.length === 1 ? "mașină" : "mașini"}`;
+    empty.style.display = filtered.length ? "none" : "block";
+    empty.textContent = yardOrders.length ? "Nicio mașină nu corespunde căutării." : "Nu există acum mașini fără programare sincronizate din DSM.";
+    box.innerHTML = filtered.map(row => {
         const linked = Boolean(row.service_request_id);
         return `<article class="yard-card ${linked ? "in-offering" : ""}">
           <div class="yard-card-title"><span>${esc(row.registration || "Fără număr")}</span><span>${esc(row.job_number)}</span></div>
@@ -9559,6 +9593,7 @@ function renderYardOrders() {
 
 function openYardModal() {
     document.getElementById("yardModal").classList.remove("hidden");
+    document.getElementById("yardSearch").focus();
 }
 
 function closeYardModal(event) {

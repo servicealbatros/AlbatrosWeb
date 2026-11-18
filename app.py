@@ -9573,8 +9573,15 @@ function renderYardOrders() {
             [row.registration, row.job_number].map(v => yardSearchText(v).replace(/\s/g, "")).join(" ");
         return terms.every(term => text.includes(term));
     });
+    const compare = new Intl.Collator("ro", {numeric:true, sensitivity:"base"}).compare;
+    filtered.sort((a, b) => {
+        const first = yardSearchText(a.registration).replace(/\s/g, "");
+        const second = yardSearchText(b.registration).replace(/\s/g, "");
+        return Number(!first) - Number(!second) || compare(first, second) ||
+            compare(String(a.job_number || ""), String(b.job_number || "")) || Number(a.id) - Number(b.id);
+    });
     document.getElementById("yardCount").textContent = yardOrders.length;
-    document.getElementById("yardSearchResults").textContent = `${filtered.length} din ${yardOrders.length} ${yardOrders.length === 1 ? "mașină" : "mașini"}`;
+    document.getElementById("yardSearchResults").textContent = `${filtered.length} din ${yardOrders.length} ${yardOrders.length === 1 ? "mașină" : "mașini"} · A–Z după numărul auto`;
     empty.style.display = filtered.length ? "none" : "block";
     empty.textContent = yardOrders.length ? "Nicio mașină nu corespunde căutării." : "Nu există acum mașini fără programare sincronizate din DSM.";
     box.innerHTML = filtered.map(row => {

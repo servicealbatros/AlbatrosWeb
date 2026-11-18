@@ -241,7 +241,7 @@ def state(root):
 async def tick(db_path, root):
     info = state(root)
     now = datetime.now(timezone.utc)
-    if info.get('checked_at') and (now - datetime.fromisoformat(info['checked_at'])).total_seconds() < 300:
+    if info.get('checked_at') and (now - datetime.fromisoformat(info['checked_at'])).total_seconds() < 7200:
         return info
     try:
         result = await reconcile(db_path, apply=True)

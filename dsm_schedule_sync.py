@@ -503,7 +503,8 @@ def sync_local_schedule(db_path: Path, rows: list[dict]) -> dict:
                 operations, str(row.get('original_start_at') or start_text), str(row.get('original_end_at') or end_text),
             )
             if existing:
-                if existing['source'] == 'mechanic_takeover':
+                from communicated_schedule import protected_ids
+                if existing['source'] in {'mechanic_takeover', 'local_schedule_override'} or existing['id'] in protected_ids(conn):
                     # A mechanic has explicitly taken responsibility locally.
                     # Refresh DSM evidence/contact data without assigning the
                     # car back to its old mechanic on the next import.

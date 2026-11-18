@@ -720,7 +720,7 @@ async def sync_dsm_accepted_offers(request: Request):
 def dsm_booking_reconciliation_status(request: Request):
     _master_access(request)
     from dsm_booking_reconciliation import state
-    return state(DATA_DIR)
+    return {**state(DATA_DIR), 'interval_hours': 2}
 
 
 @app.post('/api/dashboard/master/dsm-booking-reconciliation')
@@ -742,6 +742,19 @@ async def reconcile_dsm_bookings(request: Request):
     if result.get('resolved_request_ids'):
         save_request_status()
     return result
+
+
+@app.post('/api/dashboard/master/restore-communicated-schedule')
+async def restore_communicated_schedule(request: Request):
+    _master_access(request)
+    if request.headers.get('X-Human-Action') != 'restore-communicated-schedule':
+        raise HTTPException(403, 'Restabilirea explicită a programului comunicat este necesară.')
+    body = await request.json()
+    from communicated_schedule import restore
+    try:
+        return restore(DB_PATH, int(body['technician_id']), body['date'], body['entries'])
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(409, 'Programul nu a putut fi restabilit: verificați referințele, trimiterea și suprapunerile.') from None
 
 
 @app.post('/api/dashboard/master/dsm-accepted-offers/rebuild')
@@ -7842,6 +7855,8 @@ async def scheduler_send_technician_schedule(
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"WhatsApp nu a confirmat trimiterea: {exc}") from exc
+    from communicated_schedule import record_sent
+    record_sent(DB_PATH, technician_id, appointments)
     message_id = str(((meta_response.get("messages") or [{}])[0]).get("id") or "")
     await asyncio.sleep(1.5)
     delivery = WHATSAPP_DELIVERY_STATUS.get(message_id) or {"status": "accepted_by_meta"}
@@ -7951,6 +7966,8 @@ async def _send_all_technician_schedules_unlocked(
                 template_text=template_payload,
             )
             message_id = str(((meta_response.get("messages") or [{}])[0]).get("id") or "")
+            from communicated_schedule import record_sent
+            record_sent(DB_PATH, technician_id, appointments)
             item = {"technician": technician.get("name"), "technician_id": technician_id,
                     "phone": target, "appointment_count": len(appointments),
                     "message_id": message_id, "delivery_status": "accepted_by_meta"}

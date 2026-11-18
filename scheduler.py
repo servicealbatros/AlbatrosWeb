@@ -134,6 +134,8 @@ def init_scheduler_db(db_path: Path) -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduler_range ON scheduler_appointments(start_at,end_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduler_technician ON scheduler_appointments(technician_id,start_at)")
+        from communicated_schedule import initialize
+        initialize(conn)
         existing = {row[1] for row in conn.execute("PRAGMA table_info(scheduler_appointments)").fetchall()}
         if "job_number" not in existing:
             conn.execute("ALTER TABLE scheduler_appointments ADD COLUMN job_number TEXT")
@@ -1211,13 +1213,10 @@ def distribute_dsm_appointments_by_capacity(
     conn = sqlite3.connect(db_path)
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("""
-            DELETE FROM scheduler_appointments
-            WHERE source='dsm_capacity_split_local' AND start_at>=? AND start_at<?
-        """, (monday.isoformat(timespec="minutes"), end.isoformat(timespec="minutes")))
+        conn.execute('BEGIN IMMEDIATE')
         target_sql = """
             SELECT * FROM scheduler_appointments
-            WHERE status!='anulat'
+            WHERE status='programat'
               AND source IN ('dsm_schedule_readonly','dsm_readonly_import')
               AND COALESCE(dsm_original_start_at,start_at)>=?
               AND COALESCE(dsm_original_start_at,start_at)<?
@@ -1228,6 +1227,20 @@ def distribute_dsm_appointments_by_capacity(
             target_params.append(department)
         target_sql += " ORDER BY COALESCE(dsm_original_start_at,start_at),id"
         targets = [dict(row) for row in conn.execute(target_sql, target_params).fetchall()]
+        from communicated_schedule import protected_ids
+        protected = protected_ids(conn)
+        # A communicated child also protects its original DSM appointment.
+        protected.update(r[0] for r in conn.execute('SELECT continued_from_id,id FROM scheduler_appointments WHERE continued_from_id IS NOT NULL') if r[1] in protected)
+        targets = [r for r in targets if int(r['id']) not in protected]
+        # Rebuild only children of the selected, uncommunicated appointments.
+        # A bodyshop recalculation must not delete the mechanics' work blocks.
+        for target in targets:
+            delete_sql = "DELETE FROM scheduler_appointments WHERE source='dsm_capacity_split_local' AND continued_from_id=?"
+            args = [target['id']]
+            if department != 'all':
+                delete_sql += ' AND department=?'
+                args.append(department)
+            conn.execute(delete_sql, args)
 
         def target_order(item: dict) -> tuple:
             original_start = _parse_local(item.get("dsm_original_start_at") or item["start_at"])

@@ -3,6 +3,7 @@ import ast
 from copy import deepcopy
 import gc
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -178,6 +179,19 @@ class BookingReconciliationTests(unittest.IsolatedAsyncioTestCase):
         with patch('dsm_pre_arrival.appointment_call', AsyncMock(return_value={'status': 'success', 'detail': self.detail})) as read:
             self.assertEqual(await sync.read_appointment('1952'), self.detail)
             read.assert_awaited_once_with('getappointment', {'appointment_id': '1952'})
+
+    async def test_periodic_reconciliation_runs_once_every_two_hours(self):
+        now = datetime(2026, 11, 18, 8, tzinfo=timezone.utc)
+        path = Path(self.temp.name) / 'dsm_booking_reconciliation.json'
+        path.write_text(json.dumps({'checked_at': (now-timedelta(hours=2)+timedelta(seconds=1)).isoformat()}), encoding='utf-8')
+        with patch.object(sync, 'datetime', wraps=datetime) as clock, \
+             patch.object(sync, 'reconcile', AsyncMock(return_value={'ok': True})) as check:
+            clock.now.return_value = now
+            await sync.tick(self.db, self.temp.name)
+            check.assert_not_called()
+            clock.now.return_value = now + timedelta(seconds=1)
+            await sync.tick(self.db, self.temp.name)
+            check.assert_awaited_once_with(self.db, apply=True)
 
     async def test_master_endpoint_requires_explicit_apply_and_redacts_failures(self):
         tree = ast.parse(Path(__file__).with_name('app.py').read_text(encoding='utf-8-sig'))

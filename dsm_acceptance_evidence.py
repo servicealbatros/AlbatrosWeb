@@ -22,7 +22,7 @@ async def inspect(db_path, request_id):
         for(const k of keys(v)){
           const value=v[k];
           if(/signed|accept|signature|sms.*date|feedback.*date|record_(insert|update)__datetime|^transaction_head__date$/i.test(k)
-             &&typeof value==='string'&&/^20\d{2}[-/.]\d{2}[-/.]\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.test(value)&&value.length<=40)
+             &&typeof value==='string'&&/^(?:20\d{2}[-/.]\d{2}[-/.]\d{2}|\d{2}[-/.]\d{2}[-/.]20\d{2})(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.test(value)&&value.length<=40)
             dates.push({field:path+k,value});
           if(typeof value==='object')walk(value,path+k+'.',depth+1);
         }
@@ -38,10 +38,12 @@ async def inspect(db_path, request_id):
         states[k]=safe;
       }
       return JSON.stringify({sms_or_qrcode_sended:states,source_fields:keys(p),
+        head_fields:keys(p.transaction), document_fields:Array.isArray(p.documents)?p.documents.slice(0,3).map(keys):keys(p.documents),
         signature_fields:Object.entries(p.sms_or_qrcode_sended||{}).filter(([k])=>k.replace(/^\d+_/,'')==='service_offer')
           .map(([k,v])=>({document:k,type:typeof v,fields:keys(v)})),business_dates:dates});
     })()'''.replace('__ID__', json.dumps(ident)))
     return dict(request_id=request_id, offer_code=record['document_code'],
                 signature=signature_status(result), accepted_at=acceptance_datetime(result),
                 source_fields=result.get('source_fields', []), signature_fields=result.get('signature_fields', []),
+                head_fields=result.get('head_fields', []), document_fields=result.get('document_fields', []),
                 business_dates=result.get('business_dates', []))

@@ -4,6 +4,56 @@ from dsm_accepted_offers import offer_record, signature_status, acceptance_datet
 from dsm_open_orders_readonly import _evaluate
 
 
+async def lookup_registration(registration, appointment_id=None):
+    """Read exact-plate offer signatures, optionally bound to an existing booking."""
+    from dsm_readonly import _search_transactions, normalize_registration
+    from dsm_booking_reconciliation import read_offer_details, read_appointment, plate
+    registration = normalize_registration(registration)
+    appointment = None
+    if appointment_id is not None:
+        if not str(appointment_id).isdigit():
+            raise ValueError('Cod de programare invalid.')
+        appointment = await read_appointment(str(appointment_id))
+        if (plate(appointment.get('carNumber')) != registration
+                or appointment.get('code') != 'APP-'+str(appointment_id)
+                or not str(appointment.get('carId') or '').isdigit() or int(appointment['carId']) <= 1):
+            raise ValueError('Programarea nu corespunde înmatriculării cerute.')
+    refs = await _search_transactions(registration)
+    ids = {str(r.get('transaction_id') or '') for r in refs
+           if str(r.get('transaction_type')) == '1'}
+    if appointment and str(appointment.get('estimateType')) in {'1', '2'}:
+        ids.add(str(appointment.get('estimateId') or ''))
+    ids.discard('')
+    if len(ids) > 100 or any(not ident.isdigit() for ident in ids):
+        raise ValueError('Istoricul ofertelor nu poate fi verificat complet.')
+    payloads = await read_offer_details(sorted(ids)) if ids else {}
+    order_id = str((appointment or {}).get('estimateId') or '')
+    linked_order = (payloads.get(order_id) or {}).get('transaction') or {}
+    offers = []
+    vehicle_ids = set()
+    for ident, payload in payloads.items():
+        h = payload.get('transaction') or {}
+        if str(h.get('transaction_head__type')) != '1' or plate(h.get('car_auto_number')) != registration:
+            continue
+        if appointment and str(h.get('car_id')) != str(appointment.get('carId')):
+            continue
+        vehicle_ids.add((str(h.get('car_body_series') or ''), str(h.get('car_id') or '')))
+        related = bool(appointment and (
+            (str(appointment.get('estimateType')) == '1' and ident == order_id)
+            or any(str(c.get('transaction_id')) == order_id and str(c.get('transaction_head__type')) == '2'
+                   for c in payload.get('transaction_head_childs') or [])
+            or (str(linked_order.get('parent_transaction_type')) == '1'
+                and linked_order.get('parent_transaction_code') == h.get('transaction_head__code')
+                and str(linked_order.get('car_id')) == str(h.get('car_id')))))
+        signature = signature_status(payload)
+        offers.append(dict(offer_id=ident, offer_code=h.get('transaction_head__code'),
+            document_status=h.get('transaction_head__status'), signature=signature,
+            signed=signature in {'signed', 'complete', 'completed'},
+            accepted_at=acceptance_datetime(payload), linked_to_appointment=related))
+    return dict(registration=registration, offers=offers, ambiguous_vehicle=len(vehicle_ids) > 1,
+                appointment_id='APP-'+str(appointment_id) if appointment_id is not None else None)
+
+
 async def inspect(db_path, request_id):
     record = offer_record(db_path, request_id)
     if not record or not str(record['transaction_id']).isdigit():

@@ -10,6 +10,37 @@ import dsm_acceptance_evidence as evidence
 
 
 class AcceptanceEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plate_check_reads_the_exact_appointment_vehicle_and_its_offer(self):
+        refs = [{'transaction_id': '11', 'transaction_type': '1'}, {'transaction_id': '12', 'transaction_type': '1'}]
+        payloads = {
+            '11': dict(transaction={'transaction_head__id': '11', 'transaction_head__type': '1',
+                'transaction_head__code': 'OFERTA-11', 'transaction_head__status': 'working',
+                'car_id': '25', 'car_auto_number': 'PH25SIC', 'car_body_series': 'PRIVATE_VIN'},
+                sms_or_qrcode_sended={'service_offer': 'signed'},
+                transaction_head_childs=[{'transaction_id': '21', 'transaction_head__type': '2'}]),
+            '12': dict(transaction={'transaction_head__type': '1', 'car_id': '26', 'car_auto_number': 'PH25SIC'},
+                sms_or_qrcode_sended={'service_offer': 'signed'}),
+            '21': dict(transaction={'transaction_head__type': '2', 'car_id': '25',
+                'parent_transaction_type': '1', 'parent_transaction_code': 'OFERTA-11'})}
+        with patch('dsm_readonly._search_transactions', AsyncMock(return_value=refs)), \
+             patch('dsm_booking_reconciliation.read_appointment', AsyncMock(return_value={
+                 'code': 'APP-2215', 'carNumber': 'PH25SIC', 'carId': '25', 'estimateType': '2', 'estimateId': '21'})), \
+             patch('dsm_booking_reconciliation.read_offer_details', AsyncMock(return_value=payloads)) as read:
+            result = await evidence.lookup_registration('PH25SIC', '2215')
+        read.assert_awaited_once_with(['11', '12', '21'])
+        self.assertEqual(len(result['offers']), 1)
+        self.assertTrue(result['offers'][0]['signed'])
+        self.assertTrue(result['offers'][0]['linked_to_appointment'])
+        self.assertNotIn('PRIVATE_VIN', json.dumps(result))
+
+    async def test_unrelated_appointment_never_triggers_plate_history_read(self):
+        with patch('dsm_booking_reconciliation.read_appointment', AsyncMock(return_value={
+                'code': 'APP-2215', 'carNumber': 'B100TST', 'carId': '25'})), \
+             patch('dsm_readonly._search_transactions', AsyncMock()) as search:
+            with self.assertRaises(ValueError):
+                await evidence.lookup_registration('PH25SIC', '2215')
+            search.assert_not_called()
+
     async def test_inspection_returns_only_business_evidence_and_never_changes_acceptance_date(self):
         result = dict(sms_or_qrcode_sended={'service_offer': {'status': 'signed'}},
             source_fields=['transaction'], signature_fields=[{'document': 'service_offer', 'type': 'string', 'fields': []}],

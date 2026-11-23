@@ -733,6 +733,16 @@ async def dsm_acceptance_evidence(request_id: int, request: Request):
         raise HTTPException(502, 'Dovezile de acceptare DSM nu au putut fi citite.') from None
 
 
+@app.get('/api/dashboard/master/dsm-signatures')
+async def dsm_signature_lookup(request: Request, registration: str, appointment_id: str | None = None):
+    _master_access(request)
+    from dsm_acceptance_evidence import lookup_registration
+    try:
+        return await lookup_registration(registration, appointment_id)
+    except Exception:
+        raise HTTPException(502, 'Semnătura ofertei nu a putut fi verificată complet în DSM.') from None
+
+
 @app.post('/api/dashboard/master/dsm-booking-reconciliation')
 async def reconcile_dsm_bookings(request: Request):
     _master_access(request)

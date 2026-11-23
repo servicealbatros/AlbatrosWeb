@@ -1,11 +1,12 @@
 """Read business-date evidence without exposing customer or vehicle identity."""
 import json
+import re
 from dsm_accepted_offers import offer_record, signature_status, acceptance_datetime
 from dsm_open_orders_readonly import _evaluate
 
 
 async def lookup_registration(registration, appointment_id=None):
-    """Read exact-plate offer signatures, optionally bound to an existing booking."""
+    """Read signatures; appointment_id is DSM's internal transaction ID, not APP code."""
     from dsm_readonly import _search_transactions, normalize_registration
     from dsm_booking_reconciliation import read_offer_details, read_appointment, plate
     registration = normalize_registration(registration)
@@ -15,7 +16,7 @@ async def lookup_registration(registration, appointment_id=None):
             raise ValueError('Cod de programare invalid.')
         appointment = await read_appointment(str(appointment_id))
         if (plate(appointment.get('carNumber')) != registration
-                or appointment.get('code') != 'APP-'+str(appointment_id)
+                or not re.fullmatch(r'APP-\d+', str(appointment.get('code') or ''))
                 or not str(appointment.get('carId') or '').isdigit() or int(appointment['carId']) <= 1):
             raise ValueError('Programarea nu corespunde înmatriculării cerute.')
     refs = await _search_transactions(registration)
@@ -51,7 +52,7 @@ async def lookup_registration(registration, appointment_id=None):
             signed=signature in {'signed', 'complete', 'completed'},
             accepted_at=acceptance_datetime(payload), linked_to_appointment=related))
     return dict(registration=registration, offers=offers, ambiguous_vehicle=len(vehicle_ids) > 1,
-                appointment_id='APP-'+str(appointment_id) if appointment_id is not None else None)
+                appointment_id=appointment.get('code') if appointment else None)
 
 
 async def inspect(db_path, request_id):

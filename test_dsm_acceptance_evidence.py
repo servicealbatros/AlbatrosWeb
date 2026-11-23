@@ -26,11 +26,12 @@ class AcceptanceEvidenceTests(unittest.IsolatedAsyncioTestCase):
              patch('dsm_booking_reconciliation.read_appointment', AsyncMock(return_value={
                  'code': 'APP-2215', 'carNumber': 'PH25SIC', 'carId': '25', 'estimateType': '2', 'estimateId': '21'})), \
              patch('dsm_booking_reconciliation.read_offer_details', AsyncMock(return_value=payloads)) as read:
-            result = await evidence.lookup_registration('PH25SIC', '2215')
+            result = await evidence.lookup_registration('PH25SIC', '20391')
         read.assert_awaited_once_with(['11', '12', '21'])
         self.assertEqual(len(result['offers']), 1)
         self.assertTrue(result['offers'][0]['signed'])
         self.assertTrue(result['offers'][0]['linked_to_appointment'])
+        self.assertEqual(result['appointment_id'], 'APP-2215')
         self.assertNotIn('PRIVATE_VIN', json.dumps(result))
 
     async def test_unrelated_appointment_never_triggers_plate_history_read(self):

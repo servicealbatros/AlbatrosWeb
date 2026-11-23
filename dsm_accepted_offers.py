@@ -1,7 +1,7 @@
-"""Read-only DSM acceptance evidence and daily dashboard synchronisation."""
+"""Read-only DSM acceptance evidence and hourly dashboard synchronisation."""
 from dsm_open_orders_readonly import _evaluate
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 import html
 import json
@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 ROMANIA = ZoneInfo('Europe/Bucharest')
 LOCK = asyncio.Lock()
+SYNC_INTERVAL = timedelta(hours=1)
 
 
 def acceptance_datetime(payload):
@@ -274,12 +275,44 @@ def apply_snapshot(db_path, snapshot):
 
 def state(root):
     try:
-        return json.loads((Path(root)/'dsm_accepted_offers_sync.json').read_text(encoding='utf-8'))
+        info = json.loads((Path(root)/'dsm_accepted_offers_sync.json').read_text(encoding='utf-8'))
     except FileNotFoundError:
-        return {'enabled': True, 'daily_time': '07:00', 'status': 'not_started'}
+        info = {'enabled': True, 'status': 'not_started'}
+    return _hourly_state(info)
+
+
+def _utc_time(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ROMANIA)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _hourly_state(info):
+    info = dict(info)
+    info.pop('daily_time', None)
+    info['interval_hours'] = 1
+    # Migrate the last successful daily run without reusing a failed finish time.
+    if info.get('status') == 'success' and _utc_time(info.get('last_finished')):
+        info['last_success_at'] = info['last_finished']
+    last = _utc_time(info.get('last_success_at'))
+    retry = _utc_time(info.get('retry_after'))
+    next_due = last + SYNC_INTERVAL if last else None
+    if retry and (next_due is None or retry > next_due):
+        next_due = retry
+    info['next_due'] = next_due.astimezone(ROMANIA).isoformat() if next_due and info.get('enabled', True) else None
+    return info
 
 
 def save_state(root, value):
+    hourly = _hourly_state(value)
+    value.clear()
+    value.update(hourly)
     path = Path(root)/'dsm_accepted_offers_sync.json'
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -287,13 +320,15 @@ def save_state(root, value):
 
 
 def due(info, now):
-    now = now.astimezone(ROMANIA)
-    if not info.get('enabled', True) or info.get('last_success_day', '') >= now.date().isoformat():
+    info = _hourly_state(info)
+    if not info.get('enabled', True):
         return False
-    if now.strftime('%H:%M') < info.get('daily_time', '07:00'):
+    now = _utc_time(now.isoformat())
+    retry = _utc_time(info.get('retry_after'))
+    if retry and now < retry:
         return False
-    retry = info.get('retry_after')
-    return not retry or now >= datetime.fromisoformat(retry)
+    last = _utc_time(info.get('last_success_at'))
+    return last is None or now >= last + SYNC_INTERVAL
 
 
 async def synchronize(db_path, root):

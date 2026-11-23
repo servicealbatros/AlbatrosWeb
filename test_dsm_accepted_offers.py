@@ -244,13 +244,33 @@ class SignedOfferTests(unittest.TestCase):
   with patch.object(database,'DB_PATH',self.db):rows=database.list_requests(include_dsm_accepted=True)
   gc.collect()
   self.assertEqual(len(rows),51);self.assertTrue(any(r['source']=='dsm_accepted_offer' for r in rows))
- def test_daily_clock_uses_bucharest_and_survives_dst(self):
-  for day in (19,26):
-   now=datetime(2026,10,day,7,0,tzinfo=sync.ROMANIA)
-   self.assertTrue(sync.due({'enabled':True},now))
-   self.assertFalse(sync.due({'last_success_day':now.date().isoformat()},now))
-   self.assertFalse(sync.due({'enabled':False},now))
-   self.assertFalse(sync.due({},now.replace(hour=6,minute=59)))
+ def test_hourly_clock_repeats_on_same_day_and_migrates_daily_state(self):
+  last=datetime(2026,11,23,9,12,tzinfo=sync.ROMANIA)
+  info={'enabled':True,'status':'success','last_success_day':'2026-11-23','daily_time':'07:00','last_finished':last.isoformat()}
+  self.assertFalse(sync.due(info,last+timedelta(minutes=59,seconds=59)))
+  self.assertTrue(sync.due(info,last+timedelta(hours=1)))
+  self.assertTrue(sync.due({},last.replace(hour=1)))
+  self.assertFalse(sync.due({'enabled':False},last))
+  sync.save_state(self.root,info)
+  restored=sync.state(self.root)
+  self.assertEqual(restored['interval_hours'],1)
+  self.assertNotIn('daily_time',restored)
+  self.assertEqual(restored['last_success_at'],last.isoformat())
+  self.assertEqual(restored['next_due'],(last+timedelta(hours=1)).isoformat())
+ def test_hourly_clock_uses_elapsed_time_across_dst_and_midnight(self):
+  for last,current,expected in [
+    ('2026-10-25T03:30:00+03:00','2026-10-25T03:40:00+02:00',True),
+    ('2026-03-29T02:45:00+02:00','2026-03-29T04:15:00+03:00',False),
+    ('2026-11-23T23:30:00+02:00','2026-11-24T00:30:00+02:00',True)]:
+   with self.subTest(current=current):
+    self.assertEqual(sync.due({'last_success_at':last},datetime.fromisoformat(current)),expected)
+ def test_hourly_failure_backoff_keeps_the_last_successful_read(self):
+  info={'status':'error','last_success_at':'2026-11-23T09:00:00+02:00',
+        'last_finished':'2026-11-23T10:00:00+02:00','retry_after':'2026-11-23T10:30:00+02:00'}
+  sync.save_state(self.root,info)
+  self.assertEqual(sync.state(self.root)['last_success_at'],'2026-11-23T09:00:00+02:00')
+  self.assertFalse(sync.due(info,datetime.fromisoformat('2026-11-23T10:29:59+02:00')))
+  self.assertTrue(sync.due(info,datetime.fromisoformat('2026-11-23T10:30:00+02:00')))
  def test_signed_quote_page_keeps_agreed_prices_and_escapes_customer_data(self):
   data=item();data['detail']['customer_name']='<script>bad()</script>'
   sync.apply_snapshot(self.db,[data]);record=sync.offer_record(self.db,1)

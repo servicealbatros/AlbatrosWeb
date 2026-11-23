@@ -723,6 +723,16 @@ def dsm_booking_reconciliation_status(request: Request):
     return {**state(DATA_DIR), 'interval_hours': 2}
 
 
+@app.get('/api/dashboard/master/requests/{request_id}/dsm-acceptance-evidence')
+async def dsm_acceptance_evidence(request_id: int, request: Request):
+    _master_access(request)
+    from dsm_acceptance_evidence import inspect
+    try:
+        return await inspect(DB_PATH, request_id)
+    except Exception:
+        raise HTTPException(502, 'Dovezile de acceptare DSM nu au putut fi citite.') from None
+
+
 @app.post('/api/dashboard/master/dsm-booking-reconciliation')
 async def reconcile_dsm_bookings(request: Request):
     _master_access(request)
@@ -8428,6 +8438,21 @@ async def scheduler_import_dsm_week(
 ):
     _require_local_vehicle_action(request, human_action, "import-dsm-schedule")
     return await _run_periodic_dsm_import()
+
+
+@app.post('/api/scheduler/dsm/signed-offers/refresh')
+async def scheduler_refresh_signed_offers(request: Request):
+    _require_local_vehicle_action(request, request.headers.get('X-Human-Action'), 'refresh-signed-dsm-offers')
+    from dsm_accepted_offers import synchronize
+    result = await synchronize(DB_PATH, DATA_DIR)
+    counts = result.get('result') or {}
+    waiting = [r for r in scheduler_accepted_requests(DB_PATH) if r.get('source') == 'dsm_accepted_offer']
+    return dict(ok=result.get('ok', False), status=result.get('status'),
+                imported=counts.get('imported', 0), updated=counts.get('updated', 0),
+                waiting=len(waiting), ready=sum(r.get('offer_validity') == 'valid' for r in waiting),
+                missing_acceptance_date=sum(r.get('offer_validity') == 'unknown' for r in waiting),
+                message='Sincronizarea ofertelor semnate este în curs.' if result.get('status') == 'running'
+                        else '' if result.get('ok') else 'Nu am putut verifica toate ofertele semnate în DSM.')
 
 
 _dsm_week_import_lock = asyncio.Lock()

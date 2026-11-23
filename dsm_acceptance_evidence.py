@@ -21,7 +21,7 @@ async def lookup_registration(registration, appointment_id=None):
             raise ValueError('Programarea nu corespunde înmatriculării cerute.')
     refs = await _search_transactions(registration)
     ids = {str(r.get('transaction_id') or '') for r in refs
-           if str(r.get('transaction_type')) == '1'}
+           if str(r.get('transaction_type')) in {'1', '2'}}
     if appointment and str(appointment.get('estimateType')) in {'1', '2'}:
         ids.add(str(appointment.get('estimateId') or ''))
     ids.discard('')
@@ -30,15 +30,23 @@ async def lookup_registration(registration, appointment_id=None):
     payloads = await read_offer_details(sorted(ids)) if ids else {}
     order_id = str((appointment or {}).get('estimateId') or '')
     linked_order = (payloads.get(order_id) or {}).get('transaction') or {}
-    offers = []
+    offers, orders = [], []
     vehicle_ids = set()
     for ident, payload in payloads.items():
         h = payload.get('transaction') or {}
-        if str(h.get('transaction_head__type')) != '1' or plate(h.get('car_auto_number')) != registration:
+        if str(h.get('transaction_head__type')) not in {'1', '2'} or plate(h.get('car_auto_number')) != registration:
             continue
         if appointment and str(h.get('car_id')) != str(appointment.get('carId')):
             continue
         vehicle_ids.add((str(h.get('car_body_series') or ''), str(h.get('car_id') or '')))
+        if str(h.get('transaction_head__type')) == '2':
+            signature = signature_status(payload)
+            orders.append(dict(order_id=ident, order_code=h.get('transaction_head__code'),
+                document_status=h.get('transaction_head__status'), signature=signature,
+                signed=signature in {'signed', 'complete', 'completed'},
+                parent_type=h.get('parent_transaction_type'), parent_code=h.get('parent_transaction_code'),
+                linked_to_appointment=bool(appointment and str(appointment.get('estimateType')) == '2' and ident == order_id)))
+            continue
         related = bool(appointment and (
             (str(appointment.get('estimateType')) == '1' and ident == order_id)
             or any(str(c.get('transaction_id')) == order_id and str(c.get('transaction_head__type')) == '2'
@@ -51,7 +59,7 @@ async def lookup_registration(registration, appointment_id=None):
             document_status=h.get('transaction_head__status'), signature=signature,
             signed=signature in {'signed', 'complete', 'completed'},
             accepted_at=acceptance_datetime(payload), linked_to_appointment=related))
-    return dict(registration=registration, offers=offers, ambiguous_vehicle=len(vehicle_ids) > 1,
+    return dict(registration=registration, offers=offers, orders=orders, ambiguous_vehicle=len(vehicle_ids) > 1,
                 appointment_id=appointment.get('code') if appointment else None)
 
 

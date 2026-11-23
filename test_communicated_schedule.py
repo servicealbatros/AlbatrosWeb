@@ -84,13 +84,14 @@ class CommunicatedTests(unittest.TestCase):
         with closing(sqlite3.connect(self.db)) as conn:
             conn.execute("UPDATE scheduler_appointments SET source='dsm_schedule_readonly' WHERE id=?", (self.booking['id'],))
             conn.commit()
-        row = dict(dsm_appointment_id='APP-2184', mechanic='Fixture mechanic', registration='B100TST',
+        row = dict(dsm_appointment_id='APP-2184', dsm_native_appointment_id='20391', mechanic='Fixture mechanic', registration='B100TST',
                    start_at='2026-11-18T10:00', end_at='2026-11-18T11:00', operations='diagnoza noua')
         sync_local_schedule(self.db, [row])
         current = self.current()
         self.assertEqual((current['technician_id'], current['start_at'], current['operations']),
                          (self.mihai, original['start_at'], original['operations']))
         self.assertEqual(current['dsm_original_start_at'], '2026-11-18T10:00')
+        self.assertEqual(current['dsm_native_appointment_id'], '20391')
         with closing(sqlite3.connect(self.db)) as conn:
             conn.execute("UPDATE scheduler_appointments SET source='local_schedule_override' WHERE id=?", (self.booking['id'],))
             conn.execute('DELETE FROM scheduler_communicated_appointments')

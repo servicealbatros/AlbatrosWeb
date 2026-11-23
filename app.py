@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 from contextlib import closing
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -4011,7 +4011,16 @@ def canonical_requests():
 
 
 async def _verify_dsm_booking_approval(request_row: dict) -> bool:
-    from dsm_accepted_offers import has_signed_dashboard_offer
+    from dsm_accepted_offers import has_signed_dashboard_offer, offer_record
+    imported = offer_record(DB_PATH, request_row['id']) if request_row.get('source') == 'dsm_accepted_offer' else None
+    if imported and json.loads(imported['payload_json']).get('order_ids'):
+        from dsm_offer_lifecycle import refresh_order_approval
+        try:
+            return bool(await asyncio.wait_for(refresh_order_approval(DB_PATH, request_row, imported), timeout=30))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception:
+            raise HTTPException(502, 'Nu pot reverifica acum devizul în DSM.') from None
     if has_signed_dashboard_offer(DB_PATH, request_row):
         return True
     from dsm_booking_approval import refresh_approval
@@ -8459,8 +8468,8 @@ async def scheduler_refresh_signed_offers(request: Request):
     waiting = [r for r in scheduler_accepted_requests(DB_PATH) if r.get('source') == 'dsm_accepted_offer']
     return dict(ok=result.get('ok', False), status=result.get('status'),
                 imported=counts.get('imported', 0), updated=counts.get('updated', 0),
-                waiting=len(waiting), ready=sum(r.get('offer_validity') == 'valid' for r in waiting),
-                missing_acceptance_date=sum(r.get('offer_validity') == 'unknown' for r in waiting),
+                waiting=len(waiting), ready=sum(bool(r.get('offer_validity') == 'valid' or (r.get('dsm_has_open_order') and r.get('dsm_signature_confirmed'))) for r in waiting),
+                missing_acceptance_date=sum(r.get('offer_validity') == 'unknown' and not r.get('dsm_has_open_order') for r in waiting),
                 message='Sincronizarea ofertelor semnate este în curs.' if result.get('status') == 'running'
                         else '' if result.get('ok') else 'Nu am putut verifica toate ofertele semnate în DSM.')
 
@@ -9857,7 +9866,7 @@ function render() {
         });
         tr.innerHTML = `
             <td class="id">#${esc(id)}${row.dsm_offer_code ? `<br><small>DSM · ${esc(row.dsm_offer_code)}</small>` : ''}${row.replaces_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replaces_request_id)}">Completare #${esc(row.replaces_request_id)}</a>` : ''}${row.replacement_request_id ? `<br><a href="/oferta/${encodeURIComponent(row.replacement_request_id)}">Înlocuită de #${esc(row.replacement_request_id)}</a>` : ''}<br><button type="button" style="margin-top:6px;padding:5px 8px;font-size:12px" onclick="event.stopPropagation();archiveDashboardRequest('${esc(id)}',this)">Arhivează</button></td>
-            <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}${row.source === 'dsm_accepted_offer' ? `<br><strong style="color:${row.offer_validity === 'expired' ? '#b91c1c' : row.offer_validity === 'valid' ? '#166534' : '#92400e'}">${esc(row.offer_validity_message || 'Valabilitate de verificat')}</strong>` : ''}</td>
+            <td style="max-width:200px">${row.source === 'dsm_accepted_offer' && row.accepted_at ? '<small>Acceptată la</small><br>' : ''}${esc(formatRequestDate(row))}${row.dsm_lifecycle_label ? `<br><strong>${esc(row.dsm_lifecycle_label)}</strong>` : ''}${row.source === 'dsm_accepted_offer' ? `<br><strong style="color:${row.offer_validity === 'expired' ? '#b91c1c' : row.offer_validity === 'valid' ? '#166534' : '#92400e'}">${esc(row.offer_validity_message || 'Valabilitate de verificat')}</strong>` : ''}</td>
             <td>${esc(customer || "—")}</td>
             <td>${esc(phone || "—")}</td>
             <td>${esc(vehicle || "—")}</td>

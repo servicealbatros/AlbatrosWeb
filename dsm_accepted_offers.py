@@ -83,6 +83,8 @@ def require_valid_for_booking(db_path, request_row, now=None):
     record = offer_record(db_path, request_row['id'])
     if not has_signed_dashboard_offer(db_path, request_row):
         raise ValueError('Semnătura ofertei DSM nu mai este confirmată pentru programare.')
+    if json.loads(record['payload_json']).get('order_ids'):
+        raise ValueError('Devizul deschis trebuie reverificat în DSM înainte de programare.')
     validity = offer_validity(record, now)
     if validity['offer_validity'] != 'valid':
         raise ValueError(validity['offer_validity_message'])
@@ -92,9 +94,24 @@ def dashboard_dates(record):
     """Keep the technical import time separate from the business event."""
     detail = json.loads(record['payload_json']) if record else {}
     accepted = detail.get('accepted_at') or ''
-    return {'accepted_at': accepted, 'request_datetime': accepted,
+    signature = record.get('signature_state', '') if record else ''
+    open_orders = detail.get('order_ids') or []
+    projected = {'accepted_at': accepted, 'request_datetime': accepted,
             'request_date_kind': 'accepted',
-            'request_date_missing': not bool(accepted), **offer_validity(record)}
+            'request_date_missing': not bool(accepted), **offer_validity(record),
+            'dsm_signature_confirmed': signature in {'signed','complete','completed'},
+            'dsm_queue_stage': detail.get('queue_stage') or '',
+            'dsm_order_ids': open_orders, 'dsm_order_codes': detail.get('order_codes') or [],
+            'dsm_has_open_order': bool(open_orders and detail.get('queue_stage') == 'signed_open_order')}
+    if projected['dsm_has_open_order']:
+        projected['offer_validity_message'] = 'Deviz deschis în DSM; acceptul și lucrarea vor fi reverificate înainte de programare.'
+    projected['dsm_lifecycle_label'] = (
+        'Semnată · deviz deschis: ' + ', '.join(projected['dsm_order_codes']) if projected['dsm_has_open_order'] and projected['dsm_signature_confirmed']
+        else 'Semnată în DSM' if projected['dsm_signature_confirmed']
+        else 'Deviz deschis · semnătură de verificat' if open_orders
+        else 'Ofertă trimisă · așteaptă semnătura' if detail.get('queue_stage') == 'sent_offer'
+        else 'Semnătură neconfirmată în DSM')
+    return projected
 
 
 def signature_status(payload):
@@ -158,57 +175,12 @@ def linked_ids(db_path):
 
 
 async def read_snapshot(previous_ids):
-    from dsm_open_orders_readonly import _listing_page
-    from dsm_history_import import READ_DETAIL_JS
-    refs, seen, offset = {}, set(), 0
-    while True:
-        page = await _listing_page(offset)
-        rows = page.get('rows')
-        if not isinstance(rows, list):
-            raise ValueError('Lista ofertelor DSM este invalidă.')
-        for row in rows:
-            ident = str(row.get('transaction_id') or row.get('id') or '')
-            if not ident.isdigit() or ident in seen:
-                raise ValueError('Paginarea DSM este incompletă sau repetată.')
-            seen.add(ident)
-            if str(row.get('transaction_type') or row.get('transaction_head__type')) == '1' and row.get('status') == 'working':
-                refs[ident] = row
-        offset += len(rows)
-        if len(rows) < int(page.get('limit') or 100):
-            break
-        if offset > 100000:
-            raise ValueError('Lista DSM depășește limita de siguranță; importul nu este aplicat.')
-    ids = list(dict.fromkeys([*refs, *previous_ids]))
-    snapshot = []
-    for start in range(0, len(ids), 6):
-        chunk = ids[start:start+6]
-        # Read only the existing transaction endpoint; never accept/sign in DSM.
-        expression = r'''(async()=>{return JSON.stringify(await Promise.all(__IDS__.map(async id=>{
-          const r=await fetch('/special/transaction/get_transaction/'+id,{credentials:'same-origin',signal:AbortSignal.timeout(12000)});
-          if(!r.ok||r.url.includes('/login'))throw Error('Citire DSM incompletă sau autentificare necesară');
-          const p=await r.json();if(String(p.transaction?.transaction_head__id)!==String(id))throw Error('ID ofertă DSM neconcordant');
-          return {transaction:p.transaction,sms_or_qrcode_sended:p.sms_or_qrcode_sended,transaction_head_childs:p.transaction_head_childs};
-        })))} )()'''.replace('__IDS__', json.dumps(chunk))
-        values = await _evaluate(expression)
-        if not isinstance(values, list) or len(values) != len(chunk):
-            raise ValueError('O parte dintre ofertele DSM nu a putut fi citită.')
-        for value in values:
-            ident = str(value['transaction']['transaction_head__id'])
-            reason = eligibility(value)
-            detail = None
-            if reason == 'accepted':
-                details = await _evaluate('('+READ_DETAIL_JS+')('+json.dumps([ident])+')')
-                if len(details) != 1 or not details[0].get('detail'):
-                    raise ValueError('Datele ofertei semnate sunt incomplete; importul este păstrat.')
-                detail = details[0]['detail']
-                detail['accepted_at'] = acceptance_datetime(value)
-            snapshot.append({'id': ident, 'reason': reason, 'signature': signature_status(value),
-                             'code': value['transaction'].get('transaction_head__code') or '', 'detail': detail})
-    return snapshot
+    from dsm_offer_lifecycle import read_snapshot as read_lifecycle
+    return await read_lifecycle(previous_ids)
 
 
-def apply_snapshot(db_path, snapshot):
-    counts = {'imported': 0, 'updated': 0, 'accepted': 0, 'unsigned': 0, 'scheduled': 0, 'closed': 0, 'request_ids': []}
+def apply_snapshot(db_path, snapshot, *, include_unconfirmed=False):
+    counts = {'imported': 0, 'updated': 0, 'accepted': 0, 'offered': 0, 'converted_waiting': 0, 'unsigned': 0, 'scheduled': 0, 'closed': 0, 'request_ids': []}
     with connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         init_links(conn)
@@ -218,8 +190,33 @@ def apply_snapshot(db_path, snapshot):
             if not str(ident).isdigit():
                 raise ValueError('ID DSM invalid.')
             existing = conn.execute('SELECT * FROM dsm_accepted_offer_links WHERE transaction_id=?', (ident,)).fetchone()
+            # If DSM exposes the parent quote later, retain the already imported work-order card.
+            detail = item.get('detail') or {}
+            order_ids = detail.get('order_ids') or []
+            if not existing and detail.get('document_type') == '1' and len(order_ids) == 1:
+                alias = conn.execute('SELECT * FROM dsm_accepted_offer_links WHERE transaction_id=?', (str(order_ids[0]),)).fetchone()
+                if (alias and json.loads(alias['payload_json']).get('document_type') == '2'
+                        and json.loads(alias['payload_json']).get('vin') == detail.get('vin')):
+                    conn.execute('UPDATE dsm_accepted_offer_links SET transaction_id=? WHERE transaction_id=?', (ident, alias['transaction_id']))
+                    existing = conn.execute('SELECT * FROM dsm_accepted_offer_links WHERE transaction_id=?', (ident,)).fetchone()
             current = conn.execute('SELECT * FROM service_requests WHERE id=?', (existing['request_id'],)).fetchone() if existing else None
-            if reason != 'accepted':
+            item = dict(item)
+            if reason == 'accepted_open_order':
+                detail = dict(item['detail'] or {})
+                signed = item['signature'] in {'signed','complete','completed'}
+                if (not signed and detail.get('allow_retained_signature') and existing and current
+                        and existing['signature_state'] in {'signed','complete','completed'}
+                        and str(current['vin'] or '').upper() == str(detail.get('vin') or '').upper()):
+                    item['signature'] = existing['signature_state']
+                    detail['signature_basis'] = 'previously_verified_offer_and_exact_open_order'
+                    signed = True
+                reason = 'accepted' if signed else 'offered' if include_unconfirmed or item['signature'] in {'sent','delivered','pending_signature'} else 'unsigned'
+                if signed:
+                    counts['converted_waiting'] += 1
+                else:
+                    detail['queue_stage'] = 'open_order_review'
+                item['detail'] = detail
+            if reason not in {'accepted','offered'}:
                 key = reason if reason in counts else 'closed'
                 counts[key] += 1
                 if current:
@@ -232,7 +229,7 @@ def apply_snapshot(db_path, snapshot):
             detail = item['detail']
             if not detail or str(detail.get('transaction_id')) != str(ident):
                 raise ValueError('Date DSM neconcordante.')
-            counts['accepted'] += 1
+            counts['accepted' if reason == 'accepted' else 'offered'] += 1
             operations = [str(r.get('name') or '') for r in detail.get('labors') or [] if r.get('name')]
             symptom = detail.get('description') or '; '.join(operations) or ('Oferta semnată ' + item['code'])
             from scheduler import department_for_operations
@@ -246,7 +243,7 @@ def apply_snapshot(db_path, snapshot):
                       'labour_operation': '; '.join(operations)}
             if not current:
                 columns = {**fields, 'session_id': 'dsm-offer:'+str(ident), 'source': 'dsm_accepted_offer',
-                           'conversation_id': 'dsm-offer:'+str(ident), 'status': 'acceptat',
+                           'conversation_id': 'dsm-offer:'+str(ident), 'status': 'acceptat' if reason == 'accepted' else 'ofertat',
                            'category': category, 'priority': 'normal', 'request_type': 'SERVICE', 'parts_needed': 1, 'labour_needed': 1}
                 cursor = conn.execute('INSERT INTO service_requests ('+','.join(columns)+') VALUES ('+','.join('?' for _ in columns)+')', list(columns.values()))
                 request_id = cursor.lastrowid
@@ -256,11 +253,12 @@ def apply_snapshot(db_path, snapshot):
                 # Local cancellations, resolved requests and archive membership survive daily sync.
                 if current['status'] in {'acceptat', 'ofertat'}:
                     conn.execute('UPDATE service_requests SET '+','.join(k+'=?' for k in fields)+' WHERE id=?', [*fields.values(), request_id])
-                    if current['status'] == 'ofertat' and existing['eligibility'] != 'accepted':
-                        conn.execute("UPDATE service_requests SET status='acceptat' WHERE id=?", (request_id,))
+                    if reason == 'offered' or (current['status'] == 'ofertat' and existing['eligibility'] != 'accepted'):
+                        conn.execute('UPDATE service_requests SET status=? WHERE id=?',
+                                     ('acceptat' if reason == 'accepted' else 'ofertat', request_id))
                 counts['updated'] += 1
             appointment = conn.execute("SELECT id FROM scheduler_appointments WHERE status!='anulat' AND (request_id=? OR (request_id IS NULL AND job_number=?)) LIMIT 1", (request_id, item['code'])).fetchone()
-            if appointment:
+            if reason == 'accepted' and appointment and not detail.get('order_ids'):
                 conn.execute('UPDATE scheduler_appointments SET request_id=? WHERE id=? AND request_id IS NULL', (request_id, appointment['id']))
                 conn.execute("UPDATE service_requests SET status='programat' WHERE id=? AND status NOT IN ('anulat','rezolvat','finalizat')", (request_id,))
             conn.execute('''INSERT INTO dsm_accepted_offer_links VALUES (?,?,?,?,?,?,?)
@@ -341,7 +339,8 @@ async def synchronize(db_path, root):
         save_state(root, info)
         try:
             snapshot = await read_snapshot(linked_ids(db_path))
-            result = await asyncio.to_thread(apply_snapshot, db_path, snapshot)
+            result = await asyncio.to_thread(apply_snapshot, db_path, snapshot,
+                include_unconfirmed=bool(info.get('include_open_orders_for_review', False)))
             from dsm_billing_sync import reconcile_billed_requests
             result['billing'] = await reconcile_billed_requests(db_path)
             info.update(status='success', last_success_day=now.date().isoformat(), last_finished=datetime.now(ROMANIA).isoformat(), result=result)
@@ -427,6 +426,9 @@ def reconcile_existing_bookings(db_path, request_id=None, now=None):
             if row['signature_state'] not in {'signed','complete','completed'} or row['eligibility'] not in {'accepted','scheduled'}:
                 continue
             detail = json.loads(row['payload_json'])
+            if detail.get('order_ids'):
+                # Converted orders use fresh native relationships, never a plate-only calendar match.
+                continue
             vin = str(row['vin'] or '').strip().upper()
             if not re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', vin) or str(detail.get('vin') or '').strip().upper() != vin:
                 continue
@@ -529,9 +531,9 @@ async def rebuild_signed_offers(db_path, root, **options):
 
 def offer_html(record, request_row):
     detail = json.loads(record['payload_json'])
-    validity = offer_validity(record)
+    validity = dashboard_dates(record)
     escape = lambda x: html.escape(str('—' if x is None or x == '' else x))
-    signed_label = 'Ofertă semnată în DSM' if record['signature_state'] in {'signed', 'complete', 'completed'} else 'Semnătura ofertei nu mai este confirmată în DSM'
+    signed_label = validity['dsm_lifecycle_label']
     rows = []
     for kind, label in (('parts', 'Piesă'), ('labors', 'Manoperă'), ('other_rows', 'Altele')):
         for row in detail.get(kind) or []:

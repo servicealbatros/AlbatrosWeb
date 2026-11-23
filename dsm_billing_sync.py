@@ -32,9 +32,11 @@ def bindings(db_path):
                     continue
                 key = (request['id'], offer_id)
                 binding = result.setdefault(key, dict(request_id=request['id'], offer_id=offer_id, vin=vin,
-                                                       offer_code='', order_id=''))
+                                                       offer_code='', order_id='', document_type='1', order_ids=[]))
                 binding['offer_code'] = payload.get('document_code') or payload.get('offer_code') or binding['offer_code']
                 binding['order_id'] = str(payload.get('order_id') or binding['order_id'])
+                binding['document_type'] = str(payload.get('document_type') or binding['document_type'])
+                binding['order_ids'] = payload.get('order_ids') or binding['order_ids']
         # Conflicting links are never settled by choosing the first offer.
         return [r for r in result.values() if sum(k[0] == r['request_id'] for k in result) == 1]
 
@@ -68,7 +70,7 @@ def billed_evidence(binding, details):
     head = root.get('transaction') or {}
     code = str(head.get('transaction_head__code') or '')
     if (str(head.get('transaction_head__id')) != binding['offer_id']
-            or str(head.get('transaction_head__type')) != '1'
+            or str(head.get('transaction_head__type')) != binding.get('document_type', '1')
             or head.get('car_body_series') != binding['vin']
             or head.get('transaction_head__status') in {'canceled','cancelled'}
             or (binding['offer_code'] and code != binding['offer_code'])):
@@ -78,6 +80,9 @@ def billed_evidence(binding, details):
                  and str(c.get('transaction_status')) not in {'4','canceled','cancelled'}}
     if binding['order_id']:
         order_ids.add(binding['order_id'])
+    order_ids.update(str(i) for i in binding.get('order_ids', []))
+    if binding.get('document_type') == '2':
+        order_ids = {binding['offer_id']}
     if not order_ids:
         return None
     order_codes = []
@@ -89,8 +94,9 @@ def billed_evidence(binding, details):
                 or str(order.get('transaction_head__type')) != '2'
                 or order.get('transaction_head__status') not in {'billed', 'completed', 'closed'}
                 or order.get('car_body_series') != binding['vin']
-                or order.get('parent_transaction_code') != code
-                or str(order.get('parent_transaction_type')) != '1'):
+                or (binding.get('document_type', '1') == '1' and
+                    (order.get('parent_transaction_code') != code
+                     or str(order.get('parent_transaction_type')) != '1'))):
             return None
         order_codes.append(str(order.get('transaction_head__code') or ''))
         order_statuses[ident] = order['transaction_head__status']
@@ -109,6 +115,8 @@ async def reconcile_billed_requests(db_path):
                  if str(c.get('transaction_head__type')) == '2'
                  and str(c.get('transaction_status')) not in {'4','canceled','cancelled'}}
     order_ids.update(r['order_id'] for r in linked if r['order_id'])
+    order_ids.update(str(i) for r in linked for i in r.get('order_ids', []))
+    order_ids -= details.keys()
     details.update(await _read_details(order_ids))
     evidence = {r['request_id']: billed_evidence(r, details) for r in linked}
     resolved = []

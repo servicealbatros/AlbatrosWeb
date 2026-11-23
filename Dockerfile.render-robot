@@ -16,7 +16,7 @@ COPY scripts/restore_cloud_migration.py ./scripts/restore_cloud_migration.py
 COPY scripts/dsm_session_keeper.py ./scripts/dsm_session_keeper.py
 RUN python -m unittest test_pre_arrival_policy.py test_dsm_gdpr.py
 RUN python -m unittest test_dsm_advisor_order.py
-RUN python -m unittest test_dsm_booking_reconciliation.py test_communicated_schedule.py test_dsm_acceptance_evidence.py
+RUN python -m unittest test_dsm_booking_reconciliation.py test_dsm_offer_lifecycle.py test_communicated_schedule.py test_dsm_acceptance_evidence.py
 RUN python -m unittest test_offer_pricing.py
 RUN python -m unittest test_brake_scope.py test_whatsapp_intake_resume.py test_brake_shared_axles.py
 RUN python -m unittest test_labour_independent.py test_labour_fallback_runner.py

@@ -41,9 +41,9 @@ class BookingReconciliationTests(unittest.IsolatedAsyncioTestCase):
             canCancel=True)
         with connection(self.db) as conn:
             conn.execute('''INSERT INTO scheduler_appointments
-                (registration,start_at,end_at,job_number,operations,source,dsm_appointment_id,estimated_hours)
+                (registration,start_at,end_at,job_number,operations,source,dsm_appointment_id,estimated_hours,dsm_transaction_type,dsm_transaction_id)
                 VALUES ('B100TST','2026-10-01T08:30','2026-10-01T10:30','APP-1952',
-                        'OFERTA 1-PLACUTE','dsm_schedule_readonly','APP-1952',2)''')
+                        'OFERTA 1-PLACUTE','dsm_schedule_readonly','APP-1952',2,'3','1952')''')
 
     async def run_sync(self, apply=True):
         with patch.object(sync, 'read_offer_details', AsyncMock(return_value={'1': deepcopy(self.root)})), \
@@ -120,9 +120,9 @@ class BookingReconciliationTests(unittest.IsolatedAsyncioTestCase):
         with connection(self.db) as conn:
             conn.execute('UPDATE scheduler_appointments SET request_id=NULL')
             conn.execute('''INSERT INTO scheduler_appointments
-                (registration,start_at,end_at,operations,source,dsm_appointment_id,estimated_hours)
+                (registration,start_at,end_at,operations,source,dsm_appointment_id,estimated_hours,dsm_transaction_type,dsm_transaction_id)
                 VALUES ('B100TST','2026-10-02T08:30','2026-10-02T10:30','OFERTA 1',
-                        'dsm_schedule_readonly','APP-1953',2)''')
+                        'dsm_schedule_readonly','APP-1953',2,'3','1953')''')
         async def read(ident):
             return {**self.detail, 'code': 'APP-' + ident}
         with patch.object(sync, 'read_offer_details', AsyncMock(return_value={'1': self.root})), \

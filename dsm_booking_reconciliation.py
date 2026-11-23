@@ -24,6 +24,18 @@ def offer_number(value):
     return match[1] if match else ''
 
 
+def reference_codes(value):
+    return {kind+'-'+number for kind,number in re.findall(
+        r'(?<![A-Z0-9])(OFERTA|PHDEV|ALB)[\s-]+(\d+)(?![A-Z0-9])', str(value or '').upper())}
+
+
+def native_id(appointment):
+    value = str(appointment.get('dsm_native_appointment_id') or '')
+    if not value and str(appointment.get('dsm_transaction_type')) == '3':
+        value = str(appointment.get('dsm_transaction_id') or '')
+    return value if value.isdigit() else ''
+
+
 def candidates(db_path):
     with connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -39,11 +51,14 @@ def candidates(db_path):
         for row in rows:
             row = dict(row)
             payload = json.loads(row.pop('payload_json'))
+            row.update(document_type=str(payload.get('document_type') or '1'),
+                       order_ids=payload.get('order_ids') or [], order_codes=payload.get('order_codes') or [],
+                       signature_basis=payload.get('signature_basis') or '')
             if (row['signature_state'] in {'signed', 'complete', 'completed'}
                     and str(row['transaction_id']).isdigit()
                     and re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', str(row['vin'] or '').upper())
                     and str(payload.get('vin') or '').upper() == str(row['vin']).upper()
-                    and plate(row['registration']) and offer_number(row['document_code'])):
+                    and plate(row['registration']) and reference_codes(row['document_code'])):
                 result.append(row)
         if len(result) > 256:
             raise ValueError('Prea multe oferte pentru o singură verificare DSM.')
@@ -52,9 +67,12 @@ def candidates(db_path):
         return result, appointments
 
 
-def appointment_ids(row, appointments, root):
+def appointment_ids(row, appointments, root, related=None):
     """Only exact quote references/relationships qualify; a plate alone never does."""
     result = set()
+    for key, payload in (related or {}).items():
+        if str(key) in {str(i) for i in row.get('order_ids', [])} and str(key) != row['transaction_id']:
+            result.update(appointment_ids(row, [], payload))
     for child in root.get('transaction_head_childs') or []:
         if (str(child.get('transaction_head__type')) == '3'
                 and str(child.get('transaction_status')) not in {'4', 'canceled', 'cancelled'}):
@@ -64,24 +82,26 @@ def appointment_ids(row, appointments, root):
     head = root.get('transaction') or {}
     if (str(head.get('parent_transaction_type')) == '3'
             and str(head.get('parent_transaction_status')) not in {'4', 'canceled', 'cancelled'}):
-        ident = str(head.get('parent_transaction_id') or '')
+        ident = str(head.get('parent_transaction_id') or head.get('transaction_head__parent') or '')
         if ident.isdigit():
             result.add(ident)
     for appointment in appointments:
-        if (appointment.get('source') not in {'dsm_schedule_readonly', 'mechanic_takeover'}
+        if (appointment.get('source') not in {'dsm_schedule_readonly', 'mechanic_takeover', 'local_schedule_override'}
                 or appointment.get('request_id') not in (None, row['id'])
                 or plate(appointment.get('registration')) != plate(row['registration'])):
             continue
-        codes = set(re.findall(r'(?<![A-Z0-9])OFERTA[\s-]+(\d+)(?![A-Z0-9])',
-                               (str(appointment.get('job_number') or '') + ' ' + str(appointment.get('operations') or '')).upper()))
+        codes = reference_codes(str(appointment.get('job_number') or '') + ' ' + str(appointment.get('operations') or ''))
+        allowed_codes = reference_codes(row['document_code']+' '+' '.join(row.get('order_codes') or []))
         exact_id = (str(appointment.get('dsm_transaction_type')) == '1'
                     and str(appointment.get('dsm_transaction_id')) == row['transaction_id'])
-        if not exact_id and codes != {offer_number(row['document_code'])}:
+        exact_id = exact_id or (str(appointment.get('dsm_transaction_type')) == '2'
+                               and str(appointment.get('dsm_transaction_id')) in row.get('order_ids', []))
+        if not exact_id and not (codes and codes.issubset(allowed_codes)):
             continue
-        match = re.fullmatch(r'(?:APP-)?(\d+)', str(appointment['dsm_appointment_id']))
-        if match:
-            result.add(match[1])
-    claimed = {str(a['dsm_appointment_id']).removeprefix('APP-') for a in appointments
+        ident = native_id(appointment)
+        if ident:
+            result.add(ident)
+    claimed = {native_id(a) for a in appointments
                if a.get('request_id') not in (None, row['id'])}
     return result - claimed
 
@@ -127,15 +147,30 @@ async def read_appointment(ident):
     return result['detail']
 
 
-def verified_booking(row, root, ident, detail):
+def verified_booking(row, root, ident, detail, related=None):
     head = root.get('transaction') or {}
     if (str(head.get('transaction_head__id')) != row['transaction_id']
-            or str(head.get('transaction_head__type')) != '1'
+            or str(head.get('transaction_head__type')) != row.get('document_type', '1')
             or str(head.get('transaction_head__status') or '').lower() in {'canceled', 'cancelled', '4'}
             or str(head.get('car_body_series') or '').upper() != str(row['vin']).upper()
             or plate(head.get('car_auto_number')) != plate(row['registration'])
-            or offer_number(head.get('transaction_head__code')) != offer_number(row['document_code'])
-            or signature_status(root) not in {'signed', 'complete', 'completed'}):
+            or head.get('transaction_head__code') != row['document_code']):
+        return None
+    signed = signature_status(root) in {'signed', 'complete', 'completed'}
+    orders = row.get('order_ids') or []
+    if orders:
+        from dsm_offer_lifecycle import open_order, order_belongs_to_quote, same_vehicle
+        if len(orders) != 1:
+            return None
+        order = (related or {}).get(str(orders[0])) or {}
+        if not open_order(order) or not same_vehicle(root, order):
+            return None
+        if str(orders[0]) != row['transaction_id'] and not order_belongs_to_quote(order, root):
+            return None
+        signed = signed or signature_status(order) in {'signed','complete','completed'}
+        signed = signed or (row.get('signature_basis') == 'previously_verified_offer_and_exact_open_order'
+                            and not signature_status(root) and not signature_status(order))
+    if not signed:
         return None
     if (plate(detail.get('carNumber')) != plate(row['registration'])
             or not str(head.get('car_id') or '').isdigit()
@@ -143,7 +178,7 @@ def verified_booking(row, root, ident, detail):
             or str(detail.get('status') or detail.get('appointment_status') or '').lower() in
                {'4', 'canceled', 'cancelled', 'anulat', 'deleted'}
             or detail.get('isCanceled') is True or detail.get('isDeleted') is True
-            or str(detail.get('code') or '') != 'APP-' + ident):
+            or not re.fullmatch(r'APP-\d+', str(detail.get('code') or ''))):
         return None
     active = (detail.get('canCancel') is True or detail.get('canTransform') is True
               or str(detail.get('status') or detail.get('appointment_status') or '').lower() in
@@ -159,16 +194,20 @@ def verified_booking(row, root, ident, detail):
             return None
     except (ValueError, TypeError):
         return None
-    live_related = ident in appointment_ids(row, [], root)
-    codes = set(re.findall(r'(?<![A-Z0-9])OFERTA[\s-]+(\d+)(?![A-Z0-9])',
-                           ' '.join(str(detail.get(k) or '') for k in
-                                    ('description', 'services', 'work_summary')).upper()))
+    live_related = ident in appointment_ids(row, [], root, related)
+    codes = reference_codes(' '.join(str(detail.get(k) or '') for k in ('description','services','work_summary')))
+    allowed_codes = reference_codes(row['document_code']+' '+' '.join(row.get('order_codes') or []))
     direct = (str(detail.get('estimateId')) == row['transaction_id']
               and str(detail.get('estimateType')) == '1')
-    if not live_related and not direct and codes != {offer_number(row['document_code'])}:
+    direct = direct or (str(detail.get('estimateType')) == '2' and str(detail.get('estimateId')) in orders)
+    if (str(detail.get('estimateType')) in {'1', '2'} and str(detail.get('estimateId') or '').isdigit()
+            and int(detail['estimateId']) > 0 and not direct):
+        # A stale quote reference in text cannot override another exact native work link.
+        return None
+    if not live_related and not direct and not (codes and codes.issubset(allowed_codes)):
         return None
     return dict(request_id=row['id'], registration=row['registration'], offer_id=row['transaction_id'],
-                offer_code=row['document_code'], dsm_appointment_id='APP-' + ident,
+                offer_code=row['document_code'], dsm_appointment_id=detail['code'], dsm_native_appointment_id=ident,
                 start_at=start.isoformat(), end_at=end.isoformat(),
                 basis='Exact signed DSM offer and vehicle; existing DSM appointment verified')
 
@@ -178,7 +217,8 @@ async def reconcile(db_path, *, apply=False):
         return dict(ok=False, status='running', resolved_request_ids=[])
     async with LOCK:
         rows, appointments = candidates(db_path)
-        roots = await read_offer_details(sorted({r['transaction_id'] for r in rows})) if rows else {}
+        ids = {r['transaction_id'] for r in rows} | {str(ident) for r in rows for ident in r.get('order_ids', [])}
+        roots = await read_offer_details(sorted(ids)) if rows else {}
         proofs, pending, cache, searches = [], [], {}, {}
         # No local changes until the complete read succeeds.
         for row in rows:
@@ -187,15 +227,21 @@ async def reconcile(db_path, *, apply=False):
             registration = plate(row['registration'])
             if registration not in searches:
                 searches[registration] = await search_appointments(registration)
-            claimed = {str(a['dsm_appointment_id']).removeprefix('APP-') for a in appointments
+            claimed = {native_id(a) for a in appointments
                        if a.get('request_id') not in (None, row['id'])}
-            ids = (appointment_ids(row, appointments, root) | searches[registration]) - claimed
+            ids = (appointment_ids(row, appointments, root, roots) | searches[registration]) - claimed
             if len(ids) > 100:
                 raise ValueError('Prea multe programări pentru o singură ofertă.')
             for ident in sorted(ids):
                 if ident not in cache:
                     cache[ident] = await read_appointment(ident)
-                proof = verified_booking(row, root, ident, cache[ident])
+                labels = {str(a['dsm_appointment_id']).split('@')[0] for a in appointments if native_id(a) == ident}
+                if labels and labels != {cache[ident].get('code')}:
+                    continue
+                if any(str(a['dsm_appointment_id']).split('@')[0] == cache[ident].get('code')
+                       and a.get('request_id') not in (None, row['id']) for a in appointments):
+                    continue
+                proof = verified_booking(row, root, ident, cache[ident], roots)
                 if proof:
                     matches.append(proof)
             if len(matches) == 1:
@@ -218,7 +264,7 @@ async def reconcile(db_path, *, apply=False):
                     original = next(r for r in rows if r['id'] == proof['request_id'])
                     if row != original:
                         continue
-                    if any(str(a['dsm_appointment_id']).removeprefix('APP-') == proof['dsm_appointment_id'].removeprefix('APP-')
+                    if any(str(a['dsm_appointment_id']).split('@')[0] == proof['dsm_appointment_id']
                            and a.get('request_id') not in (None, row['id']) for a in current_appointments):
                         continue
                     conn.execute('''CREATE TABLE IF NOT EXISTS dsm_booking_reconciliations

@@ -324,6 +324,7 @@ def _appointments_from_snapshot(snapshot: dict, target_date: date) -> list[dict]
         services = [item.strip() for item in str(event.get("services") or "").split(",") if item.strip()]
         appointments.append({
             "dsm_appointment_id": f"{appointment_code}@{target_date.isoformat()}" if multi_day else appointment_code,
+            "dsm_native_appointment_id": str(event.get('id') or ''),
             "job_number": " / ".join(references) or appointment_code,
             "mechanic": re.sub(r"\([^)]*\)", "", mechanic).strip(),
             "registration": str(event.get("registration") or "").strip(),
@@ -531,6 +532,10 @@ def sync_local_schedule(db_path: Path, rows: list[dict]) -> dict:
                 """, values)
                 inserted += 1
         for row in rows:
+            native_id = str(row.get('dsm_native_appointment_id') or '')
+            if native_id.isdigit():
+                conn.execute('UPDATE scheduler_appointments SET dsm_native_appointment_id=? WHERE dsm_appointment_id=?',
+                             (native_id, str(row.get('dsm_appointment_id') or '')))
             ident=str(row.get('source_transaction_id') or '')
             kind=str(row.get('source_transaction_type') or '')
             if ident.isdigit() and kind in {'1','2','3'}:

@@ -8468,6 +8468,7 @@ async def scheduler_refresh_signed_offers(request: Request):
     waiting = [r for r in scheduler_accepted_requests(DB_PATH) if r.get('source') == 'dsm_accepted_offer']
     return dict(ok=result.get('ok', False), status=result.get('status'),
                 imported=counts.get('imported', 0), updated=counts.get('updated', 0),
+                to_review=sum(bool(r.get('dsm_requires_review')) for r in waiting),
                 waiting=len(waiting), ready=sum(bool(r.get('offer_validity') == 'valid' or (r.get('dsm_has_open_order') and r.get('dsm_signature_confirmed'))) for r in waiting),
                 missing_acceptance_date=sum(r.get('offer_validity') == 'unknown' and not r.get('dsm_has_open_order') for r in waiting),
                 message='Sincronizarea ofertelor semnate este în curs.' if result.get('status') == 'running'

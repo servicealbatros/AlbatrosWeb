@@ -731,16 +731,22 @@ def accepted_requests(db_path: Path) -> list[dict]:
         conn.row_factory = sqlite3.Row
         archived = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='request_archive'").fetchone()
         archive_filter = "AND NOT EXISTS (SELECT 1 FROM request_archive ar WHERE ar.request_id=r.id)" if archived else ""
+        review_filter = "0"
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='dsm_accepted_offer_links'").fetchone():
+            review_filter = """LOWER(TRIM(COALESCE(r.status,'')))='ofertat'
+                AND r.source='dsm_accepted_offer' AND EXISTS (
+                  SELECT 1 FROM dsm_accepted_offer_links l WHERE l.request_id=r.id
+                    AND l.eligibility='offered' AND json_extract(l.payload_json,'$.queue_stage')='open_order_review'
+                    AND json_array_length(l.payload_json,'$.order_ids')>0)"""
         rows = conn.execute("""
             SELECT r.* FROM service_requests r
-            WHERE LOWER(TRIM(COALESCE(r.status,''))) = 'acceptat'
+            WHERE (LOWER(TRIM(COALESCE(r.status,''))) = 'acceptat' OR (""" + review_filter + """))
               AND NOT EXISTS (
                 SELECT 1 FROM scheduler_appointments a
                 WHERE a.request_id=r.id AND a.status!='anulat'
               )
             """ + archive_filter + """
             ORDER BY CASE WHEN LOWER(COALESCE(r.priority,''))='urgent' THEN 0 ELSE 1 END,r.id DESC
-            LIMIT 40
         """).fetchall()
         result = [dict(row) for row in rows]
     from dsm_accepted_offers import dashboard_dates, offer_record

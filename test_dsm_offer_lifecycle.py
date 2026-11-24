@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import database
 import dsm_offer_lifecycle as lifecycle
 import dsm_booking_reconciliation as bookings
-from dsm_accepted_offers import apply_snapshot, connection, offer_record, dashboard_dates, require_valid_for_booking
+from dsm_accepted_offers import apply_snapshot, connection, offer_record, dashboard_dates, require_valid_for_booking, state, save_state, synchronize
 from dsm_billing_sync import reconcile_billed_requests
 from scheduler import init_scheduler_db, accepted_requests, request_by_id
 from test_dsm_accepted_offers import item
@@ -77,6 +77,80 @@ class OfferLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted_requests(self.db), [])
         with connection(self.db) as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM service_requests').fetchone()[0], 0)
+
+    def review_item(self):
+        self.quote['sms_or_qrcode_sended'] = {}
+        return self.converted_item()
+
+    def test_review_order_is_visible_without_being_accepted_or_bookable(self):
+        data = self.review_item()
+        ident = apply_snapshot(self.db, [data], include_unconfirmed=True)['request_ids'][0]
+        waiting = accepted_requests(self.db)
+        self.assertEqual(len(waiting), 1)
+        row = waiting[0]
+        self.assertEqual(row['id'], ident)
+        self.assertEqual(row['status'], 'ofertat')
+        self.assertTrue(row['dsm_requires_review'])
+        self.assertTrue(row['dsm_has_open_order'])
+        self.assertFalse(row['dsm_signature_confirmed'])
+        self.assertEqual(row['dsm_lifecycle_label'], 'De verificat · deviz deschis: PHDEV-10')
+        with self.assertRaises(ValueError):
+            require_valid_for_booking(self.db, row)
+        apply_snapshot(self.db, [data], include_unconfirmed=True)
+        self.assertEqual([r['id'] for r in accepted_requests(self.db)], [ident])
+        self.quote['sms_or_qrcode_sended'] = {'service_offer': 'signed'}
+        apply_snapshot(self.db, [self.converted_item()], include_unconfirmed=True)
+        row = accepted_requests(self.db)[0]
+        self.assertEqual(row['id'], ident)
+        self.assertEqual(row['status'], 'acceptat')
+        self.assertFalse(row['dsm_requires_review'])
+        self.assertTrue(row['dsm_signature_confirmed'])
+
+    def test_closed_cancelled_archived_and_already_booked_review_orders_stay_out(self):
+        from scheduler import cancel_waiting_request
+        data = self.review_item()
+        ident = apply_snapshot(self.db, [data], include_unconfirmed=True)['request_ids'][0]
+        cancel_waiting_request(self.db, ident)
+        apply_snapshot(self.db, [data], include_unconfirmed=True)
+        self.assertEqual(accepted_requests(self.db), [])
+        with connection(self.db) as conn:
+            conn.execute("UPDATE service_requests SET status='ofertat' WHERE id=?", (ident,))
+            conn.execute('CREATE TABLE request_archive (request_id INTEGER PRIMARY KEY)')
+            conn.execute('INSERT INTO request_archive VALUES (?)', (ident,))
+        self.assertEqual(accepted_requests(self.db), [])
+        with connection(self.db) as conn:
+            conn.execute('DELETE FROM request_archive')
+            conn.execute("INSERT INTO scheduler_appointments (request_id,start_at,end_at,estimated_hours,operations) VALUES (?,'2026-11-24T08:30','2026-11-24T09:30',1,'Test work')", (ident,))
+        self.assertEqual(accepted_requests(self.db), [])
+        with connection(self.db) as conn:
+            conn.execute('DELETE FROM scheduler_appointments')
+        for reason in ['closed', 'unsigned']:
+            apply_snapshot(self.db, [{**data, 'reason': reason}], include_unconfirmed=True)
+            self.assertEqual(accepted_requests(self.db), [])
+
+    def test_review_queue_does_not_hide_waiting_work_after_forty_cards(self):
+        data = self.review_item()
+        rows = []
+        for i in range(1,46):
+            row = deepcopy(data)
+            row.update(id=str(i), code='PHDEV-'+str(i))
+            row['detail'].update(transaction_id=str(i), document_code=row['code'], document_type='2', order_ids=[str(i)], order_codes=[row['code']])
+            rows.append(row)
+        ids = apply_snapshot(self.db, rows, include_unconfirmed=True)['request_ids']
+        self.assertEqual({r['id'] for r in accepted_requests(self.db)}, set(ids))
+
+    async def test_hourly_sync_enables_review_orders_and_persists_setting(self):
+        self.assertTrue(state(self.temp.name)['include_open_orders_for_review'])
+        with patch('dsm_accepted_offers.read_snapshot', AsyncMock(return_value=[self.review_item()])), \
+             patch('dsm_billing_sync.reconcile_billed_requests', AsyncMock(return_value={})):
+            result = await synchronize(self.db, self.temp.name)
+        self.assertTrue(result['ok'])
+        self.assertTrue(accepted_requests(self.db)[0]['dsm_requires_review'])
+        info = state(self.temp.name)
+        self.assertEqual(info['interval_hours'], 1)
+        info['include_open_orders_for_review'] = False
+        save_state(self.temp.name, info)
+        self.assertFalse(state(self.temp.name)['include_open_orders_for_review'])
 
     def test_previous_verified_signature_survives_conversion_but_not_explicit_revocation(self):
         ident = apply_snapshot(self.db, [item()])['request_ids'][0]

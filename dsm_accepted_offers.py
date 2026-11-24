@@ -102,11 +102,17 @@ def dashboard_dates(record):
             'dsm_signature_confirmed': signature in {'signed','complete','completed'},
             'dsm_queue_stage': detail.get('queue_stage') or '',
             'dsm_order_ids': open_orders, 'dsm_order_codes': detail.get('order_codes') or [],
-            'dsm_has_open_order': bool(open_orders and detail.get('queue_stage') == 'signed_open_order')}
+            'dsm_has_open_order': bool(open_orders and detail.get('queue_stage') in {'signed_open_order','open_order_review'}
+                                      and record.get('eligibility') in {'accepted','offered','scheduled'}),
+            'dsm_requires_review': bool(open_orders and detail.get('queue_stage') == 'open_order_review'
+                                       and record.get('eligibility') == 'offered')}
     if projected['dsm_has_open_order']:
         projected['offer_validity_message'] = 'Deviz deschis în DSM; acceptul și lucrarea vor fi reverificate înainte de programare.'
+    if projected['dsm_requires_review']:
+        projected['offer_validity_message'] = 'Semnătura nu este confirmată. Verifică acceptul în DSM înainte de programare.'
     projected['dsm_lifecycle_label'] = (
-        'Semnată · deviz deschis: ' + ', '.join(projected['dsm_order_codes']) if projected['dsm_has_open_order'] and projected['dsm_signature_confirmed']
+        'De verificat · deviz deschis: ' + ', '.join(projected['dsm_order_codes']) if projected['dsm_requires_review']
+        else 'Semnată · deviz deschis: ' + ', '.join(projected['dsm_order_codes']) if projected['dsm_has_open_order'] and projected['dsm_signature_confirmed']
         else 'Semnată în DSM' if projected['dsm_signature_confirmed']
         else 'Deviz deschis · semnătură de verificat' if open_orders
         else 'Ofertă trimisă · așteaptă semnătura' if detail.get('queue_stage') == 'sent_offer'
@@ -231,7 +237,7 @@ def apply_snapshot(db_path, snapshot, *, include_unconfirmed=False):
                 raise ValueError('Date DSM neconcordante.')
             counts['accepted' if reason == 'accepted' else 'offered'] += 1
             operations = [str(r.get('name') or '') for r in detail.get('labors') or [] if r.get('name')]
-            symptom = detail.get('description') or '; '.join(operations) or ('Oferta semnată ' + item['code'])
+            symptom = detail.get('description') or '; '.join(operations) or ('Document DSM ' + item['code'])
             from scheduler import department_for_operations
             category = 'Tinichigerie–Vopsitorie' if department_for_operations(symptom) == 'tinichigerie_vopsitorie' else 'Mecanică'
             hours = sum(float(r.get('hours') or 0) for r in detail.get('labors') or [])
@@ -239,7 +245,7 @@ def apply_snapshot(db_path, snapshot, *, include_unconfirmed=False):
                       'registration': detail.get('registration'), 'vin': detail.get('vin'), 'vehicle': detail.get('vehicle'),
                       'mileage': str(detail.get('mileage_km') or ''), 'symptom': symptom,
                       'requested_operations': json.dumps(operations, ensure_ascii=False),
-                      'technical_labour_time': hours or None, 'labour_source': 'DSM — ofertă semnată',
+                      'technical_labour_time': hours or None, 'labour_source': 'DSM — ofertă semnată' if reason == 'accepted' else 'DSM — deviz deschis, accept de verificat',
                       'labour_operation': '; '.join(operations)}
             if not current:
                 columns = {**fields, 'session_id': 'dsm-offer:'+str(ident), 'source': 'dsm_accepted_offer',
@@ -293,6 +299,7 @@ def _utc_time(value):
 
 def _hourly_state(info):
     info = dict(info)
+    info.setdefault('include_open_orders_for_review', True)
     info.pop('daily_time', None)
     info['interval_hours'] = 1
     # Migrate the last successful daily run without reusing a failed finish time.
@@ -547,4 +554,4 @@ def offer_html(record, request_row):
     <p><strong>{escape(validity['offer_validity_message'])}</strong></p>
     <h2>{escape(detail.get('vehicle'))}</h2><p>{escape(detail.get('customer_name'))} · {escape(detail.get('customer_phone'))}\nVIN: {escape(detail.get('vin'))}</p>
     <p>{escape(detail.get('description'))}</p><div class="scroll"><table><thead><tr><th>Tip</th><th>Cod</th><th>Lucrare / piesă</th><th>Cantitate / ore</th><th>Preț unitar DSM (RON, cu TVA)</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
-    <p>Oferta acceptată este preluată din DSM. Prețurile sunt cele citite din ofertă; nu sunt recalculate din catalog. Ultima sincronizare: {escape(record['updated_at'])}</p></main></html>'''
+    <p>Documentul este preluat din DSM. Prețurile sunt cele citite din document; nu sunt recalculate din catalog. Ultima sincronizare: {escape(record['updated_at'])}</p></main></html>'''
